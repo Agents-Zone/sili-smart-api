@@ -155,7 +155,6 @@ const (
 	MsgPaymentWebhookNotConfig   = "payment.webhook_not_configured"
 	MsgPaymentPriceIdNotConfig   = "payment.price_id_not_configured"
 	MsgPaymentCreemNotConfig     = "payment.creem_not_configured"
-	MsgPaymentComplianceRequired = "payment.compliance_required"
 )
 
 // Topup related messages
