@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"sort"
 	"strconv"
@@ -108,12 +109,17 @@ func isResponsesPath(path string) bool {
 	return path == "/v1/responses" || path == "/v1/responses/compact"
 }
 
-// parseRequestMessages 按 path 定协议，把请求体 messages 归一化成 []MsgPart。
-// OpenAI 的 role=tool 标 Kind=tool_result；Claude 包在 user role content 里的
-// tool_result block 也标 Kind=tool_result；首轮全部 request 侧消息按请求原序。
+// parseRequestMessages 按 path 定协议，把请求体消息归一化成 []MsgPart。
+// OpenAI chat/completions 的 role=tool 标 Kind=tool_result；OpenAI Responses 路径
+//（/v1/responses、/v1/responses/compact）解析 input[] 而非 messages（真实 API 无
+// messages 字段）；Claude 包在 user role content 里的 tool_result block 也标
+// Kind=tool_result；首轮全部 request 侧消息按请求原序。
 func parseRequestMessages(path string, body []byte) ([]MsgPart, error) {
 	switch protocolForPath(path) {
 	case openAIProtocol:
+		if isResponsesPath(path) {
+			return parseOpenAIResponsesInput(body)
+		}
 		return parseOpenAIRequestMessages(body)
 	case claudeProtocol:
 		return parseClaudeRequestMessages(body)
@@ -160,6 +166,61 @@ func parseOpenAIRequestMessages(body []byte) ([]MsgPart, error) {
 				continue
 			}
 			parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolCallText(tc.Function.Name, tc.Function.Arguments)})
+		}
+	}
+	return parts, nil
+}
+
+// parseOpenAIResponsesInput 解析 OpenAI Responses API 请求侧 input 字段
+//（/v1/responses 与 /v1/responses/compact）。真实 API 无 messages 字段，请求体为
+// OpenAIResponsesRequest.Input（relaykit/dto/openai_request.go 的 Input json.RawMessage）。
+// input 可为 string（记 user text）或 []any；[]any 元素可为 string（记 user text）
+// 或 {role, content} 对象（content 可为 string 或 block 数组，取文本类 block）；
+// role=tool 标 Kind=tool_result。仅 JSON 反序列化经 common.Unmarshal，json.RawMessage
+// 仅作类型引用。
+func parseOpenAIResponsesInput(body []byte) ([]MsgPart, error) {
+	var req struct {
+		Input json.RawMessage `json:"input"`
+	}
+	if err := common.Unmarshal(body, &req); err != nil {
+		return nil, err
+	}
+	if len(req.Input) == 0 || string(req.Input) == "null" {
+		return []MsgPart{}, nil
+	}
+	var rawInput any
+	if err := common.Unmarshal(req.Input, &rawInput); err != nil {
+		return nil, err
+	}
+	var parts []MsgPart
+	switch in := rawInput.(type) {
+	case string:
+		if in != "" {
+			parts = append(parts, MsgPart{Role: msgRoleUser, Kind: msgKindText, Text: in})
+		}
+	case []any:
+		for _, item := range in {
+			if s, ok := item.(string); ok {
+				if s != "" {
+					parts = append(parts, MsgPart{Role: msgRoleUser, Kind: msgKindText, Text: s})
+				}
+				continue
+			}
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			role, _ := m["role"].(string)
+			if role == msgRoleTool {
+				parts = append(parts, MsgPart{Role: msgRoleTool, Kind: msgKindToolResult, Text: convMessageText(m["content"])})
+				continue
+			}
+			if role == "" {
+				role = msgRoleUser
+			}
+			if text := convMessageText(m["content"]); text != "" {
+				parts = append(parts, MsgPart{Role: role, Kind: msgKindText, Text: text})
+			}
 		}
 	}
 	return parts, nil
@@ -1101,6 +1162,23 @@ func MergeConversation(turns []model.ConversationTurn) []MsgPart {
 	return merged
 }
 
+// resolveUsername 解析写入 conversation_turns 的 username：显式 Username 非空或
+// UserID 无效（<=0）时原样返回；否则经 model.GetUsernameById（带 Redis 缓存）解析
+// 真实用户名。relay 生产路径（TokenAuth）不写 context "username"，middleware 捕获的
+// Username 恒为空串，此回退保证对外接口的 username 为真实用户名。查询失败或查无
+// 用户时保留原值（空串），不 panic、不阻塞写库。在 RecordConversation 的异步
+// goroutine 内调用，不阻塞请求路径。
+func resolveUsername(username string, userID int) string {
+	if username != "" || userID <= 0 {
+		return username
+	}
+	resolved, err := model.GetUsernameById(userID, false)
+	if err != nil || resolved == "" {
+		return username
+	}
+	return resolved
+}
+
 // RecordConversation 异步编排：解析 → 会话识别 → 组装轮次 → 写库。整体在 gopool.Go
 // 异步 goroutine 内执行，闭包只捕获 input 纯值快照（BR5），不阻塞请求。所有字段均
 // 来自这一次请求/响应或 context，无查 logs、无计费运算、无二次更新（BR3）。
@@ -1136,7 +1214,7 @@ func RecordConversation(input ConversationInput) {
 			TokenId:           input.TokenID,
 			TokenName:         input.TokenName,
 			UserId:            input.UserID,
-			Username:          input.Username,
+			Username:          resolveUsername(input.Username, input.UserID),
 			Group:             input.Group,
 			Ip:                input.IP,
 			IsStream:          input.IsStream,

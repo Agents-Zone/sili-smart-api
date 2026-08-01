@@ -62,11 +62,23 @@ func TestParseRequestMessages(t *testing.T) {
 			want: []MsgPart{},
 		},
 		{
-			name: "openai_responses_parses_messages",
+			name: "openai_responses_parses_input",
 			path: "/v1/responses",
-			body: `{"model":"gpt-5","messages":[{"role":"tool","tool_call_id":"call_1","content":"晴"}]}`,
+			body: `{"model":"gpt-5","input":[
+				{"role":"user","content":[{"type":"input_text","text":"北京天气怎么样？"}]},
+				{"role":"tool","call_id":"call_1","content":[{"type":"output_text","text":"晴，25度"}]}
+			]}`,
 			want: []MsgPart{
-				{Role: msgRoleTool, Kind: msgKindToolResult, Text: "晴"},
+				{Role: msgRoleUser, Kind: msgKindText, Text: "北京天气怎么样？"},
+				{Role: msgRoleTool, Kind: msgKindToolResult, Text: "晴，25度"},
+			},
+		},
+		{
+			name: "openai_responses_string_input",
+			path: "/v1/responses/compact",
+			body: `{"model":"gpt-5","input":"hello"}`,
+			want: []MsgPart{
+				{Role: msgRoleUser, Kind: msgKindText, Text: "hello"},
 			},
 		},
 		{
@@ -139,7 +151,8 @@ func TestParseRequestMessages(t *testing.T) {
 }
 
 // TestParseRequestMessagesToolResult 核心断言：OpenAI role=tool 与 Claude
-// tool_result block 均标 Kind=tool_result 且 Role=tool。
+// tool_result block 均标 Kind=tool_result 且 Role=tool；OpenAI Responses 的 input[]
+// 元素 role=tool 同样标 Kind=tool_result。
 func TestParseRequestMessagesToolResult(t *testing.T) {
 	openAI, err := parseRequestMessages("/v1/chat/completions", []byte(`{"messages":[{"role":"tool","content":"晴"}]}`))
 	require.NoError(t, err)
@@ -152,6 +165,13 @@ func TestParseRequestMessagesToolResult(t *testing.T) {
 	require.Len(t, claude, 1)
 	assert.Equal(t, msgRoleTool, claude[0].Role)
 	assert.Equal(t, msgKindToolResult, claude[0].Kind)
+
+	responses, err := parseRequestMessages("/v1/responses", []byte(`{"input":[{"role":"user","content":"问"},{"role":"tool","content":"晴"}]}`))
+	require.NoError(t, err)
+	require.Len(t, responses, 2)
+	assert.Equal(t, msgRoleUser, responses[0].Role)
+	assert.Equal(t, msgRoleTool, responses[1].Role)
+	assert.Equal(t, msgKindToolResult, responses[1].Kind)
 }
 
 // TestParseRequestMessagesError 非法 JSON 返回 error；空 body 返回 error。
@@ -1113,4 +1133,24 @@ func TestRecordConversationWriteFailureLogs(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return strings.Contains(logBuffer.String(), "[SYS]")
 	}, 3*time.Second, 10*time.Millisecond, "写库失败必须经 SysError 记录")
+}
+
+// TestResolveUsername 核心断言（Important #2）：Username 显式非空或 UserID 无效时
+// 原样返回；Username 为空且 UserID 有效时经 model.GetUsernameById 回退解析真实用户名；
+// 查无用户或查询失败时保留原值（空串），不 panic。
+func TestResolveUsername(t *testing.T) {
+	setupServiceConversationTestDB(t)
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = false
+	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
+
+	// GetUsernameById 走 model.DB（主库）查 users 表，User 结构体含软删除字段，
+	// 查询自动带 deleted_at IS NULL 条件，表需含该列。
+	require.NoError(t, model.DB.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, deleted_at DATETIME)`).Error)
+	require.NoError(t, model.DB.Exec(`INSERT INTO users (id, username) VALUES (3, 'real_user')`).Error)
+
+	assert.Equal(t, "explicit_user", resolveUsername("explicit_user", 3), "显式用户名非空时原样返回，不查询 DB")
+	assert.Equal(t, "real_user", resolveUsername("", 3), "Username 为空且 UserID 有效时回退解析真实用户名")
+	assert.Equal(t, "", resolveUsername("", 0), "UserID 无效（<=0）时保留原值")
+	assert.Equal(t, "", resolveUsername("", 99), "查无用户名时保留原值（空串）")
 }

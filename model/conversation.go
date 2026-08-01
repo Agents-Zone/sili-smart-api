@@ -108,8 +108,11 @@ PARTITION BY toYYYYMM(toDateTime(created_at))
 ORDER BY (session_key, created_at, request_id)%s`, logGroupCol, clickHouseLogTTLClause(ttlDays))
 }
 
-// assignTurnIds 仿 assignDisplayLogIds，从 startIdx 起按序回填展示用 Id（ClickHouse 无自增）。
-func assignTurnIds(turns []*ConversationTurn, startIdx int) {
+// assignTurnIds 仿 assignDisplayLogIds，从 startIdx 起按序回填展示用 Id
+//（ClickHouse 无自增，id 列恒为 0）。turns 为值切片，通过共享底层数组回填元素，
+// 调用方可见。由 GetConversationTurns 查询侧以 startIdx=0 对全量行回填，使详情
+// turns 的 id 为会话内连续序号。
+func assignTurnIds(turns []ConversationTurn, startIdx int) {
 	for i := range turns {
 		turns[i].Id = int64(startIdx + i + 1)
 	}
@@ -174,8 +177,10 @@ func ListConversations(params *ConversationQueryParams, page, pageSize int) ([]C
 
 // GetConversationTurns 按 created_at, request_id 升序取行。
 // Messages 保持原始 JSON 字符串，解码在 service 层（model 不依赖 service 类型）。
+// 取行后按序回填展示用 Id（ClickHouse 无自增，从 1 起会话内连续编号）。
 func GetConversationTurns(sessionKey string) ([]ConversationTurn, error) {
 	var turns []ConversationTurn
 	err := LOG_DB.Table("conversation_turns").Where("session_key = ?", sessionKey).Order("created_at asc, request_id asc").Find(&turns).Error
+	assignTurnIds(turns, 0)
 	return turns, err
 }

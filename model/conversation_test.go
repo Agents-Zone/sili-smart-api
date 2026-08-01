@@ -37,7 +37,7 @@ func TestConversationTurnCreateTableSQL(t *testing.T) {
 }
 
 func TestAssignTurnIds(t *testing.T) {
-	turns := []*ConversationTurn{{}, {}, {}}
+	turns := []ConversationTurn{{}, {}, {}}
 
 	assignTurnIds(turns, 0)
 	assert.Equal(t, []int64{1, 2, 3}, []int64{turns[0].Id, turns[1].Id, turns[2].Id})
@@ -46,7 +46,7 @@ func TestAssignTurnIds(t *testing.T) {
 	assert.Equal(t, []int64{21, 22, 23}, []int64{turns[0].Id, turns[1].Id, turns[2].Id})
 
 	assert.NotPanics(t, func() { assignTurnIds(nil, 0) })
-	assert.NotPanics(t, func() { assignTurnIds([]*ConversationTurn{}, 0) })
+	assert.NotPanics(t, func() { assignTurnIds([]ConversationTurn{}, 0) })
 }
 
 func TestConversationTurnTTLDays(t *testing.T) {
