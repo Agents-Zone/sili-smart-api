@@ -25,6 +25,22 @@
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
+# 执行原生命令（docker 等）并返回其退出码。
+# 必须临时关闭 Stop：docker 等原生命令把诊断信息写 stderr（如镜像不存在时的
+# "No such image"），在 ErrorActionPreference=Stop 下会被当成终止错误抛出，
+# 使后续 $LASTEXITCODE 判断无法执行。故此处切到 Continue，由调用方按返回码判定。
+function Invoke-Native {
+    param([Parameter(Mandatory)][scriptblock]$Command)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Command
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
 $tag = 'sili-' + (Get-Date -Format 'yyyyMMdd')
 $tagSuffix = $tag.Substring('sili-'.Length)   # 20260801，用于 tar 命名
 $releaseDir = 'release'
@@ -37,18 +53,16 @@ try {
     [System.IO.File]::WriteAllText("$PSScriptRoot\VERSION", $tag, $utf8NoBom)
 
     # 本地若已有同 tag 镜像，先删除，避免 build 后旧镜像变 dangling
-    docker image inspect "sili/sili-smart-trace:$tag" *> $null
-    if ($LASTEXITCODE -eq 0) {
+    if ((Invoke-Native { docker image inspect "sili/sili-smart-trace:$tag" *> $null }) -eq 0) {
         Write-Host ">> 本地已有 sili/sili-smart-trace:$tag，先删除"
-        docker rmi "sili/sili-smart-trace:$tag" *> $null
-        if ($LASTEXITCODE -ne 0) {
+        if ((Invoke-Native { docker rmi "sili/sili-smart-trace:$tag" *> $null }) -ne 0) {
             Write-Host "  （删除失败，可能有容器占用；build 后旧镜像将变 dangling）"
         }
     }
 
     Write-Host ">> 构建镜像 sili/sili-smart-trace:$tag"
-    docker build -t "sili/sili-smart-trace:$tag" .
-    if ($LASTEXITCODE -ne 0) { throw "docker build 失败（退出码 $LASTEXITCODE）" }
+    $buildCode = Invoke-Native { docker build -t "sili/sili-smart-trace:$tag" . }
+    if ($buildCode -ne 0) { throw "docker build 失败（退出码 $buildCode）" }
 
     Write-Host ">> 同步 TAG 到 .env（供本地开发引用）"
     [System.IO.File]::WriteAllText("$PSScriptRoot\.env", "TAG=$tag`n", $utf8NoBom)
@@ -61,8 +75,8 @@ try {
     Write-Host ">> 导出镜像到 $releaseDir/"
     New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
     $tarName = "sili-smart-trace-$tagSuffix.tar"
-    docker save "sili/sili-smart-trace:$tag" -o (Join-Path $releaseDir $tarName)
-    if ($LASTEXITCODE -ne 0) { throw "docker save 失败（退出码 $LASTEXITCODE）" }
+    $saveCode = Invoke-Native { docker save "sili/sili-smart-trace:$tag" -o (Join-Path $releaseDir $tarName) }
+    if ($saveCode -ne 0) { throw "docker save 失败（退出码 $saveCode）" }
 
     Write-Host ''
     Write-Host '✓ 完成。'
