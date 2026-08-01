@@ -40,6 +40,17 @@ func TestParseRequestMessages(t *testing.T) {
 			},
 		},
 		{
+			name: "openai_assistant_content_and_tool_calls",
+			path: "/v1/chat/completions",
+			body: `{"model":"gpt-4o","messages":[
+				{"role":"assistant","content":"让我查一下","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"北京\"}"}}]}
+			]}`,
+			want: []MsgPart{
+				{Role: msgRoleAssistant, Kind: msgKindText, Text: "让我查一下"},
+				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
+			},
+		},
+		{
 			name: "openai_completions_no_messages",
 			path: "/v1/completions",
 			body: `{"model":"gpt-3.5-turbo","prompt":"hello"}`,

@@ -111,14 +111,14 @@ func parseOpenAIRequestMessages(body []byte) ([]MsgPart, error) {
 			parts = append(parts, MsgPart{Role: msgRoleTool, Kind: msgKindToolResult, Text: convMessageText(m.Content)})
 			continue
 		}
+		if text := convMessageText(m.Content); text != "" {
+			parts = append(parts, MsgPart{Role: m.Role, Kind: msgKindText, Text: text})
+		}
 		for _, tc := range m.ToolCalls {
 			if tc.Function.Name == "" {
 				continue
 			}
 			parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolCallText(tc.Function.Name, tc.Function.Arguments)})
-		}
-		if text := convMessageText(m.Content); text != "" {
-			parts = append(parts, MsgPart{Role: m.Role, Kind: msgKindText, Text: text})
 		}
 	}
 	return parts, nil
