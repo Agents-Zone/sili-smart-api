@@ -1015,5 +1015,16 @@ func resolveSessionKey(tokenID int, requestParts []MsgPart) (sessionKey string, 
 		common.SysError("conversation session cache: Redis runtime error on re-get: " + err.Error())
 		return sessionKey, true
 	}
+	// 重读落空（redis.Nil 或空串）：胜出方 key 恰已过期。补一次 SetNX 抢占把本地
+	// sessionKey 落盘，避免返回从未写入 Redis 的幽灵会话，保证下一轮续得上。
+	ok, err = redisSetNX(key, sessionKey, convSessionCacheTTL)
+	if err != nil {
+		common.SysError("conversation session cache: Redis runtime error on retry set nx: " + err.Error())
+		return sessionKey, true
+	}
+	if ok {
+		return sessionKey, true
+	}
+	// 重试 SetNX 仍被并发方抢占：窗口极窄，属启发式容忍范围，按新会话回退。
 	return sessionKey, true
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/alicebob/miniredis/v2"
+	"github.com/alicebob/miniredis/v2/server"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
@@ -695,6 +696,39 @@ func TestResolveSessionKeyRedisRuntimeErrorFallback(t *testing.T) {
 	assert.NotEmpty(t, sk)
 	assert.True(t, isNew, "Redis 运行期故障必须按新会话回退")
 	assert.Contains(t, logBuffer.String(), "Redis runtime error", "运行期故障必须 SysError 记录")
+}
+
+// TestResolveSessionKeyRedisGhostRaceRetry 用 miniredis 命令前置 hook 确定性模拟
+// SetNX 失败且重读落空（胜出方 key 恰已过期）的极端竞态：重读落空后必须重试 SetNX
+// 把本地 sessionKey 落盘，返回的 sessionKey 不得是未写入 Redis 的幽灵值。
+func TestResolveSessionKeyRedisGhostRaceRetry(t *testing.T) {
+	mr := useIndependentSessionRedis(t)
+	parts := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "重试抢占"}}
+	key := convSessionCachePrefix + "5:" + prefixHash(5, parts)
+
+	// 命令分发前置 hook：第一次 SetNX 前写入并发胜出方值（令 SetNX 失败），第二次
+	// GET（重读）前删除该值（令重读返回 redis.Nil），重试 SetNX 不做干预让其自然成功。
+	srv := mr.Server()
+	hookCount := 0
+	srv.SetPreHook(func(c *server.Peer, cmd string, args ...string) bool {
+		if len(args) == 0 || args[0] != key {
+			return false
+		}
+		hookCount++
+		switch {
+		case cmd == "SET" && hookCount == 2:
+			_ = mr.Set(key, "winner-sk")
+		case cmd == "GET" && hookCount == 3:
+			_ = mr.Del(key)
+		}
+		return false
+	})
+	t.Cleanup(func() { srv.SetPreHook(nil) })
+
+	sk, isNew := resolveSessionKey(5, parts)
+	assert.True(t, isNew, "SetNX 失败且重读落空，经重试后仍应判定为新会话")
+	assert.NotEmpty(t, sk)
+	assert.Equal(t, sk, mustGetServer(t, mr, key), "重试必须把本地 sessionKey 落盘，杜绝幽灵会话")
 }
 
 // TestRedisSetNXAndExpire redisSetNX 为 SET NX EX 原子抢占（已存在则失败不改值），
