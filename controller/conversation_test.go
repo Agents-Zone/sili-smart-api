@@ -23,6 +23,12 @@ import (
 func setupConversationControllerTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
+	// 快照包级全局并在 cleanup 恢复，消除包内测试顺序依赖（沿用
+	// user_manage_test.go setupManageUserTestDB 的快照恢复模式）。
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	previousRedisEnabled := common.RedisEnabled
+	previousMainDatabaseType, previousLogDatabaseType := common.MainDatabaseType(), common.LogDatabaseType()
+
 	gin.SetMode(gin.TestMode)
 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 	common.RedisEnabled = false
@@ -36,6 +42,9 @@ func setupConversationControllerTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, db.AutoMigrate(&model.ConversationTurn{}))
 
 	t.Cleanup(func() {
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+		common.RedisEnabled = previousRedisEnabled
+		common.SetDatabaseTypes(previousMainDatabaseType, previousLogDatabaseType)
 		sqlDB, err := db.DB()
 		if err == nil {
 			_ = sqlDB.Close()
@@ -173,6 +182,7 @@ func TestGetConversationReturnsSessionTurnsAndMergedMessages(t *testing.T) {
 	require.Equal(t, "test-user", session["username"])
 	require.Equal(t, float64(7), session["user_id"])
 	require.Equal(t, "gpt-4o", session["model_name"])
+	require.Equal(t, "conv-test-1", session["session_key"])
 	require.Equal(t, float64(1000), session["first_turn_time"])
 	require.Equal(t, float64(1002), session["last_turn_time"])
 	require.Equal(t, float64(3), session["turn_count"])
@@ -246,6 +256,62 @@ func TestGetConversationPageBeyondAvailableTurns(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Params = gin.Params{{Key: "session_key", Value: "conv-short"}}
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/conv-short?p=5&page_size=10", nil)
+
+	GetConversation(ctx)
+
+	var payload conversationDetailPayload
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.True(t, payload.Success)
+	require.Empty(t, payload.Data.Turns)
+	require.Empty(t, payload.Data.Messages)
+	require.Equal(t, float64(3), payload.Data.Session["turn_count"])
+	require.Equal(t, false, payload.Data.Session["truncated"])
+}
+
+func TestListConversationsRejectsNonNumericTimestamp(t *testing.T) {
+	setupConversationControllerTestDB(t)
+
+	for _, query := range []string{
+		"/api/conversation/?start_timestamp=abc",
+		"/api/conversation/?end_timestamp=abc",
+	} {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodGet, query, nil)
+
+		ListConversations(ctx)
+
+		var payload conversationErrorPayload
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+		require.False(t, payload.Success)
+		require.Equal(t, "Invalid parameters", payload.Message)
+	}
+}
+
+func TestListConversationsAbsentTimestampDoesNotReject(t *testing.T) {
+	setupConversationControllerTestDB(t)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/", nil)
+
+	ListConversations(ctx)
+
+	// 缺席时间戳须按「不设过滤」处理，不能在解析阶段被 400 拒绝；后续 DB 查询
+	// 依赖 ClickHouse 的 any() 聚合，SQLite 夹具无法跑通，故只断言未返回参数非法。
+	var payload conversationErrorPayload
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.NotEqual(t, "Invalid parameters", payload.Message)
+}
+
+func TestGetConversationHugePageClamped(t *testing.T) {
+	db := setupConversationControllerTestDB(t)
+	insertConversationTurns(t, db, "conv-huge-page", 3)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "session_key", Value: "conv-huge-page"}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/conv-huge-page?p=999999999999999999999", nil)
 
 	GetConversation(ctx)
 
