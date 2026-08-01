@@ -505,18 +505,7 @@ func parseOpenAIChatStream(respBytes []byte) []MsgPart {
 			acc.args += tc.Function.Arguments
 		}
 	}
-	parts := make([]MsgPart, 0, len(toolCalls)+1)
-	if text := strings.Join(textParts, ""); text != "" {
-		parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindText, Text: text})
-	}
-	for _, idx := range sortedToolCallIndexes(toolCalls) {
-		tc := toolCalls[idx]
-		if tc.name == "" && tc.args == "" {
-			continue
-		}
-		parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: tc.name + "(" + tc.args + ")"})
-	}
-	return parts
+	return assembleStreamParts(textParts, toolCalls)
 }
 
 // convResponsesStreamEvent OpenAI Responses 流式事件。
@@ -561,18 +550,7 @@ func parseOpenAIResponsesStream(respBytes []byte) []MsgPart {
 			}
 		}
 	}
-	parts := make([]MsgPart, 0, len(toolCalls)+1)
-	if text := strings.Join(textParts, ""); text != "" {
-		parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindText, Text: text})
-	}
-	for _, idx := range sortedToolCallIndexes(toolCalls) {
-		tc := toolCalls[idx]
-		if tc.name == "" && tc.args == "" {
-			continue
-		}
-		parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: tc.name + "(" + tc.args + ")"})
-	}
-	return parts
+	return assembleStreamParts(textParts, toolCalls)
 }
 
 // convClaudeStreamEvent Claude 流式事件。
@@ -621,18 +599,7 @@ func parseClaudeStream(respBytes []byte) []MsgPart {
 			}
 		}
 	}
-	parts := make([]MsgPart, 0, len(toolCalls)+1)
-	if text := strings.Join(textParts, ""); text != "" {
-		parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindText, Text: text})
-	}
-	for _, idx := range sortedToolCallIndexes(toolCalls) {
-		tc := toolCalls[idx]
-		if tc.name == "" && tc.args == "" {
-			continue
-		}
-		parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: tc.name + "(" + tc.args + ")"})
-	}
-	return parts
+	return assembleStreamParts(textParts, toolCalls)
 }
 
 // parseGeminiStreamOrNonStream Gemini 非流式与流式均为
@@ -686,6 +653,23 @@ func sortedToolCallIndexes(toolCalls map[int]*accumToolCall) []int {
 	}
 	sort.Ints(indexes)
 	return indexes
+}
+
+// assembleStreamParts 组装流式输出：join textParts 得到文本段，再按 index 升序
+// 追加工具调用段（跳过空文本与空工具调用）。
+func assembleStreamParts(textParts []string, toolCalls map[int]*accumToolCall) []MsgPart {
+	parts := make([]MsgPart, 0, len(toolCalls)+1)
+	if text := strings.Join(textParts, ""); text != "" {
+		parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindText, Text: text})
+	}
+	for _, idx := range sortedToolCallIndexes(toolCalls) {
+		tc := toolCalls[idx]
+		if tc.name == "" && tc.args == "" {
+			continue
+		}
+		parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: tc.name + "(" + tc.args + ")"})
+	}
+	return parts
 }
 
 // sseDataLines 把流式响应体按行拆分，跳过 event: 行与 [DONE]，剥掉 data: 前缀，
