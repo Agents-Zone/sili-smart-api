@@ -15,7 +15,8 @@
     同一天多次构建会覆盖同一 tag；如需区分同日多次构建，把 yyyyMMdd 改成 yyyyMMdd-HHmm。
 .NOTES
     运行（PowerShell 7 推荐）：pwsh .\docker-build.ps1
-    Windows PowerShell 5.1：.\docker-build.ps1
+    Windows PowerShell 5.1（默认 Restricted 禁止脚本，直接运行会被拦）：
+      powershell -ExecutionPolicy Bypass -File .\docker-build.ps1
     若遇执行策略限制：pwsh -ExecutionPolicy Bypass -File .\docker-build.ps1
 #>
 
