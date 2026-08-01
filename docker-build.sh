@@ -29,6 +29,13 @@ trap 'printf "" > VERSION' EXIT
 echo ">> 写入 VERSION=$TAG"
 echo "$TAG" > VERSION
 
+# 本地若已有同 tag 镜像，先删除，避免 build 后旧镜像变 dangling
+if docker image inspect "sili/sili-smart-trace:${TAG}" >/dev/null 2>&1; then
+  echo ">> 本地已有 sili/sili-smart-trace:${TAG}，先删除"
+  docker rmi "sili/sili-smart-trace:${TAG}" >/dev/null 2>&1 \
+    || echo "  （删除失败，可能有容器占用；build 后旧镜像将变 dangling）"
+fi
+
 echo ">> 构建镜像 sili/sili-smart-trace:${TAG}"
 docker build -t "sili/sili-smart-trace:${TAG}" .
 

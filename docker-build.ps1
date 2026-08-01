@@ -36,6 +36,16 @@ try {
     Write-Host ">> 写入 VERSION=$tag"
     [System.IO.File]::WriteAllText("$PSScriptRoot\VERSION", $tag, $utf8NoBom)
 
+    # 本地若已有同 tag 镜像，先删除，避免 build 后旧镜像变 dangling
+    docker image inspect "sili/sili-smart-trace:$tag" *> $null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host ">> 本地已有 sili/sili-smart-trace:$tag，先删除"
+        docker rmi "sili/sili-smart-trace:$tag" *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  （删除失败，可能有容器占用；build 后旧镜像将变 dangling）"
+        }
+    }
+
     Write-Host ">> 构建镜像 sili/sili-smart-trace:$tag"
     docker build -t "sili/sili-smart-trace:$tag" .
     if ($LASTEXITCODE -ne 0) { throw "docker build 失败（退出码 $LASTEXITCODE）" }
