@@ -43,5 +43,7 @@ service/openaicompat/chat_responses_live_local_test.go
 go.work
 go.work.sum
 
-# 离线交付产物（镜像 tar 与固化 compose）
+# 构建生成的固化解（image tag 已写死，不入库）
+/docker-compose-clickhouse.yml
+# 离线交付镜像 tar
 /release/
