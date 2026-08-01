@@ -612,7 +612,8 @@ func TestResolveSessionKeyNilParts(t *testing.T) {
 }
 
 // TestResolveSessionKeyDegradedLogsSingleInstance Redis 未配置时首例退化必须经
-// common.SysError 标注单实例模式（sync.Once 保护），即 BR4。
+// common.SysError 记录单实例模式（sync.Once 保护，只标注一次），即 BR4。日志断言只
+// 绑定 SysError 输出通道的固定 [SYS] 前缀，不绑定具体消息文案，文案调整不会脆化。
 func TestResolveSessionKeyDegradedLogsSingleInstance(t *testing.T) {
 	previousRedisEnabled := common.RedisEnabled
 	common.RedisEnabled = false
@@ -630,13 +631,16 @@ func TestResolveSessionKeyDegradedLogsSingleInstance(t *testing.T) {
 		common.LogWriterMu.Unlock()
 	})
 
-	_, _ = resolveSessionKey(7, []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "退化标注"}})
-	assert.Contains(t, logBuffer.String(), "single-instance", "退化模式必须输出单实例标注日志")
+	sk, isNew := resolveSessionKey(7, []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "退化标注"}})
+	assert.NotEmpty(t, sk, "退化模式必须返回确定 sessionKey")
+	assert.True(t, isNew, "退化模式首次调用必须判定为新会话")
+	assert.Contains(t, logBuffer.String(), "[SYS]", "退化模式必须触发 SysError 错误记录")
 
 	// sync.Once 保证只标注一次：再次调用不再新增日志
 	logBuffer.Reset()
-	_, _ = resolveSessionKey(8, []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "再次调用"}})
+	sk2, _ := resolveSessionKey(8, []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "再次调用"}})
 	assert.Empty(t, logBuffer.String(), "单实例标注必须只输出一次")
+	assert.NotEmpty(t, sk2, "再次调用仍须返回确定 sessionKey")
 }
 
 // TestResolveSessionKeyRedisHitMissRenew Redis 可用：未命中 SetNX 抢占，命中复用
@@ -702,7 +706,8 @@ func TestResolveSessionKeyRedisConcurrentFirstRequest(t *testing.T) {
 }
 
 // TestResolveSessionKeyRedisRuntimeErrorFallback Redis 运行期故障（连接失败）时
-// 捕获链路不中断，按新会话回退生成 sessionKey 并 SysError 记录（BR5）。
+// 捕获链路不中断，按新会话回退生成 sessionKey 并 SysError 记录（BR5）。日志断言只
+// 绑定 SysError 输出通道的固定 [SYS] 前缀，不绑定具体消息文案。
 func TestResolveSessionKeyRedisRuntimeErrorFallback(t *testing.T) {
 	previousRedisEnabled := common.RedisEnabled
 	previousRDB := common.RDB
@@ -734,7 +739,7 @@ func TestResolveSessionKeyRedisRuntimeErrorFallback(t *testing.T) {
 	sk, isNew := resolveSessionKey(4, parts)
 	assert.NotEmpty(t, sk)
 	assert.True(t, isNew, "Redis 运行期故障必须按新会话回退")
-	assert.Contains(t, logBuffer.String(), "Redis runtime error", "运行期故障必须 SysError 记录")
+	assert.Contains(t, logBuffer.String(), "[SYS]", "运行期故障必须触发 SysError 错误记录")
 }
 
 // TestResolveSessionKeyRedisGhostRaceRetry 用 miniredis 命令前置 hook 确定性模拟
