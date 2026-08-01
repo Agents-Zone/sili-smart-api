@@ -1145,8 +1145,8 @@ func RecordConversation(input ConversationInput) {
 			PromptTokens:      promptTokens,
 			CompletionTokens:  completionTokens,
 		}
-		if err := model.RecordConversationTurn(turn); err != nil {
-			common.SysLog("conversation: failed to record turn: " + err.Error())
-		}
+		// 写库失败由 model.RecordConversationTurn 内部 common.SysError 记录
+		// （model/conversation.go），此处不再重复 SysLog，避免同一失败产生两条日志。
+		model.RecordConversationTurn(turn)
 	})
 }

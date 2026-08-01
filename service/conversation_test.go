@@ -1064,20 +1064,40 @@ func TestRecordConversationParseFailureStillRecords(t *testing.T) {
 	assert.Equal(t, "x", parts[0].Text)
 }
 
-// TestRecordConversationWriteFailureLogs 集成断言：写库失败经 common.SysLog 记录，
-// 不 panic。日志断言只绑定 [SYS] 前缀，不绑定具体文案。
+// lockedBuffer 为并发安全的日志缓冲：异步 goroutine 经 gin.DefaultWriter/
+// DefaultErrorWriter 写入，测试轮询 String() 读取，两者共用同一把锁，避免
+// bytes.Buffer 在读写并发下的 data race。
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (lb *lockedBuffer) Write(p []byte) (int, error) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.b.Write(p)
+}
+
+func (lb *lockedBuffer) String() string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.b.String()
+}
+
+// TestRecordConversationWriteFailureLogs 集成断言：写库失败经 model 层 common.SysError
+// 记录，不 panic。日志断言只绑定 [SYS] 前缀，不绑定具体文案。
 func TestRecordConversationWriteFailureLogs(t *testing.T) {
 	setupServiceConversationTestDB(t)
 	require.NoError(t, model.LOG_DB.Exec("DROP TABLE conversation_turns").Error)
 
-	var logBuffer bytes.Buffer
+	logBuffer := &lockedBuffer{}
 	common.LogWriterMu.Lock()
-	previousWriter := gin.DefaultWriter
-	gin.DefaultWriter = &logBuffer
+	previousWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = logBuffer
 	common.LogWriterMu.Unlock()
 	t.Cleanup(func() {
 		common.LogWriterMu.Lock()
-		gin.DefaultWriter = previousWriter
+		gin.DefaultErrorWriter = previousWriter
 		common.LogWriterMu.Unlock()
 	})
 
@@ -1092,5 +1112,5 @@ func TestRecordConversationWriteFailureLogs(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return strings.Contains(logBuffer.String(), "[SYS]")
-	}, 3*time.Second, 10*time.Millisecond, "写库失败必须经 SysLog 记录")
+	}, 3*time.Second, 10*time.Millisecond, "写库失败必须经 SysError 记录")
 }
