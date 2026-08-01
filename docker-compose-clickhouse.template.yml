@@ -12,7 +12,7 @@
 # ⚠️ 生产部署请修改所有默认密码（postgres / redis / clickhouse）。
 
 services:
-  new-api:
+  sili-smart-trace:
     image: sili/sili-smart-trace:${TAG:-local}
     container_name: sili-smart-trace
     restart: always
