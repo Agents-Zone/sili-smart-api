@@ -303,6 +303,10 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			logRoute.GET("/token", middleware.TokenAuthReadOnly(), controller.GetLogByKey)
 		}
+		conversationRoute := apiRouter.Group("/conversation")
+		conversationRoute.Use(middleware.AdminAuth())
+		conversationRoute.GET("/", controller.ListConversations)
+		conversationRoute.GET("/:session_key", controller.GetConversation)
 		groupRoute := apiRouter.Group("/group")
 		groupRoute.Use(middleware.AdminAuth())
 		{
