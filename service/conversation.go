@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/go-redis/redis/v8"
 )
 
@@ -23,6 +25,37 @@ type MsgPart struct {
 	Role string `json:"role"`
 	Kind string `json:"kind"`
 	Text string `json:"text"`
+}
+
+// ConversationInput 是一次请求/响应的纯值快照，middleware 同步段构造，
+// 经 gopool.Go 传入 RecordConversation。字段全部来自这一次请求/响应或 context，
+// 不查 logs、不做计费运算。Path/RawRequestBody/RawResponseBody 为解析输入，
+// SessionKey/TurnKind/Messages/PromptTokens/CompletionTokens 由 RecordConversation
+// 内部经会话识别、协议解析与 usage 解析重新得出并写入轮次。
+type ConversationInput struct {
+	SessionKey        string
+	RequestID         string
+	CreatedAt         int64
+	Messages          []MsgPart // 由 RecordConversation 内部解析后填充
+	TurnKind          string
+	Truncated         int64
+	ModelName         string
+	ChannelID         int
+	TokenID           int
+	TokenName         string
+	UserID            int
+	Username          string
+	Group             string
+	IP                string
+	UseTime           int64
+	IsStream          bool
+	UpstreamRequestID string
+	PromptTokens      int
+	CompletionTokens  int
+	// 解析输入（middleware 同步段捕获的原始数据）
+	Path            string
+	RawRequestBody  []byte
+	RawResponseBody []byte
 }
 
 // 消息片段 kind 常量。
@@ -38,6 +71,14 @@ const (
 	msgRoleAssistant = "assistant"
 	msgRoleTool      = "tool"
 	msgRoleSystem    = "system"
+)
+
+// 轮次类型（turn_kind）枚举（BR1）：first 新建会话首轮 / normal 常规轮 /
+// tool_round 含工具调用轮（优先于 first/normal）。
+const (
+	turnKindFirst     = "first"
+	turnKindNormal    = "normal"
+	turnKindToolRound = "tool_round"
 )
 
 // 协议判定常量，T3/T4 复用同一协议判定逻辑。
@@ -1027,4 +1068,85 @@ func resolveSessionKey(tokenID int, requestParts []MsgPart) (sessionKey string, 
 	}
 	// 重试 SetNX 仍被并发方抢占：窗口极窄，属启发式容忍范围，按新会话回退。
 	return sessionKey, true
+}
+
+// turnKindFor 判定轮次类型（BR1）：parts（request 侧 + assistant 侧）含 Kind=tool_use
+// 或 Kind=tool_result 时记 tool_round（优先级最高）；否则 isNew=true 记 first；
+// 否则记 normal。
+func turnKindFor(parts []MsgPart, isNew bool) string {
+	for _, p := range parts {
+		if p.Kind == msgKindToolUse || p.Kind == msgKindToolResult {
+			return turnKindToolRound
+		}
+	}
+	if isNew {
+		return turnKindFirst
+	}
+	return turnKindNormal
+}
+
+// MergeConversation 按传入顺序逐行 append 每行 messages 列，得到完整 []MsgPart 序列。
+// 轮次顺序由查询侧按 created_at, request_id 升序取行（写入路径不维护 turn_seq，
+// BR4）；解码失败的行记空并 common.SysLog 记录，不中断拼接。
+func MergeConversation(turns []model.ConversationTurn) []MsgPart {
+	merged := make([]MsgPart, 0, len(turns)*2)
+	for i := range turns {
+		var parts []MsgPart
+		if err := common.Unmarshal([]byte(turns[i].Messages), &parts); err != nil {
+			common.SysLog("conversation: skip invalid messages row: " + err.Error())
+			continue
+		}
+		merged = append(merged, parts...)
+	}
+	return merged
+}
+
+// RecordConversation 异步编排：解析 → 会话识别 → 组装轮次 → 写库。整体在 gopool.Go
+// 异步 goroutine 内执行，闭包只捕获 input 纯值快照（BR5），不阻塞请求。所有字段均
+// 来自这一次请求/响应或 context，无查 logs、无计费运算、无二次更新（BR3）。
+// messages 单列按「请求侧增量在前、响应侧在后」存本轮完整序列，元素带 role/kind
+// （BR2）。首次建表由 middleware 触发（T5），此处不重复建表。
+func RecordConversation(input ConversationInput) {
+	gopool.Go(func() {
+		requestParts, reqErr := parseRequestMessages(input.Path, input.RawRequestBody)
+		if reqErr != nil {
+			requestParts = []MsgPart{}
+			common.SysLog("conversation: failed to parse request messages: " + reqErr.Error())
+		}
+		assistantParts := parseAssistantContent(input.Path, input.IsStream, input.RawResponseBody)
+		promptTokens, completionTokens := parseUsage(input.Path, input.IsStream, input.RawResponseBody)
+		sessionKey, isNew := resolveSessionKey(input.TokenID, requestParts)
+
+		joinedParts := append(requestParts, assistantParts...)
+		messagesJSON, err := common.Marshal(joinedParts)
+		if err != nil {
+			common.SysLog("conversation: failed to marshal messages: " + err.Error())
+			return
+		}
+
+		turn := &model.ConversationTurn{
+			SessionKey:        sessionKey,
+			RequestId:         input.RequestID,
+			CreatedAt:         input.CreatedAt,
+			Messages:          string(messagesJSON),
+			TurnKind:          turnKindFor(joinedParts, isNew),
+			Truncated:         input.Truncated,
+			ModelName:         input.ModelName,
+			ChannelId:         input.ChannelID,
+			TokenId:           input.TokenID,
+			TokenName:         input.TokenName,
+			UserId:            input.UserID,
+			Username:          input.Username,
+			Group:             input.Group,
+			Ip:                input.IP,
+			IsStream:          input.IsStream,
+			UseTime:           int(input.UseTime),
+			UpstreamRequestId: input.UpstreamRequestID,
+			PromptTokens:      promptTokens,
+			CompletionTokens:  completionTokens,
+		}
+		if err := model.RecordConversationTurn(turn); err != nil {
+			common.SysLog("conversation: failed to record turn: " + err.Error())
+		}
+	})
 }

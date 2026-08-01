@@ -2,17 +2,21 @@ package service
 
 import (
 	"bytes"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/alicebob/miniredis/v2/server"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // TestParseRequestMessages 三协议请求 messages 归一化：OpenAI role=tool、
@@ -804,4 +808,289 @@ func mustGetServer(t *testing.T, server *miniredis.Miniredis, key string) string
 	val, err := server.Get(key)
 	require.NoError(t, err)
 	return val
+}
+
+// TestTurnKindFor 核心断言（BR1）：含 tool_use/tool_result 记 tool_round（优先级最高），
+// 无工具且 isNew=true 记 first，无工具且 isNew=false 记 normal。
+func TestTurnKindFor(t *testing.T) {
+	t.Run("tool_use_wins_over_first_and_normal", func(t *testing.T) {
+		toolParts := []MsgPart{{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`}}
+		assert.Equal(t, turnKindToolRound, turnKindFor(toolParts, true), "含 tool_use 且新会话记 tool_round（工具优先）")
+		assert.Equal(t, turnKindToolRound, turnKindFor(toolParts, false), "含 tool_use 且非新会话记 tool_round（工具优先）")
+	})
+
+	t.Run("tool_result_also_tool_round", func(t *testing.T) {
+		resultParts := []MsgPart{{Role: msgRoleTool, Kind: msgKindToolResult, Text: "晴，25度"}}
+		assert.Equal(t, turnKindToolRound, turnKindFor(resultParts, true), "含 tool_result 且新会话记 tool_round")
+		assert.Equal(t, turnKindToolRound, turnKindFor(resultParts, false), "含 tool_result 且非新会话记 tool_round")
+	})
+
+	t.Run("mixed_text_and_tool", func(t *testing.T) {
+		mixed := []MsgPart{
+			{Role: msgRoleUser, Kind: msgKindText, Text: "查天气"},
+			{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: "get_weather()"},
+		}
+		assert.Equal(t, turnKindToolRound, turnKindFor(mixed, true), "文本与工具混合仍记 tool_round")
+	})
+
+	t.Run("no_tool_first_or_normal", func(t *testing.T) {
+		pureText := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "你好"}}
+		assert.Equal(t, turnKindFirst, turnKindFor(pureText, true), "无工具且新会话记 first")
+		assert.Equal(t, turnKindNormal, turnKindFor(pureText, false), "无工具且非新会话记 normal")
+	})
+
+	t.Run("empty_parts", func(t *testing.T) {
+		assert.Equal(t, turnKindFirst, turnKindFor(nil, true), "空 parts 且新会话记 first")
+		assert.Equal(t, turnKindNormal, turnKindFor(nil, false), "空 parts 且非新会话记 normal")
+		assert.Equal(t, turnKindFirst, turnKindFor([]MsgPart{}, true), "空切片且新会话记 first")
+		assert.Equal(t, turnKindNormal, turnKindFor([]MsgPart{}, false), "空切片且非新会话记 normal")
+	})
+}
+
+// TestMergeConversation 核心断言（BR4）：按传入顺序逐行 append messages 列得到
+// 完整 []MsgPart 序列，元素带 role/kind。
+func TestMergeConversation(t *testing.T) {
+	turns := []model.ConversationTurn{
+		{Messages: `[{"role":"user","kind":"text","text":"a"}]`},
+		{Messages: `[{"role":"assistant","kind":"text","text":"b"}]`},
+	}
+	got := MergeConversation(turns)
+	require.Len(t, got, 2, "两行消息按序拼接应为 2 段")
+	assert.Equal(t, msgRoleUser, got[0].Role)
+	assert.Equal(t, msgKindText, got[0].Kind)
+	assert.Equal(t, "a", got[0].Text)
+	assert.Equal(t, msgRoleAssistant, got[1].Role)
+	assert.Equal(t, msgKindText, got[1].Kind)
+	assert.Equal(t, "b", got[1].Text)
+}
+
+// TestMergeConversationInvalidRowSkipped 核心断言：非法 JSON 行记空并 SysLog 记录，
+// 其余行正常拼接，不 panic。
+func TestMergeConversationInvalidRowSkipped(t *testing.T) {
+	var logBuffer bytes.Buffer
+	common.LogWriterMu.Lock()
+	previousWriter := gin.DefaultWriter
+	gin.DefaultWriter = &logBuffer
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultWriter = previousWriter
+		common.LogWriterMu.Unlock()
+	})
+
+	turns := []model.ConversationTurn{
+		{Messages: `[{"role":"user","kind":"text","text":"a"}]`},
+		{Messages: `not json`},
+		{Messages: `[{"role":"assistant","kind":"text","text":"b"}]`},
+	}
+	got := MergeConversation(turns)
+	require.Len(t, got, 2, "非法 JSON 行记空，其余两行正常拼接")
+	assert.Equal(t, "a", got[0].Text)
+	assert.Equal(t, "b", got[1].Text)
+	assert.Contains(t, logBuffer.String(), "[SYS]", "解码失败必须经 SysLog 记录")
+}
+
+// TestMergeConversationEmptyInputs 边界：nil/空 turns、空 messages、null messages
+// 均不 panic，结果为空或跳过。
+func TestMergeConversationEmptyInputs(t *testing.T) {
+	assert.Empty(t, MergeConversation(nil), "nil turns 记空")
+	assert.Empty(t, MergeConversation([]model.ConversationTurn{}), "空 turns 记空")
+	assert.Empty(t, MergeConversation([]model.ConversationTurn{{Messages: ""}}), "空 messages 解码失败记空")
+	assert.Empty(t, MergeConversation([]model.ConversationTurn{{Messages: "null"}}), "null messages 解码为空切片")
+}
+
+// setupServiceConversationTestDB 替换 model.DB/model.LOG_DB 为 sqlite 内存库并建
+// conversation_turns 表，t.Cleanup 恢复原值（仿 model 包 setupConversationTurnTestDB）。
+func setupServiceConversationTestDB(t *testing.T) {
+	t.Helper()
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	t.Cleanup(func() { model.DB, model.LOG_DB = previousDB, previousLogDB })
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	// 强制单连接：:memory: 库按连接隔离，异步写库 goroutine 与主测试 goroutine
+	// 需共享同一连接才能看到同一张表。
+	sqlDB.SetMaxOpenConns(1)
+	model.DB, model.LOG_DB = db, db
+	require.NoError(t, db.Exec(`CREATE TABLE IF NOT EXISTS conversation_turns (
+		id INTEGER DEFAULT 0,
+		session_key TEXT DEFAULT '',
+		request_id TEXT DEFAULT '',
+		created_at INTEGER DEFAULT 0,
+		messages TEXT DEFAULT '',
+		turn_kind TEXT DEFAULT 'normal',
+		truncated INTEGER DEFAULT 0,
+		model_name TEXT DEFAULT '',
+		channel_id INTEGER DEFAULT 0,
+		token_id INTEGER DEFAULT 0,
+		token_name TEXT DEFAULT '',
+		user_id INTEGER DEFAULT 0,
+		username TEXT DEFAULT '',
+		"group" TEXT DEFAULT '',
+		ip TEXT DEFAULT '',
+		is_stream INTEGER DEFAULT 0,
+		use_time INTEGER DEFAULT 0,
+		upstream_request_id TEXT DEFAULT '',
+		prompt_tokens INTEGER DEFAULT 0,
+		completion_tokens INTEGER DEFAULT 0
+	)`).Error)
+}
+
+// TestRecordConversationWritesTurn 集成断言（BR2/BR3/BR5）：RecordConversation 异步
+// 编排解析→会话识别→判定→组装→写库，messages 请求侧在前响应侧在后，token 来自响应
+// usage，维度字段透传 input 纯值快照，新建会话首轮记 first。
+func TestRecordConversationWritesTurn(t *testing.T) {
+	setupServiceConversationTestDB(t)
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = false
+	sessionKeyLocalMap = sync.Map{}
+	singleInstanceLogOnce = sync.Once{}
+	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
+
+	input := ConversationInput{
+		RequestID:         "req_1",
+		CreatedAt:         1781234567,
+		ModelName:         "gpt-4o",
+		ChannelID:         1,
+		TokenID:           2,
+		TokenName:         "tk",
+		UserID:            3,
+		Username:          "u",
+		Group:             "g",
+		IP:                "1.2.3.4",
+		UseTime:           120,
+		IsStream:          false,
+		UpstreamRequestID: "up_req",
+		Path:              "/v1/chat/completions",
+		RawRequestBody:    []byte(`{"messages":[{"role":"user","content":"你好"}]}`),
+		RawResponseBody:   []byte(`{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`),
+	}
+	RecordConversation(input)
+
+	var turn model.ConversationTurn
+	require.Eventually(t, func() bool {
+		return model.LOG_DB.Table("conversation_turns").Where("request_id = ?", "req_1").First(&turn).Error == nil
+	}, 3*time.Second, 10*time.Millisecond, "异步写库应在超时内完成")
+
+	assert.NotEmpty(t, turn.SessionKey, "sessionKey 由 resolveSessionKey 生成")
+	assert.Equal(t, turnKindFirst, turn.TurnKind, "新建会话首轮记 first")
+	assert.Equal(t, int64(1781234567), turn.CreatedAt)
+	assert.Equal(t, "gpt-4o", turn.ModelName)
+	assert.Equal(t, 1, turn.ChannelId)
+	assert.Equal(t, 2, turn.TokenId)
+	assert.Equal(t, "tk", turn.TokenName)
+	assert.Equal(t, 3, turn.UserId)
+	assert.Equal(t, "u", turn.Username)
+	assert.Equal(t, "g", turn.Group)
+	assert.Equal(t, "1.2.3.4", turn.Ip)
+	assert.Equal(t, false, turn.IsStream)
+	assert.Equal(t, 120, turn.UseTime)
+	assert.Equal(t, "up_req", turn.UpstreamRequestId)
+	assert.Equal(t, 10, turn.PromptTokens, "token 来自响应 usage 解析")
+	assert.Equal(t, 5, turn.CompletionTokens, "token 来自响应 usage 解析")
+
+	var parts []MsgPart
+	require.NoError(t, common.Unmarshal([]byte(turn.Messages), &parts))
+	require.Len(t, parts, 2)
+	assert.Equal(t, msgRoleUser, parts[0].Role, "请求侧增量在前")
+	assert.Equal(t, "你好", parts[0].Text)
+	assert.Equal(t, msgRoleAssistant, parts[1].Role, "响应侧在后")
+	assert.Equal(t, "hi", parts[1].Text)
+}
+
+// TestRecordConversationToolRound 集成断言：请求含 tool_result 与响应含 tool_use 时
+// turn_kind 记 tool_round（工具优先于 first/normal）。
+func TestRecordConversationToolRound(t *testing.T) {
+	setupServiceConversationTestDB(t)
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = false
+	sessionKeyLocalMap = sync.Map{}
+	singleInstanceLogOnce = sync.Once{}
+	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
+
+	input := ConversationInput{
+		RequestID:       "req_tool",
+		CreatedAt:       300,
+		TokenID:         9,
+		Path:            "/v1/chat/completions",
+		RawRequestBody:  []byte(`{"messages":[{"role":"user","content":"查天气"},{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"北京\"}"}}]},{"role":"tool","tool_call_id":"c1","content":"晴"}]}`),
+		RawResponseBody: []byte(`{"choices":[{"message":{"content":"今天晴"}}]}`),
+	}
+	RecordConversation(input)
+
+	var turn model.ConversationTurn
+	require.Eventually(t, func() bool {
+		return model.LOG_DB.Table("conversation_turns").Where("request_id = ?", "req_tool").First(&turn).Error == nil
+	}, 3*time.Second, 10*time.Millisecond, "异步写库应在超时内完成")
+
+	assert.Equal(t, turnKindToolRound, turn.TurnKind, "含工具调用的轮记 tool_round")
+	var parts []MsgPart
+	require.NoError(t, common.Unmarshal([]byte(turn.Messages), &parts))
+	require.Len(t, parts, 4)
+	assert.Equal(t, msgRoleAssistant, parts[1].Role, "请求侧 tool_use 保留")
+	assert.Equal(t, msgKindToolUse, parts[1].Kind)
+	assert.Equal(t, msgKindToolResult, parts[2].Kind)
+}
+
+// TestRecordConversationParseFailureStillRecords 边界：请求体非法 JSON 时 request 侧
+// 记空，不中断写库，assistant 侧正常入库。
+func TestRecordConversationParseFailureStillRecords(t *testing.T) {
+	setupServiceConversationTestDB(t)
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = false
+	sessionKeyLocalMap = sync.Map{}
+	singleInstanceLogOnce = sync.Once{}
+	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
+
+	RecordConversation(ConversationInput{
+		RequestID:       "req_parse_fail",
+		CreatedAt:       400,
+		TokenID:         10,
+		Path:            "/v1/chat/completions",
+		RawRequestBody:  []byte(`{"messages":[`),
+		RawResponseBody: []byte(`{"choices":[{"message":{"content":"x"}}]}`),
+	})
+
+	var turn model.ConversationTurn
+	require.Eventually(t, func() bool {
+		return model.LOG_DB.Table("conversation_turns").Where("request_id = ?", "req_parse_fail").First(&turn).Error == nil
+	}, 3*time.Second, 10*time.Millisecond, "请求解析失败不中断写库")
+
+	var parts []MsgPart
+	require.NoError(t, common.Unmarshal([]byte(turn.Messages), &parts))
+	require.Len(t, parts, 1, "request 侧记空，仅 assistant 侧消息")
+	assert.Equal(t, msgRoleAssistant, parts[0].Role)
+	assert.Equal(t, "x", parts[0].Text)
+}
+
+// TestRecordConversationWriteFailureLogs 集成断言：写库失败经 common.SysLog 记录，
+// 不 panic。日志断言只绑定 [SYS] 前缀，不绑定具体文案。
+func TestRecordConversationWriteFailureLogs(t *testing.T) {
+	setupServiceConversationTestDB(t)
+	require.NoError(t, model.LOG_DB.Exec("DROP TABLE conversation_turns").Error)
+
+	var logBuffer bytes.Buffer
+	common.LogWriterMu.Lock()
+	previousWriter := gin.DefaultWriter
+	gin.DefaultWriter = &logBuffer
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultWriter = previousWriter
+		common.LogWriterMu.Unlock()
+	})
+
+	RecordConversation(ConversationInput{
+		RequestID:       "req_fail",
+		CreatedAt:       500,
+		TokenID:         11,
+		Path:            "/v1/chat/completions",
+		RawRequestBody:  []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+		RawResponseBody: []byte(`{"choices":[{"message":{"content":"x"}}]}`),
+	})
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(logBuffer.String(), "[SYS]")
+	}, 3*time.Second, 10*time.Millisecond, "写库失败必须经 SysLog 记录")
 }
