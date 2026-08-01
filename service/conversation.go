@@ -3,10 +3,18 @@ package service
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/go-redis/redis/v8"
 )
 
 // MsgPart 消息片段，kind 区分 text/tool_use/tool_result。
@@ -880,4 +888,132 @@ func parseGeminiStreamUsage(respBytes []byte) (int, int) {
 		return 0, 0
 	}
 	return last.PromptTokens, last.CandidatesTokens
+}
+
+// 会话识别缓存键前缀与 TTL（BR1）：键形如 conv:session:{token_id}:{prefixHash}，
+// TTL 30min。
+const (
+	convSessionCachePrefix = "conv:session:"
+	convSessionCacheTTL    = 30 * time.Minute
+	convHashPrefixLen      = 64
+)
+
+// sessionKeyLocalMap 单实例退化模式的进程内会话映射：cacheKey -> sessionKey。
+// singleInstanceLogOnce 保证「单实例模式」SysError 标注只输出一次。
+var (
+	sessionKeyLocalMap    sync.Map
+	singleInstanceLogOnce sync.Once
+)
+
+// redisSetNX 原子抢占（SET NX EX），直连 common.RDB，不新增 common/redis.go 方法。
+func redisSetNX(key, value string, ttl time.Duration) (bool, error) {
+	ctx := context.Background()
+	return common.RDB.SetNX(ctx, key, value, ttl).Result()
+}
+
+// redisExpire 命中即滚动续期 TTL。
+func redisExpire(key string, ttl time.Duration) error {
+	ctx := context.Background()
+	return common.RDB.Expire(ctx, key, ttl).Err()
+}
+
+// combineRequestText 组合本轮 request 侧增量文本（BR2）：
+//   - 含 tool_result 轮：全部 tool_result 文本 + 末条 user 文本（tool_result 在前）；
+//   - 无 tool_result 且无 assistant 历史（新建会话首轮）：全部 user 侧文本按请求原序；
+//   - 其余纯文本轮：末条 user 文本。
+//
+// 空 requestParts 返回空串，行为确定不 panic。
+func combineRequestText(parts []MsgPart) string {
+	var toolResults []string
+	var userTexts []string
+	lastUser := ""
+	hasToolResult := false
+	hasAssistant := false
+	for _, p := range parts {
+		switch {
+		case p.Kind == msgKindToolResult:
+			hasToolResult = true
+			if p.Text != "" {
+				toolResults = append(toolResults, p.Text)
+			}
+		case p.Kind == msgKindToolUse || p.Role == msgRoleAssistant:
+			hasAssistant = true
+		case p.Role == msgRoleUser && p.Text != "":
+			userTexts = append(userTexts, p.Text)
+			lastUser = p.Text
+		}
+	}
+	switch {
+	case hasToolResult:
+		var b strings.Builder
+		for _, t := range toolResults {
+			b.WriteString(t)
+		}
+		b.WriteString(lastUser)
+		return b.String()
+	case hasAssistant:
+		return lastUser
+	default:
+		return strings.Join(userTexts, "")
+	}
+}
+
+// prefixHash 按 token_id 分桶计算本轮 request 侧内容的前缀指纹。
+// 对组合后的 request 侧消息文本取前 64 字符，与 token_id 一起做 sha256 摘要，
+// 同 token_id 同内容得同指纹，不同 token_id 分桶为不同指纹。
+func prefixHash(tokenID int, requestParts []MsgPart) string {
+	content := combineRequestText(requestParts)
+	if len(content) > convHashPrefixLen {
+		content = content[:convHashPrefixLen]
+	}
+	h := sha256.New()
+	h.Write([]byte(strconv.Itoa(tokenID)))
+	h.Write([]byte{':'})
+	h.Write([]byte(content))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// resolveSessionKey 会话指纹到 sessionKey 的映射，返回是否新建会话。
+// Redis 可用走 Redis 映射（跨实例共享）；不可用退化进程内 map 单实例模式。
+// Redis 运行期出错时捕获链路不中断，按新会话回退生成 sessionKey 并 SysError 记录。
+func resolveSessionKey(tokenID int, requestParts []MsgPart) (sessionKey string, isNew bool) {
+	key := convSessionCachePrefix + strconv.Itoa(tokenID) + ":" + prefixHash(tokenID, requestParts)
+
+	if !common.RedisEnabled {
+		singleInstanceLogOnce.Do(func() {
+			common.SysError("conversation session cache: Redis disabled, running in single-instance mode (in-process session map); configure Redis for multi-instance session continuity")
+		})
+		if v, ok := sessionKeyLocalMap.Load(key); ok {
+			return v.(string), false
+		}
+		sessionKey = common.NewRequestId()
+		sessionKeyLocalMap.Store(key, sessionKey)
+		return sessionKey, true
+	}
+
+	if v, err := common.RedisGet(key); err == nil && v != "" {
+		_ = redisExpire(key, convSessionCacheTTL)
+		return v, false
+	} else if err != nil && !errors.Is(err, redis.Nil) {
+		common.SysError("conversation session cache: Redis runtime error on get: " + err.Error())
+		return common.NewRequestId(), true
+	}
+
+	sessionKey = common.NewRequestId()
+	ok, err := redisSetNX(key, sessionKey, convSessionCacheTTL)
+	if err != nil {
+		common.SysError("conversation session cache: Redis runtime error on set nx: " + err.Error())
+		return sessionKey, true
+	}
+	if ok {
+		return sessionKey, true
+	}
+	if v, err := common.RedisGet(key); err == nil && v != "" {
+		_ = redisExpire(key, convSessionCacheTTL)
+		return v, false
+	} else if err != nil && !errors.Is(err, redis.Nil) {
+		common.SysError("conversation session cache: Redis runtime error on re-get: " + err.Error())
+		return sessionKey, true
+	}
+	return sessionKey, true
 }

@@ -1,9 +1,15 @@
 package service
 
 import (
+	"bytes"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/alicebob/miniredis/v2"
+	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -443,4 +449,264 @@ func TestProtocolForPath(t *testing.T) {
 			assert.Equal(t, tc.want, protocolForPath(tc.path))
 		})
 	}
+}
+
+// TestPrefixHash 核心断言：同 tokenID 同内容同指纹；同 tokenID 不同内容不同指纹；
+// 不同 tokenID 同内容不同指纹（token_id 分桶）。
+func TestPrefixHash(t *testing.T) {
+	parts := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "你好"}}
+	same := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "你好"}}
+	different := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "今天天气怎么样"}}
+
+	h1 := prefixHash(1, parts)
+	h2 := prefixHash(1, same)
+	h3 := prefixHash(1, different)
+	h4 := prefixHash(2, same)
+
+	assert.NotEmpty(t, h1)
+	assert.Equal(t, h1, h2, "同 tokenID 同内容必须得到相同指纹")
+	assert.NotEqual(t, h1, h3, "同 tokenID 不同内容必须得到不同指纹")
+	assert.NotEqual(t, h1, h4, "不同 tokenID 同内容必须分桶为不同指纹")
+}
+
+// TestPrefixHashEmptyParts 空 requestParts（组合文本为空）不 panic，指纹确定。
+func TestPrefixHashEmptyParts(t *testing.T) {
+	h1 := prefixHash(1, nil)
+	h2 := prefixHash(1, []MsgPart{})
+	assert.NotEmpty(t, h1)
+	assert.Equal(t, h1, h2, "空输入必须得到确定指纹")
+	assert.NotEqual(t, h1, prefixHash(2, nil), "空输入也受 token_id 分桶")
+}
+
+// TestCombineRequestTextByContentType 内容组合规则（BR2）：纯文本轮末条 user；
+// 工具轮全部 tool_result + 末条 user（tool_result 在前）；首轮全部 user 侧按原序。
+func TestCombineRequestTextByContentType(t *testing.T) {
+	pureTextTurn := []MsgPart{
+		{Role: msgRoleUser, Kind: msgKindText, Text: "第一问"},
+		{Role: msgRoleAssistant, Kind: msgKindText, Text: "回答一"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "第二问"},
+	}
+	assert.Equal(t, "第二问", combineRequestText(pureTextTurn), "纯文本轮只取末条 user 文本")
+
+	toolTurn := []MsgPart{
+		{Role: msgRoleUser, Kind: msgKindText, Text: "查天气"},
+		{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
+		{Role: msgRoleTool, Kind: msgKindToolResult, Text: "晴，25度"},
+		{Role: msgRoleTool, Kind: msgKindToolResult, Text: "风力3级"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "然后呢"},
+	}
+	assert.Equal(t, "晴，25度风力3级然后呢", combineRequestText(toolTurn), "工具轮为全部 tool_result + 末条 user，tool_result 在前")
+
+	firstTurn := []MsgPart{
+		{Role: msgRoleSystem, Kind: msgKindText, Text: "system prompt"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "你好"},
+	}
+	assert.Equal(t, "你好", combineRequestText(firstTurn), "首轮取全部 user 侧文本按原序")
+
+	firstTurnMultiUser := []MsgPart{
+		{Role: msgRoleUser, Kind: msgKindText, Text: "开场白"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "补充问题"},
+	}
+	assert.Equal(t, "开场白补充问题", combineRequestText(firstTurnMultiUser), "首轮多条 user 按请求原序拼接")
+}
+
+// useIndependentSessionRedis 为会话缓存测试搭一个独立 miniredis，保存并恢复
+// common.RedisEnabled 与 common.RDB。
+func useIndependentSessionRedis(t *testing.T) *miniredis.Miniredis {
+	t.Helper()
+	previousRedisEnabled := common.RedisEnabled
+	previousRDB := common.RDB
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	common.RedisEnabled = true
+	common.RDB = client
+	t.Cleanup(func() {
+		_ = client.Close()
+		common.RedisEnabled = previousRedisEnabled
+		common.RDB = previousRDB
+	})
+	return server
+}
+
+// TestResolveSessionKeySingleInstanceDegraded 核心断言：Redis 不可用时（保存并恢复
+// 原值）同 tokenID + 同 requestParts 连续两次返回相同 sessionKey，第一次 isNew=true、
+// 第二次 isNew=false；不同内容返回不同 sessionKey；不同 tokenID 同内容分桶。
+func TestResolveSessionKeySingleInstanceDegraded(t *testing.T) {
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = false
+	sessionKeyLocalMap = sync.Map{}
+	singleInstanceLogOnce = sync.Once{}
+	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
+
+	parts := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "你好"}}
+	sk1, isNew1 := resolveSessionKey(1, parts)
+	sk2, isNew2 := resolveSessionKey(1, parts)
+	assert.NotEmpty(t, sk1)
+	assert.True(t, isNew1, "首次调用必须判定为新会话")
+	assert.Equal(t, sk1, sk2, "同 tokenID 同内容必须复用同一 sessionKey")
+	assert.False(t, isNew2, "二次调用必须命中已有会话")
+
+	skDifferent, isNewDifferent := resolveSessionKey(1, []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "不同内容"}})
+	assert.NotEqual(t, sk1, skDifferent, "不同内容必须生成不同 sessionKey")
+	assert.True(t, isNewDifferent)
+
+	skOtherToken, _ := resolveSessionKey(2, parts)
+	assert.NotEqual(t, sk1, skOtherToken, "不同 tokenID 同内容必须分桶为不同会话")
+}
+
+// TestResolveSessionKeyDegradedLogsSingleInstance Redis 未配置时首例退化必须经
+// common.SysError 标注单实例模式（sync.Once 保护），即 BR4。
+func TestResolveSessionKeyDegradedLogsSingleInstance(t *testing.T) {
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = false
+	singleInstanceLogOnce = sync.Once{}
+	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
+
+	var logBuffer bytes.Buffer
+	common.LogWriterMu.Lock()
+	previousErrorWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &logBuffer
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultErrorWriter = previousErrorWriter
+		common.LogWriterMu.Unlock()
+	})
+
+	_, _ = resolveSessionKey(7, []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "退化标注"}})
+	assert.Contains(t, logBuffer.String(), "single-instance", "退化模式必须输出单实例标注日志")
+
+	// sync.Once 保证只标注一次：再次调用不再新增日志
+	logBuffer.Reset()
+	_, _ = resolveSessionKey(8, []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "再次调用"}})
+	assert.Empty(t, logBuffer.String(), "单实例标注必须只输出一次")
+}
+
+// TestResolveSessionKeyRedisHitMissRenew Redis 可用：未命中 SetNX 抢占，命中复用
+// sessionKey 并滚动续期，缓存键形如 conv:session:{token_id}:{prefixHash}，TTL 30min。
+func TestResolveSessionKeyRedisHitMissRenew(t *testing.T) {
+	server := useIndependentSessionRedis(t)
+	parts := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "你好"}}
+
+	sk1, isNew1 := resolveSessionKey(1, parts)
+	assert.True(t, isNew1)
+	assert.NotEmpty(t, sk1)
+
+	key := convSessionCachePrefix + "1:" + prefixHash(1, parts)
+	val, err := server.Get(key)
+	require.NoError(t, err)
+	assert.Equal(t, sk1, val, "Redis 中必须缓存 sessionKey")
+	ttl := server.TTL(key)
+	assert.True(t, ttl > 0 && ttl <= convSessionCacheTTL, "缓存 TTL 应为 30min，实际 %v", ttl)
+
+	sk2, isNew2 := resolveSessionKey(1, parts)
+	assert.Equal(t, sk1, sk2, "命中必须复用 sessionKey")
+	assert.False(t, isNew2)
+
+	server.FastForward(29 * time.Minute)
+	_, isNew3 := resolveSessionKey(1, parts)
+	assert.False(t, isNew3, "TTL 内滚动续期后仍应命中")
+	assert.True(t, server.TTL(key) > 29*time.Minute, "命中后 TTL 应被滚动续期")
+}
+
+// TestResolveSessionKeyRedisConcurrentFirstRequest 并发首请求：SetNX 原子抢占消除劈
+// 会话窗口，所有并发方收敛到同一 sessionKey 且仅一个 isNew=true。
+func TestResolveSessionKeyRedisConcurrentFirstRequest(t *testing.T) {
+	useIndependentSessionRedis(t)
+	parts := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "并发首请求"}}
+
+	const n = 12
+	keys := make([]string, n)
+	isNews := make([]bool, n)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			sk, isNew := resolveSessionKey(3, parts)
+			keys[idx] = sk
+			isNews[idx] = isNew
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	require.NotEmpty(t, keys[0])
+	newCount := 0
+	for i := 0; i < n; i++ {
+		assert.Equal(t, keys[0], keys[i], "并发首请求必须收敛到同一 sessionKey")
+		if isNews[i] {
+			newCount++
+		}
+	}
+	assert.Equal(t, 1, newCount, "并发首请求只能有一个胜出者 isNew=true")
+}
+
+// TestResolveSessionKeyRedisRuntimeErrorFallback Redis 运行期故障（连接失败）时
+// 捕获链路不中断，按新会话回退生成 sessionKey 并 SysError 记录（BR5）。
+func TestResolveSessionKeyRedisRuntimeErrorFallback(t *testing.T) {
+	previousRedisEnabled := common.RedisEnabled
+	previousRDB := common.RDB
+	badClient := redis.NewClient(&redis.Options{
+		Addr:        "127.0.0.1:1",
+		MaxRetries:  0,
+		DialTimeout: 300 * time.Millisecond,
+	})
+	common.RedisEnabled = true
+	common.RDB = badClient
+	t.Cleanup(func() {
+		_ = badClient.Close()
+		common.RedisEnabled = previousRedisEnabled
+		common.RDB = previousRDB
+	})
+
+	var logBuffer bytes.Buffer
+	common.LogWriterMu.Lock()
+	previousErrorWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &logBuffer
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultErrorWriter = previousErrorWriter
+		common.LogWriterMu.Unlock()
+	})
+
+	parts := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "故障回退"}}
+	sk, isNew := resolveSessionKey(4, parts)
+	assert.NotEmpty(t, sk)
+	assert.True(t, isNew, "Redis 运行期故障必须按新会话回退")
+	assert.Contains(t, logBuffer.String(), "Redis runtime error", "运行期故障必须 SysError 记录")
+}
+
+// TestRedisSetNXAndExpire redisSetNX 为 SET NX EX 原子抢占（已存在则失败不改值），
+// redisExpire 命中即滚动续期 TTL。
+func TestRedisSetNXAndExpire(t *testing.T) {
+	server := useIndependentSessionRedis(t)
+	key := "conv:session:9:abcd"
+	ttl := time.Minute
+
+	ok, err := redisSetNX(key, "sk-1", ttl)
+	require.NoError(t, err)
+	assert.True(t, ok, "首次 SET NX 必须成功")
+	assert.Equal(t, "sk-1", mustGetServer(t, server, key))
+	assert.True(t, server.TTL(key) > 0, "SET NX 必须带上 EX TTL")
+
+	ok, err = redisSetNX(key, "sk-2", ttl)
+	require.NoError(t, err)
+	assert.False(t, ok, "key 已存在时 SET NX 必须失败")
+	assert.Equal(t, "sk-1", mustGetServer(t, server, key), "SET NX 失败不得覆盖已存值")
+
+	server.FastForward(45 * time.Second)
+	require.NoError(t, redisExpire(key, ttl))
+	remaining := server.TTL(key)
+	assert.True(t, remaining > 45*time.Second, "redisExpire 必须滚动续期 TTL，实际剩余 %v", remaining)
+}
+
+func mustGetServer(t *testing.T, server *miniredis.Miniredis, key string) string {
+	t.Helper()
+	val, err := server.Get(key)
+	require.NoError(t, err)
+	return val
 }
