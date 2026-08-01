@@ -99,7 +99,7 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 
 > `id Int64 DEFAULT 0`：ClickHouse 无自增，展示用 id 由查询侧按序回填（仿 `assignDisplayLogIds`），轮次唯一标识以 `request_id` 为准。
 > `group` 为保留字，按 `logGroupCol` 方言约定用反引号包裹（规则文件 §1.4、SSOT §3.3）。
-> `TTL` 周期复用 `LOG_SQL_CLICKHOUSE_TTL_DAYS`，示例为 30 天。
+> `TTL` 周期读 `LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS`（与 logs 表的 `LOG_SQL_CLICKHOUSE_TTL_DAYS` 独立），示例为 30 天；0 或未配置表示永久保留，负值归 0。
 
 ---
 
@@ -139,7 +139,7 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 |--------|------|------|------|
 | 主键排序键 | ORDER BY（MergeTree 主键） | `(session_key, created_at, request_id)` | 会话聚合查询（按 session_key）与轮次时间序排序（created_at, request_id）的存储主键，会话详情按序扫描高效 |
 | 分区键 | PARTITION BY | `toYYYYMM(toDateTime(created_at))` | 按月分区，配合 TTL 自动清理过期分区数据 |
-| 数据保留 | TTL | `toDateTime(created_at)` | 保留周期复用 `LOG_SQL_CLICKHOUSE_TTL_DAYS`，启动迁移时经 `ALTER TABLE ... MODIFY TTL` 动态对齐配置（与 logs 同源同路径） |
+| 数据保留 | TTL | `toDateTime(created_at)` | 保留周期读 `LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS`（与 logs 各自独立），启动迁移时经 `ALTER TABLE ... MODIFY TTL` 动态对齐配置（同路径、独立配置） |
 
 **业务规则/使用场景：**
 
@@ -148,7 +148,7 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 - 跨库聚合约束：SELECT 中 `session_key` 之外的维度列必须用聚合函数包裹（ClickHouse 用 `any()`），禁止裸返回非聚合列；首末轮时间与轮数是时间窗口内轮次的统计，非会话全量统计。
 - 本表不记 `quota`、不做计费运算；计费信息归 logs 表，按 `request_id` 交叉关联。
 - 失败/错误响应（4xx/5xx）同样入库：request 侧消息按请求体解析保留，assistant 侧解析失败记空、usage 失败记 0，缺失维度记零值。
-- 建表迁移：`migrateClickHouseLogDB` 启动时建表（`CREATE TABLE IF NOT EXISTS` 幂等），与 logs 同路径同时机；TTL 经 `syncClickHouseTTL` 动态对齐 `LOG_SQL_CLICKHOUSE_TTL_DAYS`。
+- 建表迁移：`migrateClickHouseLogDB` 启动时建表（`CREATE TABLE IF NOT EXISTS` 幂等），与 logs 同路径同时机；TTL 经 `syncClickHouseTTL` 动态对齐 `LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS`（logs 表则对齐 `LOG_SQL_CLICKHOUSE_TTL_DAYS`，两表独立）。
 
 ---
 
@@ -196,7 +196,7 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 ## 分表分库策略
 
 - 本表不水平分表：日志库（`LOG_SQL_DSN`）独立于主库物理隔离，ClickHouse 天然支持大数据量列式存储。
-- 分区策略即时间分区：按月分区，配合 `LOG_SQL_CLICKHOUSE_TTL_DAYS` 自动清理过期数据。
+- 分区策略即时间分区：按月分区，配合 `LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS` 自动清理过期数据。
 - 水平扩展：日志库可独立扩展为 ClickHouse 集群（架构文档 §4.3），应用层无感知。
 
 ---
@@ -206,7 +206,7 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 | 项 | 策略 | 说明 |
 |----|------|------|
 | 分区 | `PARTITION BY toYYYYMM(toDateTime(created_at))` | 按月分区，时间序查询局部扫描 |
-| 数据保留 | TTL 复用 `LOG_SQL_CLICKHOUSE_TTL_DAYS` | 自动清理，无需定期任务删除 |
+| 数据保留 | TTL 读 `LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS` | 自动清理，无需定期任务删除（与 logs 各自独立） |
 | 大字段 | `messages` 单列存序列化 JSON | 查询侧按需解码，列表接口不读该列 |
 | 异步写库 | `gopool.Go` 编排 | 写库不阻塞响应路径，闭包只捕获纯值 |
 | 捕获开销 | 256KB buffer 上限 | 超限截断置 `truncated`，内存占用有界 |

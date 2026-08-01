@@ -404,23 +404,36 @@ func migrateLOGDB() error {
 }
 
 func migrateClickHouseLogDB() error {
-	ttlDays := clickHouseLogTTLDays()
-	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
+	logTTLDays := clickHouseLogTTLDays()
+	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(logTTLDays)).Error; err != nil {
 		return err
 	}
-	if err := syncClickHouseTTL("logs", ttlDays); err != nil {
+	if err := syncClickHouseTTL("logs", logTTLDays); err != nil {
 		return err
 	}
-	// conversation_turns 与 logs 共用同一日志库与同一 TTL 配置（LOG_SQL_CLICKHOUSE_TTL_DAYS），
-	// 建表与 TTL 同步在同一启动迁移路径内完成，保证两表保留期始终一致、配置变更后重启即生效。
-	if err := LOG_DB.Exec(conversationTurnCreateTableSQL(ttlDays)).Error; err != nil {
+	// conversation_turns 与 logs 共用同一日志库与同一启动迁移路径，但 TTL 配置各自独立：
+	// logs 读 LOG_SQL_CLICKHOUSE_TTL_DAYS，conversation_turns 读 LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS。
+	// 建表与 TTL 同步在同一函数内完成，配置变更后重启即生效。
+	convTTLDays := clickHouseConversationTTLDays()
+	if err := LOG_DB.Exec(conversationTurnCreateTableSQL(convTTLDays)).Error; err != nil {
 		return err
 	}
-	return syncClickHouseTTL("conversation_turns", ttlDays)
+	return syncClickHouseTTL("conversation_turns", convTTLDays)
 }
 
 func clickHouseLogTTLDays() int {
 	ttlDays := common.GetEnvOrDefault("LOG_SQL_CLICKHOUSE_TTL_DAYS", 0)
+	if ttlDays < 0 {
+		return 0
+	}
+	return ttlDays
+}
+
+// clickHouseConversationTTLDays 读 conversation_turns 表的独立 TTL 配置
+// LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS：未配置或 0 表示永久保留，不回退到 logs 的
+// LOG_SQL_CLICKHOUSE_TTL_DAYS；负值归 0。两表 TTL 彻底独立。
+func clickHouseConversationTTLDays() int {
+	ttlDays := common.GetEnvOrDefault("LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS", 0)
 	if ttlDays < 0 {
 		return 0
 	}

@@ -54,7 +54,8 @@ type ConversationQueryParams struct {
 
 // conversationTurnCreateTableSQL 生成 ClickHouse 建表 DDL，由 migrateClickHouseLogDB 启动迁移调用
 //（与 logs 同路径同时机）。group 为保留字，列名用 logGroupCol 方言变量包裹；
-// TTL 复用 clickHouseLogTTLClause，天数与 logs 同源（clickHouseLogTTLDays 读 LOG_SQL_CLICKHOUSE_TTL_DAYS）。
+// TTL 复用 clickHouseLogTTLClause，天数由调用方传入（migrateClickHouseLogDB 传 conversation
+// 专用 clickHouseConversationTTLDays，读 LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS，与 logs 各自独立）。
 func conversationTurnCreateTableSQL(ttlDays int) string {
 	return fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS conversation_turns (

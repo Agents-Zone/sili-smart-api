@@ -184,7 +184,7 @@ controller/                       # 新增：管理员会话列表与详情查�
 
 **说明**：
 - 组件挂载点固定在 `router/relay-router.go`（httpRouter 与 relayGeminiRouter 两处 `Use`）与 `router/api-router.go`（两条管理员查询路由），属既有文件的两处最小改动
-- `conversation_turns` 表存储走日志库 `LOG_DB`，与 logs 表共用 ClickHouse 方言分支与 TTL 配置，`request_id` 与 logs 表交叉关联
+- `conversation_turns` 表存储走日志库 `LOG_DB`，与 logs 表共用 ClickHouse 方言分支（TTL 配置各自独立：conversation_turns 读 `LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS`，logs 读 `LOG_SQL_CLICKHOUSE_TTL_DAYS`），`request_id` 与 logs 表交叉关联
 - 会话识别依赖 Redis（`conv:session:{token_id}:{prefixHash}` 键，TTL 30 分钟），Redis 未配置时退化为进程内 map 单实例模式
 - 功能开关 `CONVERSATION_LOG_ENABLED` 走环境变量，关闭时 middleware 直接透传，近似零开销
 
@@ -295,7 +295,7 @@ controller/                       # 新增：管理员会话列表与详情查�
 | 场景 | 预估数据量 | 说明 |
 |------|-----------|------|
 | logs 日志表 | 随用量线性增长 | 定期清理任务（`/api/system-task/log-cleanup`），ClickHouse 下走 TTL + mutation 删除 |
-| conversation_turns 表 | 一行一轮，随对话量增长 | ClickHouse 下按月分区 + TTL 自动清理（`LOG_SQL_CLICKHOUSE_TTL_DAYS`） |
+| conversation_turns 表 | 一行一轮，随对话量增长 | ClickHouse 下按月分区 + TTL 自动清理（`LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS`，与 logs 独立） |
 | 单次响应捕获 | 上限 256KB | 超限截断并置 `truncated` 标记，避免大响应占用内存 |
 
 ### 4.2 安全要求
@@ -336,7 +336,7 @@ controller/                       # 新增：管理员会话列表与详情查�
 
 #### 日志存储扩展（ClickHouse）
 
-- **分区与留存**：`logs` 与 `conversation_turns` 均按 `toYYYYMM(toDateTime(created_at))` 按月分区，`ORDER BY (created_at, request_id)` 保证时间序查询高效，TTL 配置 `LOG_SQL_CLICKHOUSE_TTL_DAYS`，建表后经 `ALTER TABLE ... MODIFY TTL` 动态对齐配置
+- **分区与留存**：`logs` 与 `conversation_turns` 均按 `toYYYYMM(toDateTime(created_at))` 按月分区，`ORDER BY (created_at, request_id)` 保证时间序查询高效，TTL 各自独立配置（`logs` 读 `LOG_SQL_CLICKHOUSE_TTL_DAYS`、`conversation_turns` 读 `LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS`），建表后经 `ALTER TABLE ... MODIFY TTL` 动态对齐
 - **方言适配**：ClickHouse 无可靠自增 id 与 `LIMIT ... OFFSET` 同语义聚合，查询侧经 `clickHouseLogOrder` 复合排序、`assignDisplayLogIds` 回填展示 id、`any()` 聚合非分组列、LIKE 转义独立分支处理；删除走 `ALTER TABLE ... DELETE SETTINGS mutations_sync=1` mutation
 
 ### 4.4 技术约束
