@@ -322,6 +322,11 @@ const (
 	MsgDistributorInvalidParseModel       = "distributor.invalid_request_parse_model"
 )
 
+// Conversation related messages
+const (
+	MsgConversationNotFound = "conversation.not_found"
+)
+
 // Custom OAuth provider related messages
 const (
 	MsgCustomOAuthNotFound          = "custom_oauth.not_found"

@@ -1,0 +1,259 @@
+package controller
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+)
+
+// setupConversationControllerTestDB 初始化 controller 会话查询测试夹具：
+// 内存 SQLite 作为主库与日志库（LOG_DB），AutoMigrate conversation_turns 表，
+// 并初始化 i18n 使 common.ApiErrorI18n 输出翻译后的消息。
+func setupConversationControllerTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	common.RedisEnabled = false
+	require.NoError(t, i18n.Init())
+
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	model.DB = db
+	model.LOG_DB = db
+	require.NoError(t, db.AutoMigrate(&model.ConversationTurn{}))
+
+	t.Cleanup(func() {
+		sqlDB, err := db.DB()
+		if err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	return db
+}
+
+// insertConversationTurns 写入 turnCount 轮同一会话的轮次记录，created_at 自 1000 起递增，
+// 每轮 messages 为单个 user/text 片段。维度字段填值以验证不回传。
+func insertConversationTurns(t *testing.T, db *gorm.DB, sessionKey string, turnCount int) {
+	t.Helper()
+	for i := 0; i < turnCount; i++ {
+		messages, err := common.Marshal([]service.MsgPart{
+			{Role: "user", Kind: "text", Text: fmt.Sprintf("msg-%d", i)},
+		})
+		require.NoError(t, err)
+		turn := &model.ConversationTurn{
+			Id:         int64(i + 1),
+			SessionKey: sessionKey,
+			RequestId:  fmt.Sprintf("req-%d", i),
+			CreatedAt:  int64(1000 + i),
+			Messages:   string(messages),
+			TurnKind:   "normal",
+			TokenName:  "test-token",
+			Username:   "test-user",
+			UserId:     7,
+			ModelName:  "gpt-4o",
+			Ip:         "1.2.3.4",
+			ChannelId:  99,
+			TokenId:    88,
+			UseTime:    123,
+		}
+		require.NoError(t, db.Create(turn).Error)
+	}
+}
+
+// conversationErrorPayload 解析错误响应的 success/message。
+type conversationErrorPayload struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// conversationDetailPayload 解析详情响应的 data 结构。
+type conversationDetailPayload struct {
+	Success bool `json:"success"`
+	Data    struct {
+		Session  map[string]any    `json:"session"`
+		Turns    []map[string]any  `json:"turns"`
+		Messages []service.MsgPart `json:"messages"`
+	} `json:"data"`
+}
+
+func TestClampDetailPageSize(t *testing.T) {
+	require.Equal(t, 200, clampDetailPageSize(500))
+	require.Equal(t, 200, clampDetailPageSize(201))
+	require.Equal(t, 200, clampDetailPageSize(200))
+	require.Equal(t, 50, clampDetailPageSize(50))
+	require.Equal(t, common.ItemsPerPage, clampDetailPageSize(0))
+	require.Equal(t, common.ItemsPerPage, clampDetailPageSize(-5))
+}
+
+func TestConversationTimeRangeInvalid(t *testing.T) {
+	require.False(t, conversationTimeRangeInvalid(0, 0))
+	require.False(t, conversationTimeRangeInvalid(0, 50))
+	require.False(t, conversationTimeRangeInvalid(100, 0))
+	require.False(t, conversationTimeRangeInvalid(50, 50))
+	require.False(t, conversationTimeRangeInvalid(50, 100))
+	require.True(t, conversationTimeRangeInvalid(100, 50))
+}
+
+func TestListConversationsRejectsInvertedTimeRange(t *testing.T) {
+	setupConversationControllerTestDB(t)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/?start_timestamp=100&end_timestamp=50", nil)
+
+	ListConversations(ctx)
+
+	var payload conversationErrorPayload
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.False(t, payload.Success)
+	require.Equal(t, "Invalid parameters", payload.Message)
+}
+
+func TestGetConversationMissingSessionKey(t *testing.T) {
+	setupConversationControllerTestDB(t)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/", nil)
+
+	GetConversation(ctx)
+
+	var payload conversationErrorPayload
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.False(t, payload.Success)
+	require.Equal(t, "Invalid parameters", payload.Message)
+}
+
+func TestGetConversationNotFound(t *testing.T) {
+	setupConversationControllerTestDB(t)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "session_key", Value: "no-such-session"}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/no-such-session", nil)
+
+	GetConversation(ctx)
+
+	var payload conversationErrorPayload
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.False(t, payload.Success)
+	require.Equal(t, "conversation not found", payload.Message)
+}
+
+func TestGetConversationReturnsSessionTurnsAndMergedMessages(t *testing.T) {
+	db := setupConversationControllerTestDB(t)
+	insertConversationTurns(t, db, "conv-test-1", 3)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "session_key", Value: "conv-test-1"}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/conv-test-1", nil)
+
+	GetConversation(ctx)
+
+	var payload conversationDetailPayload
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.True(t, payload.Success)
+
+	session := payload.Data.Session
+	require.Equal(t, "test-token", session["token_name"])
+	require.Equal(t, "test-user", session["username"])
+	require.Equal(t, float64(7), session["user_id"])
+	require.Equal(t, "gpt-4o", session["model_name"])
+	require.Equal(t, float64(1000), session["first_turn_time"])
+	require.Equal(t, float64(1002), session["last_turn_time"])
+	require.Equal(t, float64(3), session["turn_count"])
+	require.NotContains(t, session, "ip")
+	require.NotContains(t, session, "channel_id")
+	require.NotContains(t, session, "token_id")
+	require.NotContains(t, session, "use_time")
+
+	require.Len(t, payload.Data.Turns, 3)
+	for _, turn := range payload.Data.Turns {
+		require.Contains(t, turn, "id")
+		require.Contains(t, turn, "created_at")
+		require.Contains(t, turn, "request_id")
+		require.Contains(t, turn, "turn_kind")
+		require.Contains(t, turn, "truncated")
+		require.NotContains(t, turn, "messages")
+		require.NotContains(t, turn, "ip")
+		require.NotContains(t, turn, "channel_id")
+		require.NotContains(t, turn, "token_id")
+		require.NotContains(t, turn, "use_time")
+	}
+
+	require.Len(t, payload.Data.Messages, 3)
+	require.Equal(t, "msg-0", payload.Data.Messages[0].Text)
+	require.Equal(t, "msg-1", payload.Data.Messages[1].Text)
+	require.Equal(t, "msg-2", payload.Data.Messages[2].Text)
+}
+
+func TestGetConversationPageSizeClampedToTwoHundred(t *testing.T) {
+	db := setupConversationControllerTestDB(t)
+	insertConversationTurns(t, db, "conv-long", 250)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "session_key", Value: "conv-long"}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/conv-long?page_size=500", nil)
+
+	GetConversation(ctx)
+
+	var payload conversationDetailPayload
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.True(t, payload.Success)
+	require.Len(t, payload.Data.Turns, 200)
+	require.Equal(t, true, payload.Data.Session["truncated"])
+	require.Equal(t, float64(250), payload.Data.Session["turn_count"])
+}
+
+func TestGetConversationPageSizeHonoredBelowCap(t *testing.T) {
+	db := setupConversationControllerTestDB(t)
+	insertConversationTurns(t, db, "conv-mid", 250)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "session_key", Value: "conv-mid"}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/conv-mid?page_size=50", nil)
+
+	GetConversation(ctx)
+
+	var payload conversationDetailPayload
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.True(t, payload.Success)
+	require.Len(t, payload.Data.Turns, 50)
+	require.Equal(t, true, payload.Data.Session["truncated"])
+}
+
+func TestGetConversationPageBeyondAvailableTurns(t *testing.T) {
+	db := setupConversationControllerTestDB(t)
+	insertConversationTurns(t, db, "conv-short", 3)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "session_key", Value: "conv-short"}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/conv-short?p=5&page_size=10", nil)
+
+	GetConversation(ctx)
+
+	var payload conversationDetailPayload
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.True(t, payload.Success)
+	require.Empty(t, payload.Data.Turns)
+	require.Empty(t, payload.Data.Messages)
+	require.Equal(t, float64(3), payload.Data.Session["turn_count"])
+	require.Equal(t, false, payload.Data.Session["truncated"])
+}
