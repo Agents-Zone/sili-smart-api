@@ -39,7 +39,6 @@ type ConversationInput struct {
 	CreatedAt         int64
 	Messages          []MsgPart // 由 RecordConversation 内部解析后填充
 	TurnKind          string
-	Truncated         int64
 	ModelName         string
 	ChannelID         int
 	TokenID           int
@@ -1208,7 +1207,6 @@ func RecordConversation(input ConversationInput) {
 			CreatedAt:         input.CreatedAt,
 			Messages:          string(messagesJSON),
 			TurnKind:          turnKindFor(joinedParts, isNew),
-			Truncated:         input.Truncated,
 			ModelName:         input.ModelName,
 			ChannelId:         input.ChannelID,
 			TokenId:           input.TokenID,

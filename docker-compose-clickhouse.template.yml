@@ -83,10 +83,11 @@ services:
       - clickhouse_data:/var/lib/clickhouse
     networks:
       - sili-network
-    # 容器内 new-api 经 9000 端口直连，无需暴露；外部访问时解开下面两行
-    # ports:
-    #   - "8123:8123"   # HTTP 接口
-    #   - "9000:9000"   # Native 接口（LOG_SQL_DSN 走此端口）
+    # 默认暴露 8123(HTTP)/9000(Native)，供外部工具（DBeaver、clickhouse-client 等）查询日志库；
+    # new-api 容器经 sili-network 直连 clickhouse:9000，不依赖此映射。生产无需外部访问时可注释。
+    ports:
+      - "8123:8123"   # HTTP 接口（DBeaver、HTTP 查询）
+      - "9000:9000"   # Native 接口（clickhouse-client、LOG_SQL_DSN）
 
 volumes:
   pg_data:

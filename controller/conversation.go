@@ -83,10 +83,10 @@ func ListConversations(c *gin.Context) {
 // GetConversation 返回 {session, messages, turns}。session 为聚合元数据（session_key、
 // token_name、username、user_id、model_name、首末轮时间、总轮数、是否还有后续轮次）；
 // turns 为
-// 逐轮元数据 {id, created_at, request_id, turn_kind, truncated}，不含每轮消息内容；
+// 逐轮元数据 {id, created_at, request_id, turn_kind}，不含每轮消息内容；
 // messages 为按 created_at, request_id 升序 append 得到的完整 []MsgPart 序列，是
 // 详情响应的唯一消息内容来源。长会话详情分页单独解析 p/page_size（不走 GetPageQuery
-// 的 100 上限，允许最大 200），单响应上限 200 轮，超限截断并置 truncated 提示。
+// 的 100 上限，允许最大 200），单响应上限 200 轮，超限置 session.truncated 分页标志。
 // 不回传整表维度字段（ip/channel_id/token_id/use_time 不进入响应）。
 func GetConversation(c *gin.Context) {
 	sessionKey := c.Param("session_key")
@@ -146,7 +146,6 @@ func GetConversation(c *gin.Context) {
 			"created_at": turn.CreatedAt,
 			"request_id": turn.RequestId,
 			"turn_kind":  turn.TurnKind,
-			"truncated":  turn.Truncated,
 		})
 	}
 

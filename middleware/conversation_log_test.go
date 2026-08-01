@@ -62,50 +62,59 @@ func TestIsConversationPath(t *testing.T) {
 	}
 }
 
-// TestConversationResponseWriter 响应捕获包装（BR3）：maxSize 内全量缓存、超限截断并
-// 累计 truncated、始终透传底层 writer。
+// TestConversationResponseWriter 响应捕获包装（BR3）：maxSize=0（默认无限）全量缓存不丢；
+// maxSize>0（安全阀）时超限丢弃并累计 droppedBytes；始终透传底层 writer。
 func TestConversationResponseWriter(t *testing.T) {
 	tests := []struct {
-		name          string
-		maxSize       int
-		writes        []string
-		wantBody      string
-		wantTruncated int64
+		name        string
+		maxSize     int
+		writes      []string
+		wantBody    string
+		wantDropped int64
 	}{
+		// maxSize=0（默认无限）：全量缓存，无丢弃。
 		{
-			name:          "single_write_within_limit",
-			maxSize:       10,
-			writes:        []string{"12345"},
-			wantBody:      "12345",
-			wantTruncated: 0,
+			name:        "unlimited_single_write",
+			maxSize:     0,
+			writes:      []string{"1234567890123456789012345"},
+			wantBody:    "1234567890123456789012345",
+			wantDropped: 0,
 		},
 		{
-			name:          "single_write_exceeds_limit_25_bytes",
-			maxSize:       10,
-			writes:        []string{"1234567890123456789012345"},
-			wantBody:      "1234567890",
-			wantTruncated: 15,
+			name:        "unlimited_multiple_writes",
+			maxSize:     0,
+			writes:      []string{"12345", "12345678901234567890", "abcdef"},
+			wantBody:    "1234512345678901234567890abcdef",
+			wantDropped: 0,
+		},
+		// maxSize>0（安全阀）：超限丢弃并累计 droppedBytes。
+		{
+			name:        "limited_single_write_exceeds",
+			maxSize:     10,
+			writes:      []string{"1234567890123456789012345"},
+			wantBody:    "1234567890",
+			wantDropped: 15,
 		},
 		{
-			name:          "multiple_writes_cross_limit",
-			maxSize:       10,
-			writes:        []string{"12345", "12345678901234567890"},
-			wantBody:      "1234512345",
-			wantTruncated: 15,
+			name:        "limited_multiple_writes_cross_limit",
+			maxSize:     10,
+			writes:      []string{"12345", "12345678901234567890"},
+			wantBody:    "1234512345",
+			wantDropped: 15,
 		},
 		{
-			name:          "write_after_full_all_truncated",
-			maxSize:       10,
-			writes:        []string{"1234567890", "abcdef"},
-			wantBody:      "1234567890",
-			wantTruncated: 6,
+			name:        "limited_write_after_full_all_dropped",
+			maxSize:     10,
+			writes:      []string{"1234567890", "abcdef"},
+			wantBody:    "1234567890",
+			wantDropped: 6,
 		},
 		{
-			name:          "exactly_at_limit_no_truncation",
-			maxSize:       10,
-			writes:        []string{"1234567890"},
-			wantBody:      "1234567890",
-			wantTruncated: 0,
+			name:        "limited_exactly_at_limit_no_drop",
+			maxSize:     10,
+			writes:      []string{"1234567890"},
+			wantBody:    "1234567890",
+			wantDropped: 0,
 		},
 	}
 	for _, tt := range tests {
@@ -125,7 +134,7 @@ func TestConversationResponseWriter(t *testing.T) {
 				assert.Equal(t, len(s), n, "WriteString 返回透传字节数")
 			}
 			assert.Equal(t, tt.wantBody, w.body.String(), "body 缓冲区内容")
-			assert.Equal(t, tt.wantTruncated, w.truncated, "truncated 累计截断字节数")
+			assert.Equal(t, tt.wantDropped, w.droppedBytes, "droppedBytes 累计丢弃字节数")
 			// 始终透传：底层 ResponseRecorder 收到完整字节。
 			assert.Equal(t, wantTotal, rec.Body.Len(), "底层 writer 透传完整字节")
 		})
@@ -290,7 +299,6 @@ func setupConversationLogTestDB(t *testing.T) {
 		created_at INTEGER DEFAULT 0,
 		messages TEXT DEFAULT '',
 		turn_kind TEXT DEFAULT 'normal',
-		truncated INTEGER DEFAULT 0,
 		model_name TEXT DEFAULT '',
 		channel_id INTEGER DEFAULT 0,
 		token_id INTEGER DEFAULT 0,

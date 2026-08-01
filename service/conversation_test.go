@@ -940,7 +940,6 @@ func setupServiceConversationTestDB(t *testing.T) {
 		created_at INTEGER DEFAULT 0,
 		messages TEXT DEFAULT '',
 		turn_kind TEXT DEFAULT 'normal',
-		truncated INTEGER DEFAULT 0,
 		model_name TEXT DEFAULT '',
 		channel_id INTEGER DEFAULT 0,
 		token_id INTEGER DEFAULT 0,

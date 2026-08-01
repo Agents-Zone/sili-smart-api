@@ -27,7 +27,6 @@ erDiagram
         Int64 created_at "轮次时间（秒级 Unix）"
         String messages "本轮消息序列 JSON"
         String turn_kind "轮次类型枚举"
-        Int64 truncated "截断标记"
         String model_name "模型维度"
         Int32 channel_id "渠道维度"
         Int32 token_id "令牌维度"
@@ -76,7 +75,6 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
     created_at Int64 DEFAULT 0,
     messages String DEFAULT '',
     turn_kind String DEFAULT 'normal',
-    truncated Int64 DEFAULT 0,
     model_name String DEFAULT '',
     channel_id Int32 DEFAULT 0,
     token_id Int32 DEFAULT 0,
@@ -113,7 +111,6 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 | created_at | Int64 | 是 | 0 | 轮次时间，Unix 秒级时间戳（`common.GetTimestamp()`）；分区与排序键（规则文件 §1.7） |
 | messages | String | 是 | '' | 本轮完整消息序列 `[]MsgPart{role,kind,text}` 的 JSON 序列化，经 `common.Marshal` 写入；请求侧增量在前、响应侧在后（规则文件 §1.5 禁止 JSON 列，用 String 承载） |
 | turn_kind | String | 是 | 'normal' | 轮次类型，枚举：turn_kind（first/normal/tool_round），tool_round 优先级最高 |
-| truncated | Int64 | 是 | 0 | 0 表示未截断，大于 0 为截断字节数；响应体超 256KB buffer 上限时置位 |
 | model_name | String | 否 | '' | 模型名称维度字段，从 context/请求取得 |
 | channel_id | Int32 | 否 | 0 | 渠道 ID 维度字段 |
 | token_id | Int32 | 否 | 0 | 令牌 ID 维度字段 |
@@ -209,7 +206,7 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 | 数据保留 | TTL 读 `LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS` | 自动清理，无需定期任务删除（与 logs 各自独立） |
 | 大字段 | `messages` 单列存序列化 JSON | 查询侧按需解码，列表接口不读该列 |
 | 异步写库 | `gopool.Go` 编排 | 写库不阻塞响应路径，闭包只捕获纯值 |
-| 捕获开销 | 256KB buffer 上限 | 超限截断置 `truncated`，内存占用有界 |
+| 捕获开销 | 默认全量捕获 | `CONVERSATION_LOG_BODY_LIMIT_KB` 安全阀（默认 0 无限）兜底，触发时丢弃超出部分并 `SysError` 记录 |
 | 会话缓存 | Redis + 进程内 map | 命中即复用 sessionKey，避免会话识别查询开销 |
 
 ## 安全措施

@@ -15,7 +15,6 @@ type ConversationTurn struct {
 	CreatedAt         int64  `json:"created_at"`
 	Messages          string `json:"messages"`
 	TurnKind          string `json:"turn_kind"`
-	Truncated         int64  `json:"truncated"`
 	ModelName         string `json:"model_name"`
 	ChannelId         int    `json:"channel_id"`
 	TokenId           int    `json:"token_id"`
@@ -65,7 +64,6 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
 	created_at Int64 DEFAULT 0,
 	messages String DEFAULT '',
 	turn_kind String DEFAULT 'normal',
-	truncated Int64 DEFAULT 0,
 	model_name String DEFAULT '',
 	channel_id Int32 DEFAULT 0,
 	token_id Int32 DEFAULT 0,

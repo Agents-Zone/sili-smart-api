@@ -197,7 +197,7 @@ func TestGetConversationReturnsSessionTurnsAndMergedMessages(t *testing.T) {
 		require.Contains(t, turn, "created_at")
 		require.Contains(t, turn, "request_id")
 		require.Contains(t, turn, "turn_kind")
-		require.Contains(t, turn, "truncated")
+		require.NotContains(t, turn, "truncated")
 		require.NotContains(t, turn, "messages")
 		require.NotContains(t, turn, "ip")
 		require.NotContains(t, turn, "channel_id")

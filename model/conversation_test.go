@@ -65,7 +65,6 @@ func setupConversationTurnTestDB(t *testing.T) {
 		created_at INTEGER DEFAULT 0,
 		messages TEXT DEFAULT '',
 		turn_kind TEXT DEFAULT 'normal',
-		truncated INTEGER DEFAULT 0,
 		model_name TEXT DEFAULT '',
 		channel_id INTEGER DEFAULT 0,
 		token_id INTEGER DEFAULT 0,
@@ -151,7 +150,6 @@ func TestRecordConversationTurnZeroValueDimensions(t *testing.T) {
 
 	var got ConversationTurn
 	require.NoError(t, LOG_DB.Table("conversation_turns").Where("session_key = ?", "conv_zero").First(&got).Error)
-	assert.Equal(t, int64(0), got.Truncated)
 	assert.Equal(t, "", got.ModelName)
 	assert.Equal(t, "", got.TokenName)
 	assert.Equal(t, 0, got.ChannelId)
