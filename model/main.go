@@ -408,7 +408,15 @@ func migrateClickHouseLogDB() error {
 	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
 		return err
 	}
-	return syncClickHouseLogTTL(ttlDays)
+	if err := syncClickHouseTTL("logs", ttlDays); err != nil {
+		return err
+	}
+	// conversation_turns 与 logs 共用同一日志库与同一 TTL 配置（LOG_SQL_CLICKHOUSE_TTL_DAYS），
+	// 建表与 TTL 同步在同一启动迁移路径内完成，保证两表保留期始终一致、配置变更后重启即生效。
+	if err := LOG_DB.Exec(conversationTurnCreateTableSQL(ttlDays)).Error; err != nil {
+		return err
+	}
+	return syncClickHouseTTL("conversation_turns", ttlDays)
 }
 
 func clickHouseLogTTLDays() int {
@@ -463,25 +471,28 @@ PARTITION BY toYYYYMM(toDateTime(created_at))
 ORDER BY (created_at, request_id)%s`, clickHouseLogTTLClause(ttlDays))
 }
 
-func syncClickHouseLogTTL(ttlDays int) error {
+// syncClickHouseTTL 把 tableName 的 TTL 对齐到 ttlDays：正值经 MODIFY TTL 写入，
+// 零或负值时若表已带 TTL 则 REMOVE，未带则跳过。表名受控（"logs"/"conversation_turns"），
+// 两表共用同一份逻辑，保证保留期始终一致。
+func syncClickHouseTTL(tableName string, ttlDays int) error {
 	expression := clickHouseLogTTLExpression(ttlDays)
 	if expression != "" {
-		return LOG_DB.Exec("ALTER TABLE logs MODIFY TTL " + expression).Error
+		return LOG_DB.Exec(fmt.Sprintf("ALTER TABLE %s MODIFY TTL %s", tableName, expression)).Error
 	}
 
-	hasTTL, err := clickHouseLogTableHasTTL()
+	hasTTL, err := clickHouseTableHasTTL(tableName)
 	if err != nil {
 		return err
 	}
 	if !hasTTL {
 		return nil
 	}
-	return LOG_DB.Exec("ALTER TABLE logs REMOVE TTL").Error
+	return LOG_DB.Exec(fmt.Sprintf("ALTER TABLE %s REMOVE TTL", tableName)).Error
 }
 
-func clickHouseLogTableHasTTL() (bool, error) {
+func clickHouseTableHasTTL(tableName string) (bool, error) {
 	var createTableSQL string
-	if err := LOG_DB.Raw("SHOW CREATE TABLE logs").Scan(&createTableSQL).Error; err != nil {
+	if err := LOG_DB.Raw(fmt.Sprintf("SHOW CREATE TABLE %s", tableName)).Scan(&createTableSQL).Error; err != nil {
 		return false, err
 	}
 	return clickHouseCreateTableHasTTL(createTableSQL), nil

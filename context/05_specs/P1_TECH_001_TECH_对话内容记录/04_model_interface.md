@@ -139,7 +139,7 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 |--------|------|------|------|
 | 主键排序键 | ORDER BY（MergeTree 主键） | `(session_key, created_at, request_id)` | 会话聚合查询（按 session_key）与轮次时间序排序（created_at, request_id）的存储主键，会话详情按序扫描高效 |
 | 分区键 | PARTITION BY | `toYYYYMM(toDateTime(created_at))` | 按月分区，配合 TTL 自动清理过期分区数据 |
-| 数据保留 | TTL | `toDateTime(created_at)` | 保留周期复用 `LOG_SQL_CLICKHOUSE_TTL_DAYS`，建表后经 `ALTER TABLE ... MODIFY TTL` 动态对齐配置 |
+| 数据保留 | TTL | `toDateTime(created_at)` | 保留周期复用 `LOG_SQL_CLICKHOUSE_TTL_DAYS`，启动迁移时经 `ALTER TABLE ... MODIFY TTL` 动态对齐配置（与 logs 同源同路径） |
 
 **业务规则/使用场景：**
 
@@ -148,7 +148,7 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 - 跨库聚合约束：SELECT 中 `session_key` 之外的维度列必须用聚合函数包裹（ClickHouse 用 `any()`），禁止裸返回非聚合列；首末轮时间与轮数是时间窗口内轮次的统计，非会话全量统计。
 - 本表不记 `quota`、不做计费运算；计费信息归 logs 表，按 `request_id` 交叉关联。
 - 失败/错误响应（4xx/5xx）同样入库：request 侧消息按请求体解析保留，assistant 侧解析失败记空、usage 失败记 0，缺失维度记零值。
-- 建表幂等：`EnsureConversationTable` 由 `sync.Once` 保护，并发首请求只建一次表。
+- 建表迁移：`migrateClickHouseLogDB` 启动时建表（`CREATE TABLE IF NOT EXISTS` 幂等），与 logs 同路径同时机；TTL 经 `syncClickHouseTTL` 动态对齐 `LOG_SQL_CLICKHOUSE_TTL_DAYS`。
 
 ---
 
@@ -223,7 +223,7 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 
 | 项 | 设计 | 说明 |
 |----|------|------|
-| 幂等性 | `EnsureConversationTable` 由 `sync.Once` 保护 | 并发首请求只建一次表 |
+| 幂等性 | `migrateClickHouseLogDB` 启动迁移 `CREATE TABLE IF NOT EXISTS` | 与 logs 同路径，启动建表幂等，配置变更重启重新对齐 TTL |
 | 并发控制 | `RedisSetNX` 原子抢占 | 消除同会话首批请求并发劈会话窗口 |
 | 会话续链 | Redis 状态，TTL 30min 滚动续期 | 网关重启不断链（TTL 内续得上），多副本跨实例续上同一会话 |
 | 一致性 | 最终一致 | 异步写库，查询侧按 `created_at, request_id` 排序聚合 |

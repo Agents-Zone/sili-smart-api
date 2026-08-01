@@ -7,7 +7,6 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
@@ -20,9 +19,10 @@ import (
 const conversationBodyCaptureLimit = 256 * 1024
 
 // ConversationLog 返回挂载在 relay 路由分组上的 gin middleware。
-// 读取 CONVERSATION_LOG_ENABLED：关时直接 c.Next() 零开销（不读 Body、不包装 writer、
-// 不建表）；开时先按路径白名单过滤（见 isConversationPath），命中才继续捕获，随后
-// gopool.Go 调 service.RecordConversation，闭包只捕获纯值。
+// 读取 CONVERSATION_LOG_ENABLED：关时直接 c.Next() 零开销（不读 Body、不包装 writer）；
+// 开时先按路径白名单过滤（见 isConversationPath），命中才继续捕获，随后
+// gopool.Go 调 service.RecordConversation，闭包只捕获纯值。建表与 TTL 同步由
+// migrateClickHouseLogDB 启动迁移负责（与 logs 同路径），middleware 只做捕获。
 func ConversationLog() gin.HandlerFunc {
 	enabled := common.GetEnvOrDefaultBool("CONVERSATION_LOG_ENABLED", false)
 	return func(c *gin.Context) {
@@ -35,9 +35,6 @@ func ConversationLog() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-
-		// 首次生效时建表（sync.Once 内部保护）。
-		model.EnsureConversationTable()
 
 		// 请求体：GetBodyStorage 触发缓存，Bytes 取出后立即 Clone 并按 256KB 兜底截断。
 		// memoryStorage.Bytes() 返回内部 slice 引用，BodyStorageCleanup 请求结束即 Close

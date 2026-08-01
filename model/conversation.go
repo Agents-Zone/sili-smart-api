@@ -2,7 +2,6 @@ package model
 
 import (
 	"fmt"
-	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 )
@@ -53,32 +52,9 @@ type ConversationQueryParams struct {
 	EndTimestamp   int64
 }
 
-var conversationEnsureOnce sync.Once
-
-// EnsureConversationTable 幂等建表，sync.Once 保护。仅 ClickHouse 走手写 DDL，
-// 非 ClickHouse 日志库不建表（conversation_turns 仅落 ClickHouse）。
-func EnsureConversationTable() {
-	conversationEnsureOnce.Do(func() {
-		if common.LogDatabaseType() != common.DatabaseTypeClickHouse {
-			return
-		}
-		if err := LOG_DB.Exec(conversationTurnCreateTableSQL(conversationTurnTTLDays())).Error; err != nil {
-			common.SysError("failed to ensure conversation_turns table: " + err.Error())
-		}
-	})
-}
-
-// conversationTurnTTLDays 复用 LOG_SQL_CLICKHOUSE_TTL_DAYS，负值归 0（对齐 clickHouseLogTTLDays）。
-func conversationTurnTTLDays() int {
-	ttlDays := common.GetEnvOrDefault("LOG_SQL_CLICKHOUSE_TTL_DAYS", 0)
-	if ttlDays < 0 {
-		return 0
-	}
-	return ttlDays
-}
-
-// conversationTurnCreateTableSQL 生成 ClickHouse 建表 DDL。
-// group 为保留字，列名用 logGroupCol 方言变量包裹；TTL 复用 clickHouseLogTTLClause。
+// conversationTurnCreateTableSQL 生成 ClickHouse 建表 DDL，由 migrateClickHouseLogDB 启动迁移调用
+//（与 logs 同路径同时机）。group 为保留字，列名用 logGroupCol 方言变量包裹；
+// TTL 复用 clickHouseLogTTLClause，天数与 logs 同源（clickHouseLogTTLDays 读 LOG_SQL_CLICKHOUSE_TTL_DAYS）。
 func conversationTurnCreateTableSQL(ttlDays int) string {
 	return fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS conversation_turns (

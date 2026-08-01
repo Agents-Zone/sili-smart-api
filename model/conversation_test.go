@@ -49,14 +49,6 @@ func TestAssignTurnIds(t *testing.T) {
 	assert.NotPanics(t, func() { assignTurnIds([]ConversationTurn{}, 0) })
 }
 
-func TestConversationTurnTTLDays(t *testing.T) {
-	t.Setenv("LOG_SQL_CLICKHOUSE_TTL_DAYS", "30")
-	assert.Equal(t, 30, conversationTurnTTLDays())
-
-	t.Setenv("LOG_SQL_CLICKHOUSE_TTL_DAYS", "-5")
-	assert.Equal(t, 0, conversationTurnTTLDays())
-}
-
 func setupConversationTurnTestDB(t *testing.T) {
 	t.Helper()
 	previousDB, previousLogDB := DB, LOG_DB
@@ -88,14 +80,6 @@ func setupConversationTurnTestDB(t *testing.T) {
 		prompt_tokens INTEGER DEFAULT 0,
 		completion_tokens INTEGER DEFAULT 0
 	)`).Error)
-}
-
-func TestEnsureConversationTableNonClickHouse(t *testing.T) {
-	original := common.LogDatabaseType()
-	t.Cleanup(func() { common.SetLogDatabaseType(original) })
-	common.SetLogDatabaseType(common.DatabaseTypeSQLite)
-	// 非 ClickHouse 日志库下不建表、不访问 LOG_DB（conversation_turns 仅落 ClickHouse）
-	assert.NotPanics(t, EnsureConversationTable)
 }
 
 func TestRecordConversationTurn(t *testing.T) {
