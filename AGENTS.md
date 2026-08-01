@@ -6,6 +6,12 @@
 
 这是一个用 Go 构建的 AI API 网关/代理。它在统一 API 之后聚合了 40 多家上游 AI 提供商（OpenAI、Claude、Gemini、Azure、AWS Bedrock 等），并提供用户管理、计费、限流与管理后台。
 
+## 项目级规则文件
+
+| 文件名 | 路径 | 说明 |
+|--------|------|------|
+| AGENTS_DATABASE_API_RULE | ./AGENTS_DATABASE_API_RULE.md | 数据库与 API 接口设计项目级规则，新增表结构与接口设计必须遵守 |
+
 ## 技术栈
 
 - **后端**：Go 1.22+、Gin Web 框架、GORM v2 ORM
