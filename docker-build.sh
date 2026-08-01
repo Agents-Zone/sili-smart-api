@@ -24,8 +24,8 @@ trap 'printf "" > VERSION' EXIT
 echo ">> 写入 VERSION=$TAG"
 echo "$TAG" > VERSION
 
-echo ">> 构建镜像 sili-smart-trace:${TAG}"
-docker build -t "sili-smart-trace:${TAG}" .
+echo ">> 构建镜像 sili/sili-smart-trace:${TAG}"
+docker build -t "sili/sili-smart-trace:${TAG}" .
 
 echo ">> 同步 TAG 到 .env（供根目录模板 compose 本地开发引用）"
 echo "TAG=${TAG}" > .env
@@ -35,14 +35,14 @@ mkdir -p "$RELEASE_DIR"
 
 TAR_NAME="sili-smart-trace-${TAG_SUFFIX}.tar"
 echo "  - 导出镜像 ${TAR_NAME}"
-docker save "sili-smart-trace:${TAG}" -o "${RELEASE_DIR}/${TAR_NAME}"
+docker save "sili/sili-smart-trace:${TAG}" -o "${RELEASE_DIR}/${TAR_NAME}"
 
 echo "  - 固化 compose（image tag 写死为 ${TAG}）"
 sed 's|\${TAG:-local}|'"${TAG}"'|g' docker-compose-clickhouse.yml > "${RELEASE_DIR}/docker-compose-clickhouse.yml"
 
 cat <<EOF
 ✓ 完成。
-  镜像：sili-smart-trace:${TAG}（版本号已编进二进制，VERSION 已还原为空）
+  镜像：sili/sili-smart-trace:${TAG}（版本号已编进二进制，VERSION 已还原为空）
 
   离线交付（${RELEASE_DIR}/）：
     ${TAR_NAME}

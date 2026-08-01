@@ -13,7 +13,7 @@
 
 services:
   new-api:
-    image: sili-smart-trace:${TAG:-local}
+    image: sili/sili-smart-trace:${TAG:-local}
     container_name: sili-smart-trace
     restart: always
     command: --log-dir /app/logs

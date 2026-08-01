@@ -31,8 +31,8 @@ try {
     Write-Host ">> 写入 VERSION=$tag"
     [System.IO.File]::WriteAllText("$PSScriptRoot\VERSION", $tag, $utf8NoBom)
 
-    Write-Host ">> 构建镜像 sili-smart-trace:$tag"
-    docker build -t "sili-smart-trace:$tag" .
+    Write-Host ">> 构建镜像 sili/sili-smart-trace:$tag"
+    docker build -t "sili/sili-smart-trace:$tag" .
     if ($LASTEXITCODE -ne 0) { throw "docker build 失败（退出码 $LASTEXITCODE）" }
 
     Write-Host ">> 同步 TAG 到 .env（供根目录模板 compose 本地开发引用）"
@@ -43,7 +43,7 @@ try {
 
     $tarName = "sili-smart-trace-$tagSuffix.tar"
     Write-Host "  - 导出镜像 $tarName"
-    docker save "sili-smart-trace:$tag" -o (Join-Path $releaseDir $tarName)
+    docker save "sili/sili-smart-trace:$tag" -o (Join-Path $releaseDir $tarName)
     if ($LASTEXITCODE -ne 0) { throw "docker save 失败（退出码 $LASTEXITCODE）" }
 
     Write-Host "  - 固化 compose（image tag 写死为 $tag）"
@@ -53,7 +53,7 @@ try {
 
     Write-Host ''
     Write-Host '✓ 完成。'
-    Write-Host "  镜像：sili-smart-trace:$tag（版本号已编进二进制，VERSION 已还原为空）"
+    Write-Host "  镜像：sili/sili-smart-trace:$tag（版本号已编进二进制，VERSION 已还原为空）"
     Write-Host ''
     Write-Host "  离线交付（$releaseDir/）："
     Write-Host "    $tarName"
