@@ -13,6 +13,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// conversationBodyCaptureLimit 请求/响应体捕获上限（256KB，与 specs §3.2 响应 buffer
+// 上限同阈值，请求 body 同阈值兜底）。响应侧经 conversationResponseWriter 截断并累计
+// truncated；请求侧 GetBodyStorage 字节超限时按同一阈值截断，截断字节数并入 truncated。
+// ConversationInput 的 Truncated 单一字段表达两侧截断总量，不新增请求侧字段、不改契约。
+const conversationBodyCaptureLimit = 256 * 1024
+
 // ConversationLog 返回挂载在 relay 路由分组上的 gin middleware。
 // 读取 CONVERSATION_LOG_ENABLED：关时直接 c.Next() 零开销（不读 Body、不包装 writer、
 // 不建表）；开时先按路径白名单过滤（见 isConversationPath），命中才继续捕获，随后
@@ -33,12 +39,20 @@ func ConversationLog() gin.HandlerFunc {
 		// 首次生效时建表（sync.Once 内部保护）。
 		model.EnsureConversationTable()
 
-		// 请求体：GetBodyStorage 触发缓存，Bytes 取出后立即 Clone。memoryStorage.Bytes()
-		// 返回内部 slice 引用，BodyStorageCleanup 请求结束即 Close storage。
+		// 请求体：GetBodyStorage 触发缓存，Bytes 取出后立即 Clone 并按 256KB 兜底截断。
+		// memoryStorage.Bytes() 返回内部 slice 引用，BodyStorageCleanup 请求结束即 Close
+		// storage。截断会让 RawRequestBody 成为非法 JSON，RecordConversation 的
+		// parseRequestMessages 解析失败会记空请求侧消息（既有兜底路径，可接受）。
 		var rawRequestBody []byte
+		var requestTruncated int64
 		if storage, err := common.GetBodyStorage(c); err == nil {
 			if b, err := storage.Bytes(); err == nil {
-				rawRequestBody = bytes.Clone(b)
+				if len(b) > conversationBodyCaptureLimit {
+					rawRequestBody = bytes.Clone(b[:conversationBodyCaptureLimit])
+					requestTruncated = int64(len(b) - conversationBodyCaptureLimit)
+				} else {
+					rawRequestBody = bytes.Clone(b)
+				}
 			}
 		}
 
@@ -46,7 +60,7 @@ func ConversationLog() gin.HandlerFunc {
 		writer := &conversationResponseWriter{
 			ResponseWriter: c.Writer,
 			body:           bytes.NewBuffer(nil),
-			maxSize:        256 * 1024,
+			maxSize:        conversationBodyCaptureLimit,
 		}
 		c.Writer = writer
 
@@ -59,7 +73,7 @@ func ConversationLog() gin.HandlerFunc {
 		input := service.ConversationInput{
 			RequestID:         c.GetString(common.RequestIdKey),
 			CreatedAt:         common.GetTimestamp(),
-			Truncated:         writer.truncated,
+			Truncated:         writer.truncated + requestTruncated,
 			ModelName:         common.GetContextKeyString(c, constant.ContextKeyOriginalModel),
 			ChannelID:         common.GetContextKeyInt(c, constant.ContextKeyChannelId),
 			TokenID:           common.GetContextKeyInt(c, constant.ContextKeyTokenId),

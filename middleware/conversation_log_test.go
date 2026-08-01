@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -213,6 +214,60 @@ func TestConversationLogEnabledCaptures(t *testing.T) {
 	assert.Equal(t, "up_req_mw_1", turn.UpstreamRequestId)
 	assert.Equal(t, 10, turn.PromptTokens)
 	assert.Equal(t, 5, turn.CompletionTokens)
+}
+
+// TestConversationLogEnabledCapturesStream 开启且命中白名单的流式响应捕获（BR2/BR3）：
+// IsStream=true 经 ConversationInput 透传落库，SSE 流式 assistant 内容正确解析为请求侧+
+// 响应侧消息，usage chunk 的 token 正常落库。
+func TestConversationLogEnabledCapturesStream(t *testing.T) {
+	setupConversationLogTestDB(t)
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = false
+	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
+
+	t.Setenv("CONVERSATION_LOG_ENABLED", "true")
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/v1/chat/completions", ConversationLog(), func(c *gin.Context) {
+		common.SetContextKey(c, constant.ContextKeyOriginalModel, "gpt-4o")
+		common.SetContextKey(c, constant.ContextKeyChannelId, 1)
+		common.SetContextKey(c, constant.ContextKeyTokenId, 2)
+		common.SetContextKey(c, constant.ContextKeyUserId, 3)
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, "g")
+		common.SetContextKey(c, constant.ContextKeyIsStream, true)
+		c.Set("token_name", "tk")
+		c.Set("username", "u")
+		c.Set(common.RequestIdKey, "req_mw_2")
+		c.Set(common.UpstreamRequestIdKey, "up_req_mw_2")
+		c.String(http.StatusOK,
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n"+
+				"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"，世界\"}}]}\n\n"+
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":6}}\n\n"+
+				"data: [DONE]\n")
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"你好"}]}`))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "响应透传成功")
+
+	var turn model.ConversationTurn
+	require.Eventually(t, func() bool {
+		return model.LOG_DB.Table("conversation_turns").Where("request_id = ?", "req_mw_2").First(&turn).Error == nil
+	}, 3*time.Second, 10*time.Millisecond, "异步写库应在超时内完成")
+
+	assert.True(t, turn.IsStream, "IsStream=true 经 ConversationInput 透传落库")
+	assert.Equal(t, 12, turn.PromptTokens, "流式 usage prompt_tokens 落库")
+	assert.Equal(t, 6, turn.CompletionTokens, "流式 usage completion_tokens 落库")
+
+	var parts []service.MsgPart
+	require.NoError(t, common.Unmarshal([]byte(turn.Messages), &parts), "Messages 应为合法 []MsgPart JSON")
+	assert.Equal(t, []service.MsgPart{
+		{Role: "user", Kind: "text", Text: "你好"},
+		{Role: "assistant", Kind: "text", Text: "你好，世界"},
+	}, parts, "请求侧+流式响应侧消息正确解析并落库")
 }
 
 // setupConversationLogTestDB 替换 model.DB/model.LOG_DB 为 sqlite 内存库并建
