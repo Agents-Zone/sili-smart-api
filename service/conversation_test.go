@@ -572,6 +572,45 @@ func TestResolveSessionKeySingleInstanceDegraded(t *testing.T) {
 	assert.NotEqual(t, sk1, skOtherToken, "不同 tokenID 同内容必须分桶为不同会话")
 }
 
+// TestResolveSessionKeyNilParts 空 requestParts（resolveSessionKey 的 T2 边界）：
+// nil 输入不 panic，sessionKey 非空且确定，同一输入重复调用行为一致，空输入仍受
+// token_id 分桶。覆盖退化单实例与 Redis 可用两条路径。
+func TestResolveSessionKeyNilParts(t *testing.T) {
+	t.Run("degraded_single_instance", func(t *testing.T) {
+		previousRedisEnabled := common.RedisEnabled
+		common.RedisEnabled = false
+		sessionKeyLocalMap = sync.Map{}
+		singleInstanceLogOnce = sync.Once{}
+		t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
+
+		sk1, isNew1 := resolveSessionKey(1, nil)
+		sk2, isNew2 := resolveSessionKey(1, nil)
+		assert.NotEmpty(t, sk1, "空输入必须得到非空 sessionKey")
+		assert.True(t, isNew1, "空输入首次调用必须判定为新会话")
+		assert.Equal(t, sk1, sk2, "空输入同 tokenID 重复调用必须复用同一 sessionKey")
+		assert.False(t, isNew2, "空输入二次调用必须命中已有会话")
+
+		skOther, _ := resolveSessionKey(2, nil)
+		assert.NotEqual(t, sk1, skOther, "空输入也受 token_id 分桶")
+	})
+
+	t.Run("redis_available", func(t *testing.T) {
+		server := useIndependentSessionRedis(t)
+
+		sk1, isNew1 := resolveSessionKey(1, nil)
+		sk2, isNew2 := resolveSessionKey(1, nil)
+		assert.NotEmpty(t, sk1, "空输入必须得到非空 sessionKey")
+		assert.True(t, isNew1)
+		assert.Equal(t, sk1, sk2, "空输入同 tokenID 经 Redis 命中必须复用 sessionKey")
+		assert.False(t, isNew2)
+
+		key := convSessionCachePrefix + "1:" + prefixHash(1, nil)
+		val, err := server.Get(key)
+		require.NoError(t, err)
+		assert.Equal(t, sk1, val, "空输入 sessionKey 必须经 SetNX 落盘 Redis")
+	})
+}
+
 // TestResolveSessionKeyDegradedLogsSingleInstance Redis 未配置时首例退化必须经
 // common.SysError 标注单实例模式（sync.Once 保护），即 BR4。
 func TestResolveSessionKeyDegradedLogsSingleInstance(t *testing.T) {
