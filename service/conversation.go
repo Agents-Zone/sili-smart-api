@@ -664,7 +664,7 @@ func sortedToolCallIndexes(toolCalls map[int]*accumToolCall) []int {
 }
 
 // assembleStreamParts 组装流式输出：join textParts 得到文本段，再按 index 升序
-// 追加工具调用段（跳过空文本与空工具调用）。
+// 追加工具调用段（跳过空文本与无名称工具调用，name 为空视为无有效工具调用）。
 func assembleStreamParts(textParts []string, toolCalls map[int]*accumToolCall) []MsgPart {
 	parts := make([]MsgPart, 0, len(toolCalls)+1)
 	if text := strings.Join(textParts, ""); text != "" {
@@ -672,7 +672,7 @@ func assembleStreamParts(textParts []string, toolCalls map[int]*accumToolCall) [
 	}
 	for _, idx := range sortedToolCallIndexes(toolCalls) {
 		tc := toolCalls[idx]
-		if tc.name == "" && tc.args == "" {
+		if tc.name == "" {
 			continue
 		}
 		parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: tc.name + "(" + tc.args + ")"})
