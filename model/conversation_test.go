@@ -13,7 +13,10 @@ import (
 
 func TestConversationTurnCreateTableSQL(t *testing.T) {
 	original := common.LogDatabaseType()
-	t.Cleanup(func() { common.SetLogDatabaseType(original) })
+	t.Cleanup(func() {
+		common.SetLogDatabaseType(original)
+		initCol()
+	})
 	common.SetLogDatabaseType(common.DatabaseTypeClickHouse)
 	initCol()
 
