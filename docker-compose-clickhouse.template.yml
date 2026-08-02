@@ -28,8 +28,11 @@ services:
       # 日志库：logs 与 conversation_turns 共用 ClickHouse
       - LOG_SQL_DSN=clickhouse://default:123456@clickhouse:9000/new_api_logs
       - LOG_SQL_CLICKHOUSE_TTL_DAYS=0              # logs 表保留天数（0/未设=永久，负值归 0）
-      - LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS=90     # conversation_turns 表保留天数（与 logs 独立，不回退）
+      - LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS=60     # conversation_turns 表保留天数（与 logs 独立，不回退）
       - CONVERSATION_LOG_ENABLED=true               # 对话内容记录总开关（需配 LOG_SQL_DSN 指向 ClickHouse，否则不生效）
+      # 集成密钥通道：CONVERSATION_LOG_ENABLED=true 时必填，否则启动 FatalLog 退出。
+      # 分析平台经 Authorization: Bearer <key> 拉取 /api/conversation-log；经 .env 或部署环境注入，不进库不下发前端。
+      - CONVERSATION_LOG_INTEGRATION_KEY=${CONVERSATION_LOG_INTEGRATION_KEY:-sk-conv-log-please-change-me}
       - REDIS_CONN_STRING=redis://:123456@redis:6379
       - TZ=Asia/Shanghai
       - ERROR_LOG_ENABLED=true

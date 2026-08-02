@@ -303,10 +303,16 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			logRoute.GET("/token", middleware.TokenAuthReadOnly(), controller.GetLogByKey)
 		}
-		conversationRoute := apiRouter.Group("/conversation")
-		conversationRoute.Use(middleware.AdminAuth())
-		conversationRoute.GET("/", controller.ListConversations)
-		conversationRoute.GET("/:session_key", controller.GetConversation)
+		// 对话内容记录查询通道：供独立部署的 AI 使用分析平台经 Bearer 密钥拉取对话原文，
+		// 不要求登录 new-api。复用 ListConversations / GetConversation controller，认证走环境变量
+		// CONVERSATION_LOG_INTEGRATION_KEY（不进库、不下发前端）。本组件不另挂 AdminAuth 管理员
+		// 路由：对话数据仅供外部平台消费，管理员后台不开放查询入口。
+		// 启动校验见 middleware.ValidateConversationLogAuth；继承 /api 父分组的 GlobalAPIRateLimit。
+		conversationLogRoute := apiRouter.Group("/conversation-log")
+		conversationLogRoute.Use(middleware.ConversationLogAuth())
+		conversationLogRoute.GET("/", controller.ListConversations)
+		conversationLogRoute.GET("/:session_key", controller.GetConversation)
+
 		groupRoute := apiRouter.Group("/group")
 		groupRoute.Use(middleware.AdminAuth())
 		{
