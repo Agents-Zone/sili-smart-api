@@ -10,7 +10,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/alicebob/miniredis/v2"
-	"github.com/alicebob/miniredis/v2/server"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/go-redis/redis/v8"
@@ -493,63 +492,38 @@ func TestProtocolForPath(t *testing.T) {
 	}
 }
 
-// TestPrefixHash 核心断言：同 tokenID 同内容同指纹；同 tokenID 不同内容不同指纹；
-// 不同 tokenID 同内容不同指纹（token_id 分桶）。
-func TestPrefixHash(t *testing.T) {
+// TestFingerprintMessages 核心断言：同 parts 同指纹；不同 parts 不同指纹；全字段不截断
+// （64 字符之后的差异仍能区分，旧 prefixHash 截断会误判相同）；role 参与 fingerprint；
+// 空输入确定。
+func TestFingerprintMessages(t *testing.T) {
 	parts := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "你好"}}
 	same := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "你好"}}
 	different := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "今天天气怎么样"}}
 
-	h1 := prefixHash(1, parts)
-	h2 := prefixHash(1, same)
-	h3 := prefixHash(1, different)
-	h4 := prefixHash(2, same)
-
+	h1 := fingerprintMessages(parts)
+	h2 := fingerprintMessages(same)
+	h3 := fingerprintMessages(different)
 	assert.NotEmpty(t, h1)
-	assert.Equal(t, h1, h2, "同 tokenID 同内容必须得到相同指纹")
-	assert.NotEqual(t, h1, h3, "同 tokenID 不同内容必须得到不同指纹")
-	assert.NotEqual(t, h1, h4, "不同 tokenID 同内容必须分桶为不同指纹")
-}
+	assert.Equal(t, h1, h2, "同内容必须得到相同指纹")
+	assert.NotEqual(t, h1, h3, "不同内容必须得到不同指纹")
 
-// TestPrefixHashEmptyParts 空 requestParts（组合文本为空）不 panic，指纹确定。
-func TestPrefixHashEmptyParts(t *testing.T) {
-	h1 := prefixHash(1, nil)
-	h2 := prefixHash(1, []MsgPart{})
-	assert.NotEmpty(t, h1)
-	assert.Equal(t, h1, h2, "空输入必须得到确定指纹")
-	assert.NotEqual(t, h1, prefixHash(2, nil), "空输入也受 token_id 分桶")
-}
+	// 不截断：前 64 字符相同、之后不同的长文本，指纹不同。
+	longX := strings.Repeat("a", 80) + "X"
+	longY := strings.Repeat("a", 80) + "Y"
+	assert.NotEqual(t,
+		fingerprintMessages([]MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: longX}}),
+		fingerprintMessages([]MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: longY}}),
+		"全字段指纹不截断，64 字符之后的差异必须区分")
 
-// TestCombineRequestTextByContentType 内容组合规则（BR2）：纯文本轮末条 user；
-// 工具轮全部 tool_result + 末条 user（tool_result 在前）；首轮全部 user 侧按原序。
-func TestCombineRequestTextByContentType(t *testing.T) {
-	pureTextTurn := []MsgPart{
-		{Role: msgRoleUser, Kind: msgKindText, Text: "第一问"},
-		{Role: msgRoleAssistant, Kind: msgKindText, Text: "回答一"},
-		{Role: msgRoleUser, Kind: msgKindText, Text: "第二问"},
-	}
-	assert.Equal(t, "第二问", combineRequestText(pureTextTurn), "纯文本轮只取末条 user 文本")
+	// role 参与 fingerprint：同 text 不同 role 指纹不同。
+	assert.NotEqual(t,
+		fingerprintMessages([]MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "t"}}),
+		fingerprintMessages([]MsgPart{{Role: msgRoleAssistant, Kind: msgKindText, Text: "t"}}),
+		"role 参与 fingerprint")
 
-	toolTurn := []MsgPart{
-		{Role: msgRoleUser, Kind: msgKindText, Text: "查天气"},
-		{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
-		{Role: msgRoleTool, Kind: msgKindToolResult, Text: "晴，25度"},
-		{Role: msgRoleTool, Kind: msgKindToolResult, Text: "风力3级"},
-		{Role: msgRoleUser, Kind: msgKindText, Text: "然后呢"},
-	}
-	assert.Equal(t, "晴，25度风力3级然后呢", combineRequestText(toolTurn), "工具轮为全部 tool_result + 末条 user，tool_result 在前")
-
-	firstTurn := []MsgPart{
-		{Role: msgRoleSystem, Kind: msgKindText, Text: "system prompt"},
-		{Role: msgRoleUser, Kind: msgKindText, Text: "你好"},
-	}
-	assert.Equal(t, "你好", combineRequestText(firstTurn), "首轮取全部 user 侧文本按原序")
-
-	firstTurnMultiUser := []MsgPart{
-		{Role: msgRoleUser, Kind: msgKindText, Text: "开场白"},
-		{Role: msgRoleUser, Kind: msgKindText, Text: "补充问题"},
-	}
-	assert.Equal(t, "开场白补充问题", combineRequestText(firstTurnMultiUser), "首轮多条 user 按请求原序拼接")
+	// 空输入确定指纹。
+	assert.NotEmpty(t, fingerprintMessages(nil))
+	assert.Equal(t, fingerprintMessages(nil), fingerprintMessages([]MsgPart{}), "空切片与 nil 指纹一致")
 }
 
 // useIndependentSessionRedis 为会话缓存测试搭一个独立 miniredis，保存并恢复
@@ -570,9 +544,9 @@ func useIndependentSessionRedis(t *testing.T) *miniredis.Miniredis {
 	return server
 }
 
-// TestResolveSessionKeySingleInstanceDegraded 核心断言：Redis 不可用时（保存并恢复
-// 原值）同 tokenID + 同 requestParts 连续两次返回相同 sessionKey，第一次 isNew=true、
-// 第二次 isNew=false；不同内容返回不同 sessionKey；不同 tokenID 同内容分桶。
+// TestResolveSessionKeySingleInstanceDegraded 多槽续链语义（退化模式）：条数严格增长的
+// requestParts 序列（无状态客户端历史叠加）续链同一 sessionKey；条数不增长的同内容重复
+// 请求判为新会话；不同 tokenID 分桶；同 token 的非前缀包含会话分属不同 slot。
 func TestResolveSessionKeySingleInstanceDegraded(t *testing.T) {
 	previousRedisEnabled := common.RedisEnabled
 	common.RedisEnabled = false
@@ -580,25 +554,50 @@ func TestResolveSessionKeySingleInstanceDegraded(t *testing.T) {
 	singleInstanceLogOnce = sync.Once{}
 	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
 
-	parts := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "你好"}}
-	sk1, isNew1 := resolveSessionKey(1, parts)
-	sk2, isNew2 := resolveSessionKey(1, parts)
+	// 多轮：条数严格增长，前缀完整包含上一轮。
+	turn1 := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "你好"}}
+	turn2 := []MsgPart{
+		{Role: msgRoleUser, Kind: msgKindText, Text: "你好"},
+		{Role: msgRoleAssistant, Kind: msgKindText, Text: "你好啊"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "今天天气怎么样"},
+	}
+	turn3 := []MsgPart{
+		{Role: msgRoleUser, Kind: msgKindText, Text: "你好"},
+		{Role: msgRoleAssistant, Kind: msgKindText, Text: "你好啊"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "今天天气怎么样"},
+		{Role: msgRoleAssistant, Kind: msgKindText, Text: "晴天"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "谢谢"},
+	}
+
+	sk1, isNew1 := resolveSessionKey(1, turn1)
+	sk2, isNew2 := resolveSessionKey(1, turn2)
+	sk3, isNew3 := resolveSessionKey(1, turn3)
 	assert.NotEmpty(t, sk1)
-	assert.True(t, isNew1, "首次调用必须判定为新会话")
-	assert.Equal(t, sk1, sk2, "同 tokenID 同内容必须复用同一 sessionKey")
-	assert.False(t, isNew2, "二次调用必须命中已有会话")
+	assert.True(t, isNew1, "首轮新建")
+	assert.Equal(t, sk1, sk2, "续链必须复用同一 sessionKey")
+	assert.False(t, isNew2, "续链非新建")
+	assert.Equal(t, sk1, sk3, "多轮续链同一 sessionKey")
+	assert.False(t, isNew3)
 
-	skDifferent, isNewDifferent := resolveSessionKey(1, []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "不同内容"}})
-	assert.NotEqual(t, sk1, skDifferent, "不同内容必须生成不同 sessionKey")
-	assert.True(t, isNewDifferent)
+	// 条数不增长的同内容重复请求判为新会话（与旧 prefixHash 内容指纹语义不同）。
+	skRepeat, isNewRepeat := resolveSessionKey(1, turn1)
+	assert.True(t, isNewRepeat, "条数不增长的同内容请求判为新会话")
+	assert.NotEqual(t, sk1, skRepeat)
 
-	skOtherToken, _ := resolveSessionKey(2, parts)
-	assert.NotEqual(t, sk1, skOtherToken, "不同 tokenID 同内容必须分桶为不同会话")
+	// 不同 tokenID 分桶。
+	skOther, _ := resolveSessionKey(2, turn1)
+	assert.NotEqual(t, sk1, skOther, "不同 tokenID 分桶")
+
+	// 同 token 的非前缀包含会话分属不同 slot。
+	diffConv := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "完全不同的开场"}}
+	skDiff, isNewDiff := resolveSessionKey(1, diffConv)
+	assert.True(t, isNewDiff)
+	assert.NotEqual(t, sk1, skDiff, "不同会话分属不同 slot")
 }
 
-// TestResolveSessionKeyNilParts 空 requestParts（resolveSessionKey 的 T2 边界）：
-// nil 输入不 panic，sessionKey 非空且确定，同一输入重复调用行为一致，空输入仍受
-// token_id 分桶。覆盖退化单实例与 Redis 可用两条路径。
+// TestResolveSessionKeyNilParts 空 requestParts 边界：nil 不 panic，sessionKey 非空；
+// 空 → 非空的条数增长续链（空首轮 Count=0，下一轮非空 thisCount>0 且前 0 条指纹相等）。
+// 覆盖退化单实例与 Redis 可用两条路径。
 func TestResolveSessionKeyNilParts(t *testing.T) {
 	t.Run("degraded_single_instance", func(t *testing.T) {
 		previousRedisEnabled := common.RedisEnabled
@@ -608,30 +607,33 @@ func TestResolveSessionKeyNilParts(t *testing.T) {
 		t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
 
 		sk1, isNew1 := resolveSessionKey(1, nil)
-		sk2, isNew2 := resolveSessionKey(1, nil)
 		assert.NotEmpty(t, sk1, "空输入必须得到非空 sessionKey")
-		assert.True(t, isNew1, "空输入首次调用必须判定为新会话")
-		assert.Equal(t, sk1, sk2, "空输入同 tokenID 重复调用必须复用同一 sessionKey")
-		assert.False(t, isNew2, "空输入二次调用必须命中已有会话")
+		assert.True(t, isNew1, "空首轮新建")
 
-		skOther, _ := resolveSessionKey(2, nil)
-		assert.NotEqual(t, sk1, skOther, "空输入也受 token_id 分桶")
+		// 条数增长续链：空 → 非空。
+		next := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "续"}}
+		sk2, isNew2 := resolveSessionKey(1, next)
+		assert.Equal(t, sk1, sk2, "空首轮后非空续轮续链同一 sessionKey")
+		assert.False(t, isNew2)
 	})
 
 	t.Run("redis_available", func(t *testing.T) {
 		server := useIndependentSessionRedis(t)
 
 		sk1, isNew1 := resolveSessionKey(1, nil)
-		sk2, isNew2 := resolveSessionKey(1, nil)
-		assert.NotEmpty(t, sk1, "空输入必须得到非空 sessionKey")
+		assert.NotEmpty(t, sk1)
 		assert.True(t, isNew1)
-		assert.Equal(t, sk1, sk2, "空输入同 tokenID 经 Redis 命中必须复用 sessionKey")
+
+		next := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "续"}}
+		sk2, isNew2 := resolveSessionKey(1, next)
+		assert.Equal(t, sk1, sk2, "Redis 路径空首轮后非空续轮续链")
 		assert.False(t, isNew2)
 
-		key := convSessionCachePrefix + "1:" + prefixHash(1, nil)
+		// 多槽 JSON 落盘：key 为 conv:session:{token_id}（无 prefixHash 后缀）。
+		key := convSessionCachePrefix + "1"
 		val, err := server.Get(key)
 		require.NoError(t, err)
-		assert.Equal(t, sk1, val, "空输入 sessionKey 必须经 SetNX 落盘 Redis")
+		assert.Contains(t, val, sk1, "多槽 JSON 必须落盘且含本轮 sessionKey")
 	})
 }
 
@@ -667,66 +669,64 @@ func TestResolveSessionKeyDegradedLogsSingleInstance(t *testing.T) {
 	assert.NotEmpty(t, sk2, "再次调用仍须返回确定 sessionKey")
 }
 
-// TestResolveSessionKeyRedisHitMissRenew Redis 可用：未命中 SetNX 抢占，命中复用
-// sessionKey 并滚动续期，缓存键形如 conv:session:{token_id}:{prefixHash}，TTL 30min。
+// TestResolveSessionKeyRedisHitMissRenew Redis 可用：首轮新建落盘多槽 JSON，续链
+// （条数增长 + 前缀包含）命中同一 sessionKey 并滚动续期 TTL；缓存键形如
+// conv:session:{token_id}（多槽 JSON 数组），TTL 30min。
 func TestResolveSessionKeyRedisHitMissRenew(t *testing.T) {
 	server := useIndependentSessionRedis(t)
-	parts := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "你好"}}
+	turn1 := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "你好"}}
+	turn2 := []MsgPart{
+		{Role: msgRoleUser, Kind: msgKindText, Text: "你好"},
+		{Role: msgRoleAssistant, Kind: msgKindText, Text: "你好啊"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "第二问"},
+	}
 
-	sk1, isNew1 := resolveSessionKey(1, parts)
+	sk1, isNew1 := resolveSessionKey(1, turn1)
 	assert.True(t, isNew1)
 	assert.NotEmpty(t, sk1)
 
-	key := convSessionCachePrefix + "1:" + prefixHash(1, parts)
+	key := convSessionCachePrefix + "1"
 	val, err := server.Get(key)
 	require.NoError(t, err)
-	assert.Equal(t, sk1, val, "Redis 中必须缓存 sessionKey")
+	assert.Contains(t, val, sk1, "多槽 JSON 必须缓存本轮 sessionKey")
 	ttl := server.TTL(key)
 	assert.True(t, ttl > 0 && ttl <= convSessionCacheTTL, "缓存 TTL 应为 30min，实际 %v", ttl)
 
-	sk2, isNew2 := resolveSessionKey(1, parts)
-	assert.Equal(t, sk1, sk2, "命中必须复用 sessionKey")
+	// 续链命中同一 sessionKey。
+	sk2, isNew2 := resolveSessionKey(1, turn2)
+	assert.Equal(t, sk1, sk2, "续链必须复用 sessionKey")
 	assert.False(t, isNew2)
 
 	server.FastForward(29 * time.Minute)
-	_, isNew3 := resolveSessionKey(1, parts)
+	turn3 := append(turn2, MsgPart{Role: msgRoleUser, Kind: msgKindText, Text: "第三问"})
+	_, isNew3 := resolveSessionKey(1, turn3)
 	assert.False(t, isNew3, "TTL 内滚动续期后仍应命中")
-	assert.True(t, server.TTL(key) > 29*time.Minute, "命中后 TTL 应被滚动续期")
+	assert.True(t, server.TTL(key) > 29*time.Minute, "续链写回后 TTL 应被滚动续期")
 }
 
-// TestResolveSessionKeyRedisConcurrentFirstRequest 并发首请求：SetNX 原子抢占消除劈
-// 会话窗口，所有并发方收敛到同一 sessionKey 且仅一个 isNew=true。
-func TestResolveSessionKeyRedisConcurrentFirstRequest(t *testing.T) {
+// TestResolveSessionKeySkillCallIsolatedSlot 同 token 的技能/标题生成等子请求与主对话
+// 分属不同 slot：主对话续链不被技能调用（不同前缀）污染，各自独立 sessionKey。
+func TestResolveSessionKeySkillCallIsolatedSlot(t *testing.T) {
 	useIndependentSessionRedis(t)
-	parts := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "并发首请求"}}
 
-	const n = 12
-	keys := make([]string, n)
-	isNews := make([]bool, n)
-	var wg sync.WaitGroup
-	start := make(chan struct{})
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			<-start
-			sk, isNew := resolveSessionKey(3, parts)
-			keys[idx] = sk
-			isNews[idx] = isNew
-		}(i)
+	mainTurn1 := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "主对话第一问"}}
+	mainTurn2 := []MsgPart{
+		{Role: msgRoleUser, Kind: msgKindText, Text: "主对话第一问"},
+		{Role: msgRoleAssistant, Kind: msgKindText, Text: "回答"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "主对话第二问"},
 	}
-	close(start)
-	wg.Wait()
+	// 技能调用：完全不同的开场（如生成对话标题）。
+	skillTurn := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "请生成对话标题"}}
 
-	require.NotEmpty(t, keys[0])
-	newCount := 0
-	for i := 0; i < n; i++ {
-		assert.Equal(t, keys[0], keys[i], "并发首请求必须收敛到同一 sessionKey")
-		if isNews[i] {
-			newCount++
-		}
-	}
-	assert.Equal(t, 1, newCount, "并发首请求只能有一个胜出者 isNew=true")
+	mainSk1, _ := resolveSessionKey(1, mainTurn1)
+	skillSk, skillIsNew := resolveSessionKey(1, skillTurn)
+	assert.NotEqual(t, mainSk1, skillSk, "技能调用与主对话分属不同 slot")
+	assert.True(t, skillIsNew)
+
+	// 技能调用不污染主对话续链：主对话第二轮仍续到主对话 sessionKey。
+	mainSk2, mainIsNew2 := resolveSessionKey(1, mainTurn2)
+	assert.Equal(t, mainSk1, mainSk2, "技能调用插入后主对话仍续链同一 sessionKey")
+	assert.False(t, mainIsNew2)
 }
 
 // TestResolveSessionKeyRedisRuntimeErrorFallback Redis 运行期故障（连接失败）时
@@ -766,68 +766,138 @@ func TestResolveSessionKeyRedisRuntimeErrorFallback(t *testing.T) {
 	assert.Contains(t, logBuffer.String(), "[SYS]", "运行期故障必须触发 SysError 错误记录")
 }
 
-// TestResolveSessionKeyRedisGhostRaceRetry 用 miniredis 命令前置 hook 确定性模拟
-// SetNX 失败且重读落空（胜出方 key 恰已过期）的极端竞态：重读落空后必须重试 SetNX
-// 把本地 sessionKey 落盘，返回的 sessionKey 不得是未写入 Redis 的幽灵值。
-func TestResolveSessionKeyRedisGhostRaceRetry(t *testing.T) {
-	mr := useIndependentSessionRedis(t)
-	parts := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "重试抢占"}}
-	key := convSessionCachePrefix + "5:" + prefixHash(5, parts)
+// TestMatchSessionSlotsTimeoutEvict 超时 slot 被 prune：ActiveTime 早于
+//（now - convSessionSlotTimeout）的 slot 不参与续链判定，等价于新会话；TTL 内续链命中。
+func TestMatchSessionSlotsTimeoutEvict(t *testing.T) {
+	now := int64(1000000)
+	turn1 := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "x"}}
+	sk, isNew, slots := matchSessionSlots(nil, turn1, now)
+	require.True(t, isNew)
+	require.NotEmpty(t, sk)
+	require.Len(t, slots, 1)
 
-	// 命令分发前置 hook：第一次 SetNX 前写入并发胜出方值（令 SetNX 失败），第二次
-	// GET（重读）前删除该值（令重读返回 redis.Nil），重试 SetNX 不做干预让其自然成功。
-	srv := mr.Server()
-	hookCount := 0
-	srv.SetPreHook(func(c *server.Peer, cmd string, args ...string) bool {
-		if len(args) == 0 || args[0] != key {
-			return false
-		}
-		hookCount++
-		switch {
-		case cmd == "SET" && hookCount == 2:
-			_ = mr.Set(key, "winner-sk")
-		case cmd == "GET" && hookCount == 3:
-			_ = mr.Del(key)
-		}
-		return false
-	})
-	t.Cleanup(func() { srv.SetPreHook(nil) })
+	turn2 := []MsgPart{
+		{Role: msgRoleUser, Kind: msgKindText, Text: "x"},
+		{Role: msgRoleAssistant, Kind: msgKindText, Text: "a"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "y"},
+	}
 
-	sk, isNew := resolveSessionKey(5, parts)
-	assert.True(t, isNew, "SetNX 失败且重读落空，经重试后仍应判定为新会话")
-	assert.NotEmpty(t, sk)
-	assert.Equal(t, sk, mustGetServer(t, mr, key), "重试必须把本地 sessionKey 落盘，杜绝幽灵会话")
+	// 30min+1s 后，旧 slot 超时；同前缀的续轮判为新会话（旧 slot 被 prune）。
+	later := now + int64((convSessionSlotTimeout+time.Second)/time.Second)
+	sk2, isNew2, slots2 := matchSessionSlots(slots, turn2, later)
+	require.True(t, isNew2, "旧 slot 超时淘汰，续轮判为新会话")
+	require.NotEqual(t, sk, sk2)
+	require.Len(t, slots2, 1, "超时 slot 被 prune，仅新 slot")
+
+	// TTL 内（30s 前）续链命中。
+	soon := now + int64((convSessionSlotTimeout-time.Second)/time.Second)
+	sk3, isNew3, _ := matchSessionSlots(slots, turn2, soon)
+	require.False(t, isNew3, "TTL 内续链命中")
+	assert.Equal(t, sk, sk3)
 }
 
-// TestRedisSetNXAndExpire redisSetNX 为 SET NX EX 原子抢占（已存在则失败不改值），
-// redisExpire 命中即滚动续期 TTL。
-func TestRedisSetNXAndExpire(t *testing.T) {
-	server := useIndependentSessionRedis(t)
-	key := "conv:session:9:abcd"
-	ttl := time.Minute
+// TestMatchSessionSlotsCountMustGrow 条数严格增长检查：字节级相同的请求体重放（条数
+// 不增长）判为新会话，零成本打散顺序重放误并；条数增长且前缀包含才续链。
+func TestMatchSessionSlotsCountMustGrow(t *testing.T) {
+	now := int64(1000000)
+	turn := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "same"}}
 
-	ok, err := redisSetNX(key, "sk-1", ttl)
-	require.NoError(t, err)
-	assert.True(t, ok, "首次 SET NX 必须成功")
-	assert.Equal(t, "sk-1", mustGetServer(t, server, key))
-	assert.True(t, server.TTL(key) > 0, "SET NX 必须带上 EX TTL")
+	sk1, _, slots := matchSessionSlots(nil, turn, now)
+	// 同内容同条数重放：条数不增长，判为新会话。
+	sk2, isNew2, slots := matchSessionSlots(slots, turn, now)
+	assert.True(t, isNew2, "条数不增长判为新会话")
+	assert.NotEqual(t, sk1, sk2)
+	require.Len(t, slots, 2, "两次各占一个 slot")
 
-	ok, err = redisSetNX(key, "sk-2", ttl)
-	require.NoError(t, err)
-	assert.False(t, ok, "key 已存在时 SET NX 必须失败")
-	assert.Equal(t, "sk-1", mustGetServer(t, server, key), "SET NX 失败不得覆盖已存值")
-
-	server.FastForward(45 * time.Second)
-	require.NoError(t, redisExpire(key, ttl))
-	remaining := server.TTL(key)
-	assert.True(t, remaining > 45*time.Second, "redisExpire 必须滚动续期 TTL，实际剩余 %v", remaining)
+	// 条数增长且前缀包含才续链，命中最先建立的 slot。
+	turnGrow := []MsgPart{
+		{Role: msgRoleUser, Kind: msgKindText, Text: "same"},
+		{Role: msgRoleAssistant, Kind: msgKindText, Text: "a"},
+	}
+	sk3, isNew3, _ := matchSessionSlots(slots, turnGrow, now)
+	assert.False(t, isNew3, "条数增长 + 前缀包含续链")
+	assert.Equal(t, sk1, sk3)
 }
 
-func mustGetServer(t *testing.T, server *miniredis.Miniredis, key string) string {
-	t.Helper()
-	val, err := server.Get(key)
-	require.NoError(t, err)
-	return val
+// TestJoinConversationPartsIsNewBranch isNew 分支与切点 off-by-one：isNew=true 存全量；
+// isNew=false 切点为 lastAssistantIndex+1（跳过上一轮 assistant，避免拼接重复）；续链
+// 找不到 assistant 回退全量。
+func TestJoinConversationPartsIsNewBranch(t *testing.T) {
+	req := []MsgPart{
+		{Role: msgRoleUser, Kind: msgKindText, Text: "u1"},
+		{Role: msgRoleAssistant, Kind: msgKindText, Text: "a1"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "u2"},
+	}
+	asst := []MsgPart{{Role: msgRoleAssistant, Kind: msgKindText, Text: "a2"}}
+
+	// isNew=true 全量。
+	got := joinConversationParts(req, asst, true)
+	require.Len(t, got, 4)
+	assert.Equal(t, "u1", got[0].Text)
+	assert.Equal(t, "a2", got[3].Text)
+
+	// isNew=false 切点 off-by-one：切点在 a1 之后，increment=[u2]，+[a2]。
+	got = joinConversationParts(req, asst, false)
+	require.Len(t, got, 2, "增量仅 u2 + a2，历史 u1/a1 不重复")
+	assert.Equal(t, "u2", got[0].Text)
+	assert.Equal(t, "a2", got[1].Text)
+
+	// 续链找不到 assistant（理论不发生）回退全量。
+	noAsst := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "only-user"}}
+	got = joinConversationParts(noAsst, asst, false)
+	require.Len(t, got, 2, "找不到 assistant 回退全量")
+	assert.Equal(t, "only-user", got[0].Text)
+}
+
+// TestLastAssistantIndex 找最后一个 role=assistant 的位置；tool_use（Role=assistant）
+// 同样命中；无 assistant 返回 -1。
+func TestLastAssistantIndex(t *testing.T) {
+	assert.Equal(t, -1, lastAssistantIndex(nil))
+	assert.Equal(t, -1, lastAssistantIndex([]MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "u"}}))
+	assert.Equal(t, 1, lastAssistantIndex([]MsgPart{
+		{Role: msgRoleUser, Kind: msgKindText, Text: "u"},
+		{Role: msgRoleAssistant, Kind: msgKindText, Text: "a"},
+	}))
+	assert.Equal(t, 2, lastAssistantIndex([]MsgPart{
+		{Role: msgRoleAssistant, Kind: msgKindText, Text: "a1"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "u"},
+		{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: "tool()"},
+	}), "tool_use（Role=assistant）同样命中且取最后一个")
+}
+
+// TestResolveSessionKeyLocalMultiSlotIsolation 退化模式（Mutex 保护）下，同 token 的
+// 多个不同会话（非前缀包含）各自独立 slot，连续解析不互相覆盖、不丢失。
+func TestResolveSessionKeyLocalMultiSlotIsolation(t *testing.T) {
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = false
+	sessionKeyLocalMap = sync.Map{}
+	singleInstanceLogOnce = sync.Once{}
+	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
+
+	convA := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "A1"}}
+	convB := []MsgPart{{Role: msgRoleUser, Kind: msgKindText, Text: "B1"}}
+
+	skA1, _ := resolveSessionKey(1, convA)
+	skB1, _ := resolveSessionKey(1, convB)
+	assert.NotEqual(t, skA1, skB1, "不同会话不同 slot")
+
+	convA2 := []MsgPart{
+		{Role: msgRoleUser, Kind: msgKindText, Text: "A1"},
+		{Role: msgRoleAssistant, Kind: msgKindText, Text: "a"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "A2"},
+	}
+	skA2, isNewA2 := resolveSessionKey(1, convA2)
+	assert.Equal(t, skA1, skA2, "A 续链不被 B 干扰")
+	assert.False(t, isNewA2)
+
+	convB2 := []MsgPart{
+		{Role: msgRoleUser, Kind: msgKindText, Text: "B1"},
+		{Role: msgRoleAssistant, Kind: msgKindText, Text: "b"},
+		{Role: msgRoleUser, Kind: msgKindText, Text: "B2"},
+	}
+	skB2, isNewB2 := resolveSessionKey(1, convB2)
+	assert.Equal(t, skB1, skB2, "B 续链不被 A 干扰")
+	assert.False(t, isNewB2)
 }
 
 // TestTurnKindFor 核心断言（BR1）：含 tool_use/tool_result 记 tool_round（优先级最高），
@@ -956,9 +1026,10 @@ func setupServiceConversationTestDB(t *testing.T) {
 	)`).Error)
 }
 
-// TestRecordConversationWritesTurn 集成断言（BR2/BR3/BR5）：RecordConversation 异步
-// 编排解析→会话识别→判定→组装→写库，messages 请求侧在前响应侧在后，token 来自响应
-// usage，维度字段透传 input 纯值快照，新建会话首轮记 first。
+// TestRecordConversationWritesTurn 集成断言：RecordConversation 异步编排解析→会话识别→
+// 判定→组装→写库。首轮（isNew=true）存全量 requestParts+assistant，turn_kind=first；
+// 续链（isNew=false）切增量（上一轮 assistant 之后）+ 本轮 assistant，system 与历史不重复，
+// turn_kind=normal。token 来自响应 usage，维度字段透传 input 纯值快照。
 func TestRecordConversationWritesTurn(t *testing.T) {
 	setupServiceConversationTestDB(t)
 	previousRedisEnabled := common.RedisEnabled
@@ -967,7 +1038,8 @@ func TestRecordConversationWritesTurn(t *testing.T) {
 	singleInstanceLogOnce = sync.Once{}
 	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
 
-	input := ConversationInput{
+	// 第一轮：system + user1。
+	RecordConversation(ConversationInput{
 		RequestID:         "req_1",
 		CreatedAt:         1781234567,
 		ModelName:         "gpt-4o",
@@ -982,44 +1054,82 @@ func TestRecordConversationWritesTurn(t *testing.T) {
 		IsStream:          false,
 		UpstreamRequestID: "up_req",
 		Path:              "/v1/chat/completions",
-		RawRequestBody:    []byte(`{"messages":[{"role":"user","content":"你好"}]}`),
+		RawRequestBody:    []byte(`{"messages":[{"role":"system","content":"你是助手"},{"role":"user","content":"你好"}]}`),
 		RawResponseBody:   []byte(`{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`),
-	}
-	RecordConversation(input)
-
-	var turn model.ConversationTurn
+	})
+	// 等第一轮写库完成（resolveSessionKey 已把会话 slot 落地），再发第二轮，保证续链
+	// 判定读到 slot（两轮经 gopool.Go 异步执行，须显式同步顺序）。
+	var turn1 model.ConversationTurn
 	require.Eventually(t, func() bool {
-		return model.LOG_DB.Table("conversation_turns").Where("request_id = ?", "req_1").First(&turn).Error == nil
-	}, 3*time.Second, 10*time.Millisecond, "异步写库应在超时内完成")
+		return model.LOG_DB.Table("conversation_turns").Where("request_id = ?", "req_1").First(&turn1).Error == nil
+	}, 3*time.Second, 10*time.Millisecond, "第一轮异步写库应在超时内完成")
 
-	assert.NotEmpty(t, turn.SessionKey, "sessionKey 由 resolveSessionKey 生成")
-	assert.Equal(t, turnKindFirst, turn.TurnKind, "新建会话首轮记 first")
-	assert.Equal(t, int64(1781234567), turn.CreatedAt)
-	assert.Equal(t, "gpt-4o", turn.ModelName)
-	assert.Equal(t, 1, turn.ChannelId)
-	assert.Equal(t, 2, turn.TokenId)
-	assert.Equal(t, "tk", turn.TokenName)
-	assert.Equal(t, 3, turn.UserId)
-	assert.Equal(t, "u", turn.Username)
-	assert.Equal(t, "g", turn.Group)
-	assert.Equal(t, "1.2.3.4", turn.Ip)
-	assert.Equal(t, false, turn.IsStream)
-	assert.Equal(t, 120, turn.UseTime)
-	assert.Equal(t, "up_req", turn.UpstreamRequestId)
-	assert.Equal(t, 10, turn.PromptTokens, "token 来自响应 usage 解析")
-	assert.Equal(t, 5, turn.CompletionTokens, "token 来自响应 usage 解析")
+	// 第二轮：历史叠加（system + user1 + assistant(hi) + user2）。
+	RecordConversation(ConversationInput{
+		RequestID:       "req_2",
+		CreatedAt:       1781234577,
+		TokenID:         2,
+		Path:            "/v1/chat/completions",
+		RawRequestBody:  []byte(`{"messages":[{"role":"system","content":"你是助手"},{"role":"user","content":"你好"},{"role":"assistant","content":"hi"},{"role":"user","content":"第二问"}]}`),
+		RawResponseBody: []byte(`{"choices":[{"message":{"content":"second"}}],"usage":{"prompt_tokens":20,"completion_tokens":6}}`),
+	})
 
-	var parts []MsgPart
-	require.NoError(t, common.Unmarshal([]byte(turn.Messages), &parts))
-	require.Len(t, parts, 2)
-	assert.Equal(t, msgRoleUser, parts[0].Role, "请求侧增量在前")
-	assert.Equal(t, "你好", parts[0].Text)
-	assert.Equal(t, msgRoleAssistant, parts[1].Role, "响应侧在后")
-	assert.Equal(t, "hi", parts[1].Text)
+	var turn2 model.ConversationTurn
+	require.Eventually(t, func() bool {
+		return model.LOG_DB.Table("conversation_turns").Where("request_id = ?", "req_2").First(&turn2).Error == nil
+	}, 3*time.Second, 10*time.Millisecond, "第二轮异步写库应在超时内完成")
+
+	// 同会话续链，sessionKey 一致。
+	assert.NotEmpty(t, turn1.SessionKey, "sessionKey 由 resolveSessionKey 生成")
+	assert.Equal(t, turn1.SessionKey, turn2.SessionKey, "续链两轮 sessionKey 一致")
+	assert.Equal(t, turnKindFirst, turn1.TurnKind, "首轮 first")
+	assert.Equal(t, turnKindNormal, turn2.TurnKind, "续链 normal")
+	assert.Equal(t, int64(1781234567), turn1.CreatedAt)
+	assert.Equal(t, "gpt-4o", turn1.ModelName)
+	assert.Equal(t, 1, turn1.ChannelId)
+	assert.Equal(t, 2, turn1.TokenId)
+	assert.Equal(t, "tk", turn1.TokenName)
+	assert.Equal(t, 3, turn1.UserId)
+	assert.Equal(t, "u", turn1.Username)
+	assert.Equal(t, "g", turn1.Group)
+	assert.Equal(t, "1.2.3.4", turn1.Ip)
+	assert.Equal(t, false, turn1.IsStream)
+	assert.Equal(t, 120, turn1.UseTime)
+	assert.Equal(t, "up_req", turn1.UpstreamRequestId)
+	assert.Equal(t, 10, turn1.PromptTokens, "token 来自响应 usage 解析")
+	assert.Equal(t, 5, turn1.CompletionTokens)
+	assert.Equal(t, 6, turn2.CompletionTokens)
+
+	// 第一轮全量：system + user1 + assistant(hi)。
+	var parts1 []MsgPart
+	require.NoError(t, common.Unmarshal([]byte(turn1.Messages), &parts1))
+	require.Len(t, parts1, 3, "首轮全量存 system+user+assistant")
+	assert.Equal(t, msgRoleSystem, parts1[0].Role)
+	assert.Equal(t, "你是助手", parts1[0].Text)
+	assert.Equal(t, "你好", parts1[1].Text)
+	assert.Equal(t, "hi", parts1[2].Text)
+
+	// 第二轮增量：切点为上一轮 assistant 之后，仅 user2 + assistant(second)；system 与历史不重复。
+	var parts2 []MsgPart
+	require.NoError(t, common.Unmarshal([]byte(turn2.Messages), &parts2))
+	require.Len(t, parts2, 2, "续链增量仅本轮 user + assistant")
+	assert.Equal(t, "第二问", parts2[0].Text)
+	assert.Equal(t, "second", parts2[1].Text)
+
+	// MergeConversation 按行 append 拼完整对话，无重复无缺失。
+	merged := MergeConversation([]model.ConversationTurn{turn1, turn2})
+	require.Len(t, merged, 5)
+	assert.Equal(t, "你是助手", merged[0].Text)
+	assert.Equal(t, "你好", merged[1].Text)
+	assert.Equal(t, "hi", merged[2].Text)
+	assert.Equal(t, "第二问", merged[3].Text)
+	assert.Equal(t, "second", merged[4].Text)
 }
 
-// TestRecordConversationToolRound 集成断言：请求含 tool_result 与响应含 tool_use 时
-// turn_kind 记 tool_round（工具优先于 first/normal）。
+// TestRecordConversationToolRound 集成断言：工具调用多轮增量链。首轮 user 发起，assistant
+// 回 tool_use（首轮全量）；第二轮请求含历史 assistant(tool_use) + tool(result)，续链切增量
+// （上一轮 assistant 之后）= [tool_result] + 本轮 assistant，turn_kind=tool_round；MergeConversation
+// 拼接无重复。
 func TestRecordConversationToolRound(t *testing.T) {
 	setupServiceConversationTestDB(t)
 	previousRedisEnabled := common.RedisEnabled
@@ -1028,28 +1138,57 @@ func TestRecordConversationToolRound(t *testing.T) {
 	singleInstanceLogOnce = sync.Once{}
 	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
 
-	input := ConversationInput{
-		RequestID:       "req_tool",
+	// 第一轮：user 查天气，assistant 回 tool_use。
+	RecordConversation(ConversationInput{
+		RequestID:       "req_tool_1",
 		CreatedAt:       300,
+		TokenID:         9,
+		Path:            "/v1/chat/completions",
+		RawRequestBody:  []byte(`{"messages":[{"role":"user","content":"查天气"}]}`),
+		RawResponseBody: []byte(`{"choices":[{"message":{"content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"北京\"}"}}]}}]}`),
+	})
+	// 等第一轮写库完成（会话 slot 落地），再发第二轮保证续链读到 slot。
+	var turn1 model.ConversationTurn
+	require.Eventually(t, func() bool {
+		return model.LOG_DB.Table("conversation_turns").Where("request_id = ?", "req_tool_1").First(&turn1).Error == nil
+	}, 3*time.Second, 10*time.Millisecond, "第一轮异步写库应在超时内完成")
+
+	// 第二轮：历史 user + assistant(tool_use) + tool(result)，assistant 回总结。
+	RecordConversation(ConversationInput{
+		RequestID:       "req_tool_2",
+		CreatedAt:       310,
 		TokenID:         9,
 		Path:            "/v1/chat/completions",
 		RawRequestBody:  []byte(`{"messages":[{"role":"user","content":"查天气"},{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"北京\"}"}}]},{"role":"tool","tool_call_id":"c1","content":"晴"}]}`),
 		RawResponseBody: []byte(`{"choices":[{"message":{"content":"今天晴"}}]}`),
-	}
-	RecordConversation(input)
+	})
 
-	var turn model.ConversationTurn
+	var turn2 model.ConversationTurn
 	require.Eventually(t, func() bool {
-		return model.LOG_DB.Table("conversation_turns").Where("request_id = ?", "req_tool").First(&turn).Error == nil
-	}, 3*time.Second, 10*time.Millisecond, "异步写库应在超时内完成")
+		return model.LOG_DB.Table("conversation_turns").Where("request_id = ?", "req_tool_2").First(&turn2).Error == nil
+	}, 3*time.Second, 10*time.Millisecond, "第二轮异步写库应在超时内完成")
 
-	assert.Equal(t, turnKindToolRound, turn.TurnKind, "含工具调用的轮记 tool_round")
-	var parts []MsgPart
-	require.NoError(t, common.Unmarshal([]byte(turn.Messages), &parts))
-	require.Len(t, parts, 4)
-	assert.Equal(t, msgRoleAssistant, parts[1].Role, "请求侧 tool_use 保留")
-	assert.Equal(t, msgKindToolUse, parts[1].Kind)
-	assert.Equal(t, msgKindToolResult, parts[2].Kind)
+	assert.Equal(t, turn1.SessionKey, turn2.SessionKey, "工具多轮同会话")
+	assert.Equal(t, turnKindToolRound, turn1.TurnKind, "首轮响应含 tool_use 记 tool_round")
+	assert.Equal(t, turnKindToolRound, turn2.TurnKind, "续链轮含 tool_use/tool_result 记 tool_round")
+
+	// 第一轮全量：user + assistant(tool_use)。
+	var parts1 []MsgPart
+	require.NoError(t, common.Unmarshal([]byte(turn1.Messages), &parts1))
+	require.Len(t, parts1, 2)
+	assert.Equal(t, "查天气", parts1[0].Text)
+	assert.Equal(t, msgKindToolUse, parts1[1].Kind)
+
+	// 第二轮增量：切点为上一轮 assistant(tool_use) 之后 = [tool_result] + 本轮 assistant。
+	var parts2 []MsgPart
+	require.NoError(t, common.Unmarshal([]byte(turn2.Messages), &parts2))
+	require.Len(t, parts2, 2, "工具轮增量仅 tool_result + 本轮 assistant，历史不重复")
+	assert.Equal(t, msgKindToolResult, parts2[0].Kind)
+	assert.Equal(t, "今天晴", parts2[1].Text)
+
+	// 拼接无重复：user + tool_use + tool_result + assistant。
+	merged := MergeConversation([]model.ConversationTurn{turn1, turn2})
+	require.Len(t, merged, 4)
 }
 
 // TestRecordConversationParseFailureStillRecords 边界：请求体非法 JSON 时 request 侧

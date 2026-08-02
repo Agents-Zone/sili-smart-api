@@ -114,17 +114,12 @@ GET /api/conversation/?token_name=my-token&page_size=20&start_timestamp=17812345
 |------|------|------|------|
 | session_key | string | 是 | 会话标识，列表接口返回的 `session_key` |
 
-**查询参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| p | integer | 否 | 页码，默认 1；长会话分页 |
-| page_size | integer | 否 | 每页数量，允许最大 200；单响应上限 200 轮，超限截断并置 `truncated` 提示 |
+**查询参数：** 无（详情全量返回，不分页）。
 
 **请求示例：**
 
 ```
-GET /api/conversation/conv_8f3a2b?page_size=200
+GET /api/conversation/conv_8f3a2b
 ```
 
 **响应示例（成功）：**
@@ -180,9 +175,8 @@ GET /api/conversation/conv_8f3a2b?page_size=200
 
 **说明：**
 - `session`：聚合元数据（`token_name`、`username`、`user_id`、`model_name`、首末轮时间、轮数）。
-- `turns`：逐轮元数据（`id` / `created_at` / `request_id` / `turn_kind`），不含每轮消息内容，避免与汇聚的 `messages` 重复。
-- `messages`：当前返回 turns 内按 `created_at, request_id` 升序逐行 append 得到的完整 `[]MsgPart` 序列，即完整多轮对话，是详情响应的唯一消息内容来源。
-- 长会话分页单独解析 `p` / `page_size`，不走 `common.GetPageQuery` 的 100 上限，`page_size` 允许最大 200；单响应上限 200 轮，超限截断并置 `truncated` 提示。
+- `turns`：逐轮元数据（`id` / `created_at` / `request_id` / `turn_kind`），全量返回、不分页，不含每轮消息内容，避免与汇聚的 `messages` 重复。
+- `messages`：当前返回 turns 内按 `created_at, request_id` 升序逐行 append 得到的完整 `[]MsgPart` 序列，即完整多轮对话，是详情响应的唯一消息内容来源；全量返回、不分页。
 - 不回传整表维度字段（`ip` / `channel_id` / `token_id` / `use_time` 等不进入详情响应）。
 - `turn_kind` 枚举取值：`first`（新建会话首轮）、`normal`（常规轮）、`tool_round`（含工具调用，优先级最高）。
 

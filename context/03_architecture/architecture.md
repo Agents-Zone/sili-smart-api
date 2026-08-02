@@ -185,7 +185,7 @@ controller/                       # 新增：管理员会话列表与详情查�
 **说明**：
 - 组件挂载点固定在 `router/relay-router.go`（httpRouter 与 relayGeminiRouter 两处 `Use`）与 `router/api-router.go`（两条管理员查询路由），属既有文件的两处最小改动
 - `conversation_turns` 表存储走日志库 `LOG_DB`，与 logs 表共用 ClickHouse 方言分支（TTL 配置各自独立：conversation_turns 读 `LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS`，logs 读 `LOG_SQL_CLICKHOUSE_TTL_DAYS`），`request_id` 与 logs 表交叉关联
-- 会话识别依赖 Redis（`conv:session:{token_id}:{prefixHash}` 键，TTL 30 分钟），Redis 未配置时退化为进程内 map 单实例模式
+- 会话识别依赖 Redis（按 token 分桶 `conv:session:{token_id}` 键存多会话槽位 JSON 数组 `[]sessionSlot{Fingerprint,SessionKey,Count,ActiveTime}`，TTL 30 分钟，槽位上限 32；本轮请求条数严格增长且全字段指纹命中某槽位前缀即续链复用其 sessionKey 并刷新指纹，全不命中追加新槽），Redis 未配置时退化为进程内 map 单实例模式
 - 功能开关 `CONVERSATION_LOG_ENABLED` 走环境变量，关闭时 middleware 直接透传，近似零开销
 
 ---

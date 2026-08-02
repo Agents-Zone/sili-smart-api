@@ -28,11 +28,7 @@ type MsgPart struct {
 	Text string `json:"text"`
 }
 
-// ConversationInput 是一次请求/响应的纯值快照，middleware 同步段构造，
-// 经 gopool.Go 传入 RecordConversation。字段全部来自这一次请求/响应或 context，
-// 不查 logs、不做计费运算。Path/RawRequestBody/RawResponseBody 为解析输入，
-// SessionKey/TurnKind/Messages/PromptTokens/CompletionTokens 由 RecordConversation
-// 内部经会话识别、协议解析与 usage 解析重新得出并写入轮次。
+// ConversationInput 是一次请求/响应的纯值快照，由 middleware 构造、异步传入 RecordConversation。
 type ConversationInput struct {
 	SessionKey        string
 	RequestID         string
@@ -73,15 +69,14 @@ const (
 	msgRoleSystem    = "system"
 )
 
-// 轮次类型（turn_kind）枚举（BR1）：first 新建会话首轮 / normal 常规轮 /
-// tool_round 含工具调用轮（优先于 first/normal）。
+// 轮次类型：first 新建会话首轮，normal 常规轮，tool_round 含工具调用轮（优先）。
 const (
 	turnKindFirst     = "first"
 	turnKindNormal    = "normal"
 	turnKindToolRound = "tool_round"
 )
 
-// 协议判定常量，T3/T4 复用同一协议判定逻辑。
+// 协议判定常量。
 const (
 	openAIProtocol = "openai"
 	claudeProtocol = "claude"
@@ -108,11 +103,7 @@ func isResponsesPath(path string) bool {
 	return path == "/v1/responses" || path == "/v1/responses/compact"
 }
 
-// parseRequestMessages 按 path 定协议，把请求体消息归一化成 []MsgPart。
-// OpenAI chat/completions 的 role=tool 标 Kind=tool_result；OpenAI Responses 路径
-//（/v1/responses、/v1/responses/compact）解析 input[] 而非 messages（真实 API 无
-// messages 字段）；Claude 包在 user role content 里的 tool_result block 也标
-// Kind=tool_result；首轮全部 request 侧消息按请求原序。
+// parseRequestMessages 按 path 判定协议，把请求体消息归一化为 []MsgPart，按请求原序输出。
 func parseRequestMessages(path string, body []byte) ([]MsgPart, error) {
 	switch protocolForPath(path) {
 	case openAIProtocol:
@@ -170,13 +161,7 @@ func parseOpenAIRequestMessages(body []byte) ([]MsgPart, error) {
 	return parts, nil
 }
 
-// parseOpenAIResponsesInput 解析 OpenAI Responses API 请求侧 input 字段
-//（/v1/responses 与 /v1/responses/compact）。真实 API 无 messages 字段，请求体为
-// OpenAIResponsesRequest.Input（relaykit/dto/openai_request.go 的 Input json.RawMessage）。
-// input 可为 string（记 user text）或 []any；[]any 元素可为 string（记 user text）
-// 或 {role, content} 对象（content 可为 string 或 block 数组，取文本类 block）；
-// role=tool 标 Kind=tool_result。仅 JSON 反序列化经 common.Unmarshal，json.RawMessage
-// 仅作类型引用。
+// parseOpenAIResponsesInput 解析 Responses API 的 input 字段（string 或数组形态）为 []MsgPart。
 func parseOpenAIResponsesInput(body []byte) ([]MsgPart, error) {
 	var req struct {
 		Input json.RawMessage `json:"input"`
@@ -400,9 +385,7 @@ func compactJSONString(v any) string {
 	return ""
 }
 
-// parseAssistantContent 输出同结构 []MsgPart：text 段标 Kind=text，
-// function_call/tool_use 标 Kind=tool_use。非流式解析 JSON（common.Unmarshal），
-// 流式逐行扫描 SSE。失败/错误响应（上游 4xx/5xx JSON）无消息体时记空。
+// parseAssistantContent 解析响应体 assistant 输出为 []MsgPart：非流式解析 JSON，流式扫描 SSE；错误响应记空。
 func parseAssistantContent(path string, isStream bool, respBytes []byte) []MsgPart {
 	protocol := protocolForPath(path)
 	if protocol == "" {
@@ -764,8 +747,7 @@ func sortedToolCallIndexes(toolCalls map[int]*accumToolCall) []int {
 	return indexes
 }
 
-// assembleStreamParts 组装流式输出：join textParts 得到文本段，再按 index 升序
-// 追加工具调用段（跳过空文本与无名称工具调用，name 为空视为无有效工具调用）。
+// assembleStreamParts 组装流式输出：拼接文本段，再按 index 升序追加工具调用段。
 func assembleStreamParts(textParts []string, toolCalls map[int]*accumToolCall) []MsgPart {
 	parts := make([]MsgPart, 0, len(toolCalls)+1)
 	if text := strings.Join(textParts, ""); text != "" {
@@ -781,8 +763,8 @@ func assembleStreamParts(textParts []string, toolCalls map[int]*accumToolCall) [
 	return parts
 }
 
-// sseDataLines 把流式响应体按行拆分，跳过 event: 行与 [DONE]，剥掉 data: 前缀，
-// 返回每个 JSON 数据载荷。仿 relay/helper/stream_scanner.go 的逐行扫描模式。
+// sseDataLines 按行拆分流式响应体，跳过 event: 行与 [DONE]，剥掉 data: 前缀，返回每个 JSON 载荷。
+// 每个 data 必须 bytes.Clone：Scanner.Bytes() 指向内部 buffer，响应体超过 64KB 时会被下一次 Fill 覆盖，调用方拿到损坏内容。
 func sseDataLines(respBytes []byte) [][]byte {
 	var lines [][]byte
 	scanner := bufio.NewScanner(bytes.NewReader(respBytes))
@@ -798,13 +780,12 @@ func sseDataLines(respBytes []byte) [][]byte {
 		if len(data) == 0 || bytes.HasPrefix(data, []byte("[DONE]")) {
 			continue
 		}
-		lines = append(lines, data)
+		lines = append(lines, bytes.Clone(data))
 	}
 	return lines
 }
 
-// parseUsage 从响应字节解析 prompt/completion tokens，本表 token 唯一来源。
-// 只读响应字节，不做计费运算。
+// parseUsage 从响应字节解析 prompt/completion tokens。
 func parseUsage(path string, isStream bool, respBytes []byte) (promptTokens, completionTokens int) {
 	protocol := protocolForPath(path)
 	if protocol == "" {
@@ -991,148 +972,171 @@ func parseGeminiStreamUsage(respBytes []byte) (int, int) {
 	return last.PromptTokens, last.CandidatesTokens
 }
 
-// 会话识别缓存键前缀与 TTL（BR1）：键形如 conv:session:{token_id}:{prefixHash}，
-// TTL 30min。
+// 会话识别缓存：键 conv:session:{token_id}，value 为多槽 JSON 数组，TTL 30min。
 const (
 	convSessionCachePrefix = "conv:session:"
 	convSessionCacheTTL    = 30 * time.Minute
-	convHashPrefixLen      = 64
+	convSessionSlotCap     = 32
+	convSessionSlotTimeout = 30 * time.Minute
 )
 
-// sessionKeyLocalMap 单实例退化模式的进程内会话映射：cacheKey -> sessionKey。
-// singleInstanceLogOnce 保证「单实例模式」SysError 标注只输出一次。
+// sessionKeyLocalMap：Redis 不可用时的进程内会话映射（单实例退化模式）。
 var (
 	sessionKeyLocalMap    sync.Map
 	singleInstanceLogOnce sync.Once
 )
 
-// redisSetNX 原子抢占（SET NX EX），直连 common.RDB，不新增 common/redis.go 方法。
-func redisSetNX(key, value string, ttl time.Duration) (bool, error) {
-	ctx := context.Background()
-	return common.RDB.SetNX(ctx, key, value, ttl).Result()
+// sessionSlot 记录一个会话最近一轮的指纹、request 条数与活跃时间，供续链比对与超时淘汰。
+type sessionSlot struct {
+	Fingerprint string `json:"fingerprint"`
+	SessionKey  string `json:"session_key"`
+	Count       int    `json:"count"`
+	ActiveTime  int64  `json:"active_time"`
 }
 
-// redisExpire 命中即滚动续期 TTL。
+// sessionMultiSlot：一个 token 下的多会话槽位列表，退化模式下用 sync.Mutex 保护读改写。
+type sessionMultiSlot struct {
+	mu    sync.Mutex
+	slots []sessionSlot
+}
+
+// redisExpire 滚动续期 TTL，当前未用，保留供后续原子化增强复用。
 func redisExpire(key string, ttl time.Duration) error {
 	ctx := context.Background()
 	return common.RDB.Expire(ctx, key, ttl).Err()
 }
 
-// combineRequestText 组合本轮 request 侧增量文本（BR2）：
-//   - 含 tool_result 轮：全部 tool_result 文本 + 末条 user 文本（tool_result 在前）；
-//   - 无 tool_result 且无 assistant 历史（新建会话首轮）：全部 user 侧文本按请求原序；
-//   - 其余纯文本轮：末条 user 文本。
-//
-// 空 requestParts 返回空串，行为确定不 panic。
-func combineRequestText(parts []MsgPart) string {
-	var toolResults []string
-	var userTexts []string
-	lastUser := ""
-	hasToolResult := false
-	hasAssistant := false
-	for _, p := range parts {
-		switch {
-		case p.Kind == msgKindToolResult:
-			hasToolResult = true
-			if p.Text != "" {
-				toolResults = append(toolResults, p.Text)
+// fingerprintMessages 对 []MsgPart 整体序列化做 sha256，作为会话续链的前缀比对基准。
+func fingerprintMessages(parts []MsgPart) string {
+	if parts == nil {
+		parts = []MsgPart{}
+	}
+	data, err := common.Marshal(parts)
+	if err != nil {
+		// MsgPart 字段均为基本类型，Marshal 失败极罕见；兜底按空切片指纹，避免 panic。
+		data = nil
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// pruneExpiredSlots 淘汰超时 slot。
+func pruneExpiredSlots(slots []sessionSlot, now int64) []sessionSlot {
+	deadline := now - int64(convSessionSlotTimeout/time.Second)
+	kept := make([]sessionSlot, 0, len(slots))
+	for _, s := range slots {
+		if s.ActiveTime >= deadline {
+			kept = append(kept, s)
+		}
+	}
+	return kept
+}
+
+// enforceSlotCap 多槽数组超上限时按 ActiveTime 最早淘汰。
+func enforceSlotCap(slots []sessionSlot) []sessionSlot {
+	for len(slots) > convSessionSlotCap {
+		oldest := 0
+		for i := 1; i < len(slots); i++ {
+			if slots[i].ActiveTime < slots[oldest].ActiveTime {
+				oldest = i
 			}
-		case p.Kind == msgKindToolUse || p.Role == msgRoleAssistant:
-			hasAssistant = true
-		case p.Role == msgRoleUser && p.Text != "":
-			userTexts = append(userTexts, p.Text)
-			lastUser = p.Text
 		}
+		slots = append(slots[:oldest], slots[oldest+1:]...)
 	}
-	switch {
-	case hasToolResult:
-		var b strings.Builder
-		for _, t := range toolResults {
-			b.WriteString(t)
-		}
-		b.WriteString(lastUser)
-		return b.String()
-	case hasAssistant:
-		return lastUser
-	default:
-		return strings.Join(userTexts, "")
-	}
+	return slots
 }
 
-// prefixHash 按 token_id 分桶计算本轮 request 侧内容的前缀指纹。
-// 对组合后的 request 侧消息文本取前 64 字符，与 token_id 一起做 sha256 摘要，
-// 同 token_id 同内容得同指纹，不同 token_id 分桶为不同指纹。
-func prefixHash(tokenID int, requestParts []MsgPart) string {
-	content := combineRequestText(requestParts)
-	if len(content) > convHashPrefixLen {
-		content = content[:convHashPrefixLen]
+// matchSessionSlots 在多槽列表中找续链 slot 或新建 slot（纯函数）。续链条件：本轮条数严格大于
+// slot.Count，且前 slot.Count 条指纹相等（请求体完整包含上一轮 request 侧内容）。
+func matchSessionSlots(slots []sessionSlot, requestParts []MsgPart, now int64) (string, bool, []sessionSlot) {
+	slots = pruneExpiredSlots(slots, now)
+	thisFp := fingerprintMessages(requestParts)
+	thisCount := len(requestParts)
+	for i := range slots {
+		s := &slots[i]
+		if thisCount > s.Count && fingerprintMessages(requestParts[:s.Count]) == s.Fingerprint {
+			s.Fingerprint = thisFp
+			s.Count = thisCount
+			s.ActiveTime = now
+			return s.SessionKey, false, slots
+		}
 	}
-	h := sha256.New()
-	h.Write([]byte(strconv.Itoa(tokenID)))
-	h.Write([]byte{':'})
-	h.Write([]byte(content))
-	return hex.EncodeToString(h.Sum(nil))
+	sessionKey := common.NewRequestId()
+	slots = append(slots, sessionSlot{
+		Fingerprint: thisFp,
+		SessionKey:  sessionKey,
+		Count:       thisCount,
+		ActiveTime:  now,
+	})
+	slots = enforceSlotCap(slots)
+	return sessionKey, true, slots
 }
 
-// resolveSessionKey 会话指纹到 sessionKey 的映射，返回是否新建会话。
-// Redis 可用走 Redis 映射（跨实例共享）；不可用退化进程内 map 单实例模式。
-// Redis 运行期出错时捕获链路不中断，按新会话回退生成 sessionKey 并 SysError 记录。
+// loadSessionSlots 从 Redis 读取 token 多槽列表，key 不存在或空串返回 nil。
+func loadSessionSlots(key string) ([]sessionSlot, error) {
+	val, err := common.RedisGet(key)
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if val == "" {
+		return nil, nil
+	}
+	var slots []sessionSlot
+	if err := common.UnmarshalJsonStr(val, &slots); err != nil {
+		return nil, err
+	}
+	return slots, nil
+}
+
+// saveSessionSlots 写回 token 多槽列表，SET 带 TTL 天然滚动续期。
+func saveSessionSlots(key string, slots []sessionSlot) error {
+	data, err := common.Marshal(slots)
+	if err != nil {
+		return err
+	}
+	return common.RedisSet(key, string(data), convSessionCacheTTL)
+}
+
+// resolveSessionKey 会话识别：按 token 分桶做多槽前缀匹配，返回 sessionKey 与是否新建。
+// Redis 不可用则退化进程内模式，运行期出错按新会话回退并 SysError 记录。
 func resolveSessionKey(tokenID int, requestParts []MsgPart) (sessionKey string, isNew bool) {
-	key := convSessionCachePrefix + strconv.Itoa(tokenID) + ":" + prefixHash(tokenID, requestParts)
+	key := convSessionCachePrefix + strconv.Itoa(tokenID)
+	now := time.Now().Unix()
 
 	if !common.RedisEnabled {
 		singleInstanceLogOnce.Do(func() {
 			common.SysError("conversation session cache: Redis disabled, running in single-instance mode (in-process session map); configure Redis for multi-instance session continuity")
 		})
-		if v, ok := sessionKeyLocalMap.Load(key); ok {
-			return v.(string), false
-		}
-		sessionKey = common.NewRequestId()
-		sessionKeyLocalMap.Store(key, sessionKey)
-		return sessionKey, true
+		return resolveSessionKeyLocal(key, requestParts, now)
 	}
 
-	if v, err := common.RedisGet(key); err == nil && v != "" {
-		_ = redisExpire(key, convSessionCacheTTL)
-		return v, false
-	} else if err != nil && !errors.Is(err, redis.Nil) {
-		common.SysError("conversation session cache: Redis runtime error on get: " + err.Error())
+	slots, err := loadSessionSlots(key)
+	if err != nil {
+		common.SysError("conversation session cache: Redis runtime error on load: " + err.Error())
 		return common.NewRequestId(), true
 	}
-
-	sessionKey = common.NewRequestId()
-	ok, err := redisSetNX(key, sessionKey, convSessionCacheTTL)
-	if err != nil {
-		common.SysError("conversation session cache: Redis runtime error on set nx: " + err.Error())
-		return sessionKey, true
+	sessionKey, isNew, newSlots := matchSessionSlots(slots, requestParts, now)
+	if err := saveSessionSlots(key, newSlots); err != nil {
+		common.SysError("conversation session cache: Redis runtime error on save: " + err.Error())
 	}
-	if ok {
-		return sessionKey, true
-	}
-	if v, err := common.RedisGet(key); err == nil && v != "" {
-		_ = redisExpire(key, convSessionCacheTTL)
-		return v, false
-	} else if err != nil && !errors.Is(err, redis.Nil) {
-		common.SysError("conversation session cache: Redis runtime error on re-get: " + err.Error())
-		return sessionKey, true
-	}
-	// 重读落空（redis.Nil 或空串）：胜出方 key 恰已过期。补一次 SetNX 抢占把本地
-	// sessionKey 落盘，避免返回从未写入 Redis 的幽灵会话，保证下一轮续得上。
-	ok, err = redisSetNX(key, sessionKey, convSessionCacheTTL)
-	if err != nil {
-		common.SysError("conversation session cache: Redis runtime error on retry set nx: " + err.Error())
-		return sessionKey, true
-	}
-	if ok {
-		return sessionKey, true
-	}
-	// 重试 SetNX 仍被并发方抢占：窗口极窄，属启发式容忍范围，按新会话回退。
-	return sessionKey, true
+	return sessionKey, isNew
 }
 
-// turnKindFor 判定轮次类型（BR1）：parts（request 侧 + assistant 侧）含 Kind=tool_use
-// 或 Kind=tool_result 时记 tool_round（优先级最高）；否则 isNew=true 记 first；
-// 否则记 normal。
+// resolveSessionKeyLocal 退化模式：进程内 *sessionMultiSlot + Mutex 保护读改写。
+func resolveSessionKeyLocal(key string, requestParts []MsgPart, now int64) (string, bool) {
+	actual, _ := sessionKeyLocalMap.LoadOrStore(key, &sessionMultiSlot{})
+	multi := actual.(*sessionMultiSlot)
+	multi.mu.Lock()
+	defer multi.mu.Unlock()
+	sessionKey, isNew, newSlots := matchSessionSlots(multi.slots, requestParts, now)
+	multi.slots = newSlots
+	return sessionKey, isNew
+}
+
+// turnKindFor 判定轮次类型：含工具调用记 tool_round（优先），否则新建记 first，否则 normal。
 func turnKindFor(parts []MsgPart, isNew bool) string {
 	for _, p := range parts {
 		if p.Kind == msgKindToolUse || p.Kind == msgKindToolResult {
@@ -1145,9 +1149,31 @@ func turnKindFor(parts []MsgPart, isNew bool) string {
 	return turnKindNormal
 }
 
-// MergeConversation 按传入顺序逐行 append 每行 messages 列，得到完整 []MsgPart 序列。
-// 轮次顺序由查询侧按 created_at, request_id 升序取行（写入路径不维护 turn_seq，
-// BR4）；解码失败的行记空并 common.SysLog 记录，不中断拼接。
+// lastAssistantIndex 返回 requestParts 中最后一个 role=assistant 的位置，找不到返回 -1。
+func lastAssistantIndex(parts []MsgPart) int {
+	for i := len(parts) - 1; i >= 0; i-- {
+		if parts[i].Role == msgRoleAssistant {
+			return i
+		}
+	}
+	return -1
+}
+
+// joinConversationParts 按 isNew 决定存盘 messages：新建存全量，续链切增量（上一轮 assistant 之后）。
+// isNew 同时驱动 sessionKey 新建/续用与全量/增量存储，使每个 session_key 形成首行全量、后续增量。
+func joinConversationParts(requestParts, assistantParts []MsgPart, isNew bool) []MsgPart {
+	if isNew {
+		return append(requestParts, assistantParts...)
+	}
+	idx := lastAssistantIndex(requestParts)
+	if idx < 0 {
+		return append(requestParts, assistantParts...)
+	}
+	increment := requestParts[idx+1:]
+	return append(increment, assistantParts...)
+}
+
+// MergeConversation 按传入顺序逐行 append 每行 messages，拼成完整 []MsgPart。解码失败的行跳过。
 func MergeConversation(turns []model.ConversationTurn) []MsgPart {
 	merged := make([]MsgPart, 0, len(turns)*2)
 	for i := range turns {
@@ -1161,12 +1187,7 @@ func MergeConversation(turns []model.ConversationTurn) []MsgPart {
 	return merged
 }
 
-// resolveUsername 解析写入 conversation_turns 的 username：显式 Username 非空或
-// UserID 无效（<=0）时原样返回；否则经 model.GetUsernameById（带 Redis 缓存）解析
-// 真实用户名。relay 生产路径（TokenAuth）不写 context "username"，middleware 捕获的
-// Username 恒为空串，此回退保证对外接口的 username 为真实用户名。查询失败或查无
-// 用户时保留原值（空串），不 panic、不阻塞写库。在 RecordConversation 的异步
-// goroutine 内调用，不阻塞请求路径。
+// resolveUsername 解析 username：显式非空或 UserID 无效时原样返回，否则按 UserID 回退查询真实用户名。
 func resolveUsername(username string, userID int) string {
 	if username != "" || userID <= 0 {
 		return username
@@ -1178,11 +1199,8 @@ func resolveUsername(username string, userID int) string {
 	return resolved
 }
 
-// RecordConversation 异步编排：解析 → 会话识别 → 组装轮次 → 写库。整体在 gopool.Go
-// 异步 goroutine 内执行，闭包只捕获 input 纯值快照（BR5），不阻塞请求。所有字段均
-// 来自这一次请求/响应或 context，无查 logs、无计费运算、无二次更新（BR3）。
-// messages 单列按「请求侧增量在前、响应侧在后」存本轮完整序列，元素带 role/kind
-// （BR2）。首次建表由 middleware 触发（T5），此处不重复建表。
+// RecordConversation 异步记录一次对话轮次：解析请求/响应 → 会话识别 → 组装 messages → 写库。
+// 闭包只捕获 input 纯值快照，不阻塞请求；messages 按 isNew 存全量或增量。
 func RecordConversation(input ConversationInput) {
 	gopool.Go(func() {
 		requestParts, reqErr := parseRequestMessages(input.Path, input.RawRequestBody)
@@ -1194,7 +1212,7 @@ func RecordConversation(input ConversationInput) {
 		promptTokens, completionTokens := parseUsage(input.Path, input.IsStream, input.RawResponseBody)
 		sessionKey, isNew := resolveSessionKey(input.TokenID, requestParts)
 
-		joinedParts := append(requestParts, assistantParts...)
+		joinedParts := joinConversationParts(requestParts, assistantParts, isNew)
 		messagesJSON, err := common.Marshal(joinedParts)
 		if err != nil {
 			common.SysLog("conversation: failed to marshal messages: " + err.Error())
@@ -1221,8 +1239,7 @@ func RecordConversation(input ConversationInput) {
 			PromptTokens:      promptTokens,
 			CompletionTokens:  completionTokens,
 		}
-		// 写库失败由 model.RecordConversationTurn 内部 common.SysError 记录
-		// （model/conversation.go），此处不再重复 SysLog，避免同一失败产生两条日志。
+		// 写库失败由 RecordConversationTurn 内部记录，此处不重复 SysLog。
 		model.RecordConversationTurn(turn)
 	})
 }

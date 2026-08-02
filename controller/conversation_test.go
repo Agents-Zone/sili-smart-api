@@ -98,15 +98,6 @@ type conversationDetailPayload struct {
 	} `json:"data"`
 }
 
-func TestClampDetailPageSize(t *testing.T) {
-	require.Equal(t, 200, clampDetailPageSize(500))
-	require.Equal(t, 200, clampDetailPageSize(201))
-	require.Equal(t, 200, clampDetailPageSize(200))
-	require.Equal(t, 50, clampDetailPageSize(50))
-	require.Equal(t, common.ItemsPerPage, clampDetailPageSize(0))
-	require.Equal(t, common.ItemsPerPage, clampDetailPageSize(-5))
-}
-
 func TestConversationTimeRangeInvalid(t *testing.T) {
 	require.False(t, conversationTimeRangeInvalid(0, 0))
 	require.False(t, conversationTimeRangeInvalid(0, 50))
@@ -186,6 +177,7 @@ func TestGetConversationReturnsSessionTurnsAndMergedMessages(t *testing.T) {
 	require.Equal(t, float64(1000), session["first_turn_time"])
 	require.Equal(t, float64(1002), session["last_turn_time"])
 	require.Equal(t, float64(3), session["turn_count"])
+	require.NotContains(t, session, "truncated")
 	require.NotContains(t, session, "ip")
 	require.NotContains(t, session, "channel_id")
 	require.NotContains(t, session, "token_id")
@@ -211,61 +203,26 @@ func TestGetConversationReturnsSessionTurnsAndMergedMessages(t *testing.T) {
 	require.Equal(t, "msg-2", payload.Data.Messages[2].Text)
 }
 
-func TestGetConversationPageSizeClampedToTwoHundred(t *testing.T) {
+// TestGetConversationReturnsAllTurnsNoPaging 详情不再分页：长会话（250 轮）一次性全量
+// 返回 turns 与 messages，session 无 truncated 字段；page_size 查询参数被忽略。
+func TestGetConversationReturnsAllTurnsNoPaging(t *testing.T) {
 	db := setupConversationControllerTestDB(t)
-	insertConversationTurns(t, db, "conv-long", 250)
+	insertConversationTurns(t, db, "conv-full", 250)
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Params = gin.Params{{Key: "session_key", Value: "conv-long"}}
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/conv-long?page_size=500", nil)
+	ctx.Params = gin.Params{{Key: "session_key", Value: "conv-full"}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/conv-full?page_size=50", nil)
 
 	GetConversation(ctx)
 
 	var payload conversationDetailPayload
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
 	require.True(t, payload.Success)
-	require.Len(t, payload.Data.Turns, 200)
-	require.Equal(t, true, payload.Data.Session["truncated"])
+	require.Len(t, payload.Data.Turns, 250, "详情不再分页，全量返回 250 轮")
+	require.Len(t, payload.Data.Messages, 250, "messages 全量拼接 250 段")
+	require.NotContains(t, payload.Data.Session, "truncated", "session 不再有 truncated 字段")
 	require.Equal(t, float64(250), payload.Data.Session["turn_count"])
-}
-
-func TestGetConversationPageSizeHonoredBelowCap(t *testing.T) {
-	db := setupConversationControllerTestDB(t)
-	insertConversationTurns(t, db, "conv-mid", 250)
-
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Params = gin.Params{{Key: "session_key", Value: "conv-mid"}}
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/conv-mid?page_size=50", nil)
-
-	GetConversation(ctx)
-
-	var payload conversationDetailPayload
-	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
-	require.True(t, payload.Success)
-	require.Len(t, payload.Data.Turns, 50)
-	require.Equal(t, true, payload.Data.Session["truncated"])
-}
-
-func TestGetConversationPageBeyondAvailableTurns(t *testing.T) {
-	db := setupConversationControllerTestDB(t)
-	insertConversationTurns(t, db, "conv-short", 3)
-
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Params = gin.Params{{Key: "session_key", Value: "conv-short"}}
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/conv-short?p=5&page_size=10", nil)
-
-	GetConversation(ctx)
-
-	var payload conversationDetailPayload
-	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
-	require.True(t, payload.Success)
-	require.Empty(t, payload.Data.Turns)
-	require.Empty(t, payload.Data.Messages)
-	require.Equal(t, float64(3), payload.Data.Session["turn_count"])
-	require.Equal(t, false, payload.Data.Session["truncated"])
 }
 
 func TestListConversationsRejectsNonNumericTimestamp(t *testing.T) {
@@ -302,24 +259,4 @@ func TestListConversationsAbsentTimestampDoesNotReject(t *testing.T) {
 	var payload conversationErrorPayload
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
 	require.NotEqual(t, "Invalid parameters", payload.Message)
-}
-
-func TestGetConversationHugePageClamped(t *testing.T) {
-	db := setupConversationControllerTestDB(t)
-	insertConversationTurns(t, db, "conv-huge-page", 3)
-
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Params = gin.Params{{Key: "session_key", Value: "conv-huge-page"}}
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/conversation/conv-huge-page?p=999999999999999999999", nil)
-
-	GetConversation(ctx)
-
-	var payload conversationDetailPayload
-	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
-	require.True(t, payload.Success)
-	require.Empty(t, payload.Data.Turns)
-	require.Empty(t, payload.Data.Messages)
-	require.Equal(t, float64(3), payload.Data.Session["turn_count"])
-	require.Equal(t, false, payload.Data.Session["truncated"])
 }

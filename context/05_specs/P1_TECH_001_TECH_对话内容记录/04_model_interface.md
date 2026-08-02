@@ -61,7 +61,7 @@ erDiagram
 
 **表名：** `conversation_turns`
 
-**用途：** 一行一轮，记录一轮文本对话的请求侧增量与响应侧增量，按 `session_key` 聚合为完整多轮会话。不记 `quota`、不做计费运算，token 数仅来自响应 usage 解析。
+**用途：** 一行一轮，记录一轮文本对话的 messages 序列，按 `session_key` 聚合为完整多轮会话。isNew 控制全量/增量：首轮存全量、续链切增量。不记 `quota`、不做计费运算，token 数仅来自响应 usage 解析。
 
 **存储约束（SSOT §3.1、架构文档 §4.4）：** 仅落 ClickHouse 日志库（`LOG_SQL_DSN`），不落 SQLite/MySQL/PostgreSQL；开启 `CONVERSATION_LOG_ENABLED` 时必须配置 ClickHouse，未配置时功能不生效。
 
@@ -109,7 +109,7 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 | session_key | String | 是 | '' | 会话标识，`common.NewRequestId()` 风格；同会话多轮共享，聚合键 |
 | request_id | String | 是 | '' | 请求标识，与 logs 表交叉分析的关联键 |
 | created_at | Int64 | 是 | 0 | 轮次时间，Unix 秒级时间戳（`common.GetTimestamp()`）；分区与排序键（规则文件 §1.7） |
-| messages | String | 是 | '' | 本轮完整消息序列 `[]MsgPart{role,kind,text}` 的 JSON 序列化，经 `common.Marshal` 写入；请求侧增量在前、响应侧在后（规则文件 §1.5 禁止 JSON 列，用 String 承载） |
+| messages | String | 是 | '' | 本轮 messages 序列 `[]MsgPart{role,kind,text}` 的 JSON 序列化，经 `common.Marshal` 写入；isNew 控制全量/增量：首轮存全量 `requestParts + assistantParts`，续链切增量（上一轮 assistant 之后）+ 本轮 assistant（规则文件 §1.5 禁止 JSON 列，用 String 承载） |
 | turn_kind | String | 是 | 'normal' | 轮次类型，枚举：turn_kind（first/normal/tool_round），tool_round 优先级最高 |
 | model_name | String | 否 | '' | 模型名称维度字段，从 context/请求取得 |
 | channel_id | Int32 | 否 | 0 | 渠道 ID 维度字段 |
@@ -165,21 +165,32 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 
 ## 缓存层设计（Redis）
 
-会话指纹到 `sessionKey` 的短期映射缓存，多实例共享（SSOT §3.5、架构文档 §2.4）。
+按 token 分桶的多槽会话列表缓存，多实例共享（SSOT §3.5、架构文档 §2.4）。
 
 **缓存键设计：**
 
 | 键 | 值 | TTL | 说明 |
 |----|-----|-----|------|
-| `conv:session:{token_id}:{prefixHash}` | sessionKey | 30min | 按 token_id 分桶 + 内容前缀哈希的会话指纹，映射到会话标识 |
+| `conv:session:{token_id}` | `[]sessionSlot` JSON 数组 | 30min | 按 token_id 分桶，value 为该 token 下多会话槽位的 JSON 数组（经 `common.Marshal`/`common.Unmarshal`）；同 token 多槽让不同会话分属不同 entry |
 
-**缓存更新策略（Cache-Aside + 原子抢占）：**
+**sessionSlot 结构：**
 
-- 未命中：生成新 `sessionKey`，`RedisSetNX`（SET NX EX，原子）抢占；胜出者使用自己的 sessionKey，失败者 `RedisGet` 重读已存在的 sessionKey，消除同一会话首批请求并发劈会话窗口。
-- 命中：复用 sessionKey 并滚动续期 TTL（`RedisExpire`），活跃会话不断链。
-- Redis 未配置（`!common.RedisEnabled`）：退化为进程内 map 单实例模式，`common.SysError` 输出「单实例模式」标注。
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| Fingerprint | string | 上一轮 requestParts 的全字段指纹（`fingerprintMessages`，对 role+kind+text 整体 sha256，不截断） |
+| SessionKey | string | 会话标识，`common.NewRequestId()` 风格 |
+| Count | int | 上一轮 requestParts 条数，本轮条数须严格大于它才视为续链 |
+| ActiveTime | int64 | 上一轮活跃 unix 时间戳，用于超时淘汰 |
+
+**缓存更新策略（多槽读改写）：**
+
+- 续链判定（matchSessionSlots 纯函数）：`len(requestParts) > slot.Count`（条数严格增长）且 `fingerprintMessages(requestParts[:slot.Count]) == slot.Fingerprint`（本轮请求体完整包含上一轮 request 侧内容）且 slot 未超时 → 续链该 slot，更新 `{Fingerprint=本轮全量, Count=本轮条数, ActiveTime}`。
+- 全不命中 → 新会话，append 新 slot。多槽数组上限 32，超限按 ActiveTime 最早淘汰；超时（ActiveTime 早于 now-30min）的 slot 在读写时 prune。
+- 读改写非原子（V1）：Redis 经 `loadSessionSlots`（GET）→ `matchSessionSlots` → `saveSessionSlots`（SET 带 TTL，天然滚动续期），接受并发/异步乱序导致的断链降级，后果是分裂（每段完整，非错乱）。Lua 原子化作为 V2 可选增强。
+- Redis 未配置（`!common.RedisEnabled`）：退化为进程内 `map[string]*sessionMultiSlot`，`sync.Mutex` 保护读改写，单实例模式，`common.SysError` 输出「单实例模式」标注。
 - Redis 运行期故障：捕获链路不中断，本轮按新建会话回退生成 sessionKey，故障期间会话续链失效，恢复后自动回到 Redis 模式。
 
+> Redis key 由每会话一个 key（旧 `conv:session:{token_id}:{prefixHash}`，value 为单个 sessionKey 字符串）改为每 token 一个 key（value 为多槽 JSON 数组）。上线瞬间旧 key 不被新代码读取，自然过期（30min TTL），无数据冲突，无需迁移。
 > 键前缀 `conv:session:` 遵循「前缀:业务键」缓存键命名规范（模板性能优化章节）。
 
 ---
@@ -207,7 +218,7 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 | 大字段 | `messages` 单列存序列化 JSON | 查询侧按需解码，列表接口不读该列 |
 | 异步写库 | `gopool.Go` 编排 | 写库不阻塞响应路径，闭包只捕获纯值 |
 | 捕获开销 | 默认全量捕获 | `CONVERSATION_LOG_BODY_LIMIT_KB` 安全阀（默认 0 无限）兜底，触发时丢弃超出部分并 `SysError` 记录 |
-| 会话缓存 | Redis + 进程内 map | 命中即复用 sessionKey，避免会话识别查询开销 |
+| 会话缓存 | Redis 多槽 + 进程内多槽 map | 命中即复用 sessionKey，避免会话识别查询开销；同 token 多槽互不覆盖 |
 
 ## 安全措施
 
@@ -221,8 +232,8 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 | 项 | 设计 | 说明 |
 |----|------|------|
 | 幂等性 | `migrateClickHouseLogDB` 启动迁移 `CREATE TABLE IF NOT EXISTS` | 与 logs 同路径，启动建表幂等，配置变更重启重新对齐 TTL |
-| 并发控制 | `RedisSetNX` 原子抢占 | 消除同会话首批请求并发劈会话窗口 |
-| 会话续链 | Redis 状态，TTL 30min 滚动续期 | 网关重启不断链（TTL 内续得上），多副本跨实例续上同一会话 |
+| 并发控制 | V1 读改写非原子 | 接受并发/异步乱序导致的断链降级，后果是分裂（每段完整，非错乱）；Lua 原子化作为 V2 可选增强 |
+| 会话续链 | Redis 多槽状态，TTL 30min（`saveSessionSlots` 的 SET-with-TTL 天然滚动续期） | 网关重启不断链（TTL 内续得上），多副本跨实例续上同一会话 |
 | 一致性 | 最终一致 | 异步写库，查询侧按 `created_at, request_id` 排序聚合 |
-| 数据迁移 | 新表，无存量迁移 | ClickHouse TTL 自动清理，无需手工归档 |
+| 数据迁移 | 零表结构迁移，存量数据需清空 | 本次改动不改任何列定义（messages 等全为 String），代码零迁移；旧全量语义数据与新增量语义不能混存（MergeConversation 拼接错误），存量清空走 ClickHouse 运维操作（DROP TABLE 后重启重建，或 TRUNCATE TABLE） |
 | 方言兼容 | 仅 ClickHouse 手写 DDL | 本表不落三主库（SSOT §3.3），无需 SQLite/MySQL/PostgreSQL 回退分支 |
