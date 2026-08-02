@@ -1199,10 +1199,23 @@ func resolveUsername(username string, userID int) string {
 	return resolved
 }
 
+// 判断一次请求是否应记录到 conversation_turns。
+// channel_id==0 表示请求未成功分发到上游渠道（在 Distribute 之前失败），
+// 这类失败请求无会话价值，不记录。当前仅对 Claude 协议生效。
+func shouldRecordConversation(input ConversationInput) bool {
+	if input.ChannelID == 0 && protocolForPath(input.Path) == claudeProtocol {
+		return false
+	}
+	return true
+}
+
 // RecordConversation 异步记录一次对话轮次：解析请求/响应 → 会话识别 → 组装 messages → 写库。
 // 闭包只捕获 input 纯值快照，不阻塞请求；messages 按 isNew 存全量或增量。
 func RecordConversation(input ConversationInput) {
 	gopool.Go(func() {
+		if !shouldRecordConversation(input) {
+			return
+		}
 		requestParts, reqErr := parseRequestMessages(input.Path, input.RawRequestBody)
 		if reqErr != nil {
 			requestParts = []MsgPart{}

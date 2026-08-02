@@ -492,6 +492,29 @@ func TestProtocolForPath(t *testing.T) {
 	}
 }
 
+// TestShouldRecordConversation 失败请求过滤规则：Claude 协议下 channel_id==0（未到达上游）
+// 不记录；其余组合（非零渠道、OpenAI/Gemini/未知 path 配 channel_id==0、Claude 配非零渠道）记录。
+func TestShouldRecordConversation(t *testing.T) {
+	tests := []struct {
+		name      string
+		channelID int
+		path      string
+		want      bool
+	}{
+		{"claude failed (channel_id=0)", 0, "/v1/messages", false},
+		{"claude ok (channel_id>0)", 7, "/v1/messages", true},
+		{"openai failed (channel_id=0)", 0, "/v1/chat/completions", true},
+		{"gemini failed (channel_id=0)", 0, "/v1beta/models/gemini-1.5-pro:generateContent", true},
+		{"unknown path failed (channel_id=0)", 0, "/v1/embeddings", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			input := ConversationInput{ChannelID: tc.channelID, Path: tc.path}
+			assert.Equal(t, tc.want, shouldRecordConversation(input))
+		})
+	}
+}
+
 // TestFingerprintMessages 核心断言：同 parts 同指纹；不同 parts 不同指纹；全字段不截断
 // （64 字符之后的差异仍能区分，旧 prefixHash 截断会误判相同）；role 参与 fingerprint；
 // 空输入确定。
