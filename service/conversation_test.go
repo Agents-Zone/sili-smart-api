@@ -39,8 +39,8 @@ func TestParseRequestMessages(t *testing.T) {
 			want: []MsgPart{
 				{Role: msgRoleSystem, Kind: msgKindText, Text: "You are helpful"},
 				{Role: msgRoleUser, Kind: msgKindText, Text: "北京天气怎么样？"},
-				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
-				{Role: msgRoleTool, Kind: msgKindToolResult, Text: "晴，25度"},
+				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", len(`{"city":"北京"}`))},
+				{Role: msgRoleTool, Kind: msgKindToolResult, Text: toolResultMeta("", "晴，25度")},
 			},
 		},
 		{
@@ -51,7 +51,7 @@ func TestParseRequestMessages(t *testing.T) {
 			]}`,
 			want: []MsgPart{
 				{Role: msgRoleAssistant, Kind: msgKindText, Text: "让我查一下"},
-				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
+				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", len(`{"city":"北京"}`))},
 			},
 		},
 		{
@@ -69,7 +69,7 @@ func TestParseRequestMessages(t *testing.T) {
 			]}`,
 			want: []MsgPart{
 				{Role: msgRoleUser, Kind: msgKindText, Text: "北京天气怎么样？"},
-				{Role: msgRoleTool, Kind: msgKindToolResult, Text: "晴，25度"},
+				{Role: msgRoleTool, Kind: msgKindToolResult, Text: toolResultMeta("", "晴，25度")},
 			},
 		},
 		{
@@ -91,7 +91,7 @@ func TestParseRequestMessages(t *testing.T) {
 			]}`,
 			want: []MsgPart{
 				{Role: msgRoleUser, Kind: msgKindText, Text: "请查天气"},
-				{Role: msgRoleTool, Kind: msgKindToolResult, Text: "晴，25度"},
+				{Role: msgRoleTool, Kind: msgKindToolResult, Text: toolResultMeta("", "晴，25度")},
 			},
 		},
 		{
@@ -109,7 +109,7 @@ func TestParseRequestMessages(t *testing.T) {
 				{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"北京"}}]}
 			]}`,
 			want: []MsgPart{
-				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
+				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", anyLen(map[string]any{"city": "北京"}))},
 			},
 		},
 		{
@@ -121,7 +121,7 @@ func TestParseRequestMessages(t *testing.T) {
 			]}`,
 			want: []MsgPart{
 				{Role: msgRoleUser, Kind: msgKindText, Text: "北京天气？"},
-				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
+				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", anyLen(map[string]any{"city": "北京"}))},
 			},
 		},
 		{
@@ -129,7 +129,7 @@ func TestParseRequestMessages(t *testing.T) {
 			path: "/v1/models/gemini:streamGenerateContent",
 			body: `{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"get_weather","response":{"result":"晴"}}}]}]}`,
 			want: []MsgPart{
-				{Role: msgRoleTool, Kind: msgKindToolResult, Text: `{"result":"晴"}`},
+				{Role: msgRoleTool, Kind: msgKindToolResult, Text: toolResultMeta("get_weather", compactJSONString(map[string]any{"result": "晴"}))},
 			},
 		},
 		{
@@ -201,7 +201,7 @@ func TestParseAssistantContentNonStream(t *testing.T) {
 			body: `{"choices":[{"index":0,"message":{"role":"assistant","content":"让我查一下","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"北京\"}"}}]}}]}`,
 			want: []MsgPart{
 				{Role: msgRoleAssistant, Kind: msgKindText, Text: "让我查一下"},
-				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
+				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", len(`{"city":"北京"}`))},
 			},
 		},
 		{
@@ -221,7 +221,7 @@ func TestParseAssistantContentNonStream(t *testing.T) {
 			]}`,
 			want: []MsgPart{
 				{Role: msgRoleAssistant, Kind: msgKindText, Text: "答案"},
-				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
+				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", anyLen(`{"city":"北京"}`))},
 			},
 		},
 		{
@@ -230,7 +230,7 @@ func TestParseAssistantContentNonStream(t *testing.T) {
 			body: `{"content":[{"type":"text","text":"好的"},{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"北京"}}]}`,
 			want: []MsgPart{
 				{Role: msgRoleAssistant, Kind: msgKindText, Text: "好的"},
-				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
+				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", anyLen(`{"city":"北京"}`))},
 			},
 		},
 		{
@@ -239,7 +239,7 @@ func TestParseAssistantContentNonStream(t *testing.T) {
 			body: `{"candidates":[{"content":{"role":"model","parts":[{"text":"天气"},{"functionCall":{"name":"get_weather","args":{"city":"北京"}}}]}}]}`,
 			want: []MsgPart{
 				{Role: msgRoleAssistant, Kind: msgKindText, Text: "天气"},
-				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
+				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", anyLen(`{"city":"北京"}`))},
 			},
 		},
 	}
@@ -282,7 +282,7 @@ func TestParseAssistantContentStream(t *testing.T) {
 			path: "/v1/chat/completions",
 			body: "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\\\"北京\\\"}\"}}]}}]}\n\ndata: [DONE]\n",
 			want: []MsgPart{
-				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
+				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", anyLen(`{"city":"北京"}`))},
 			},
 		},
 		{
@@ -297,7 +297,7 @@ func TestParseAssistantContentStream(t *testing.T) {
 			body: "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"答案\"}\n\nevent: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"name\":\"get_weather\"}}\n\nevent: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"city\\\":\\\"北京\\\"}\"}\n\ndata: [DONE]\n",
 			want: []MsgPart{
 				{Role: msgRoleAssistant, Kind: msgKindText, Text: "答案"},
-				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
+				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", anyLen(`{"city":"北京"}`))},
 			},
 		},
 		{
@@ -306,7 +306,7 @@ func TestParseAssistantContentStream(t *testing.T) {
 			body: "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"你好\"}}\n\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"name\":\"get_weather\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"北京\\\"}\"}}\n\ndata: [DONE]\n",
 			want: []MsgPart{
 				{Role: msgRoleAssistant, Kind: msgKindText, Text: "你好"},
-				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
+				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", anyLen(`{"city":"北京"}`))},
 			},
 		},
 		{
@@ -315,7 +315,7 @@ func TestParseAssistantContentStream(t *testing.T) {
 			body: "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"天气\"}]}}]}\n\ndata: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"get_weather\",\"args\":{\"city\":\"北京\"}}}]}}]}\n\ndata: [DONE]\n",
 			want: []MsgPart{
 				{Role: msgRoleAssistant, Kind: msgKindText, Text: "天气"},
-				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
+				{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", anyLen(`{"city":"北京"}`))},
 			},
 		},
 	}
@@ -457,8 +457,8 @@ func TestParseUsage(t *testing.T) {
 func TestMsgPartRoundTrip(t *testing.T) {
 	parts := []MsgPart{
 		{Role: msgRoleUser, Kind: msgKindText, Text: "你好，世界"},
-		{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`},
-		{Role: msgRoleTool, Kind: msgKindToolResult, Text: "晴，25度"},
+		{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", anyLen(`{"city":"北京"}`))},
+		{Role: msgRoleTool, Kind: msgKindToolResult, Text: toolResultMeta("", "晴，25度")},
 		{Role: msgRoleSystem, Kind: msgKindText, Text: "system prompt"},
 	}
 	data, err := common.Marshal(parts)
@@ -927,13 +927,13 @@ func TestResolveSessionKeyLocalMultiSlotIsolation(t *testing.T) {
 // 无工具且 isNew=true 记 first，无工具且 isNew=false 记 normal。
 func TestTurnKindFor(t *testing.T) {
 	t.Run("tool_use_wins_over_first_and_normal", func(t *testing.T) {
-		toolParts := []MsgPart{{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: `get_weather({"city":"北京"})`}}
+		toolParts := []MsgPart{{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", anyLen(`{"city":"北京"}`))}}
 		assert.Equal(t, turnKindToolRound, turnKindFor(toolParts, true), "含 tool_use 且新会话记 tool_round（工具优先）")
 		assert.Equal(t, turnKindToolRound, turnKindFor(toolParts, false), "含 tool_use 且非新会话记 tool_round（工具优先）")
 	})
 
 	t.Run("tool_result_also_tool_round", func(t *testing.T) {
-		resultParts := []MsgPart{{Role: msgRoleTool, Kind: msgKindToolResult, Text: "晴，25度"}}
+		resultParts := []MsgPart{{Role: msgRoleTool, Kind: msgKindToolResult, Text: toolResultMeta("", "晴，25度")}}
 		assert.Equal(t, turnKindToolRound, turnKindFor(resultParts, true), "含 tool_result 且新会话记 tool_round")
 		assert.Equal(t, turnKindToolRound, turnKindFor(resultParts, false), "含 tool_result 且非新会话记 tool_round")
 	})
@@ -941,7 +941,7 @@ func TestTurnKindFor(t *testing.T) {
 	t.Run("mixed_text_and_tool", func(t *testing.T) {
 		mixed := []MsgPart{
 			{Role: msgRoleUser, Kind: msgKindText, Text: "查天气"},
-			{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: "get_weather()"},
+			{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta("get_weather", 0)},
 		}
 		assert.Equal(t, turnKindToolRound, turnKindFor(mixed, true), "文本与工具混合仍记 tool_round")
 	})

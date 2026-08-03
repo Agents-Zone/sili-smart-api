@@ -92,7 +92,7 @@ Model 层（数据模型与数据库访问，GORM）
 
 **模块说明**：
 - **中继转发（relay）** 是系统的核心业务模块。`relay_adaptor.go` 的 `GetAdaptor` 依据渠道 APIType 返回 40 个提供商适配器；`relaykit/` 作为独立可构建子模块承载 Claude/OpenAI/Gemini/Responses 之间的协议转换，不依赖根模块，保证模块独立性
-- **日志与审计** 与 **对话内容记录** 共享日志库 `LOG_DB`，通过 `request_id` 交叉关联，但不互相依赖：logs 表记计费摘要，conversation_turns 表记对话明文，两者职责正交
+- **日志与审计** 与 **对话内容记录** 共享日志库 `LOG_DB`，通过 `request_id` 交叉关联，但不互相依赖：logs 表记计费摘要，conversation_turns 表记对话原文（工具调用仅记工具名+字节数元信息，纯文本存原文），两者职责正交
 - **对话内容记录** 是本次新增的通用技术能力，以最小侵入方式集成：只新增挂于 relay 路由分组的 middleware 与查询 API，不修改任何中转 handler、relay 流程与 RelayInfo
 
 ### 2.3 模块间依赖关系图

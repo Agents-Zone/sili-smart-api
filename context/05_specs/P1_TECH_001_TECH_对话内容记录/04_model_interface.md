@@ -109,7 +109,7 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 | session_key | String | 是 | '' | 会话标识，`common.NewRequestId()` 风格；同会话多轮共享，聚合键 |
 | request_id | String | 是 | '' | 请求标识，与 logs 表交叉分析的关联键 |
 | created_at | Int64 | 是 | 0 | 轮次时间，Unix 秒级时间戳（`common.GetTimestamp()`）；分区与排序键（规则文件 §1.7） |
-| messages | String | 是 | '' | 本轮 messages 序列 `[]MsgPart{role,kind,text}` 的 JSON 序列化，经 `common.Marshal` 写入；isNew 控制全量/增量：首轮存全量 `requestParts + assistantParts`，续链切增量（上一轮 assistant 之后）+ 本轮 assistant（规则文件 §1.5 禁止 JSON 列，用 String 承载） |
+| messages | String | 是 | '' | 本轮 messages 序列 `[]MsgPart{role,kind,text}` 的 JSON 序列化，经 `common.Marshal` 写入；isNew 控制全量/增量：首轮存全量 `requestParts + assistantParts`，续链切增量（上一轮 assistant 之后）+ 本轮 assistant（规则文件 §1.5 禁止 JSON 列，用 String 承载）；text 内容语义：`text` 存原文，`tool_use`/`tool_result` 仅记工具名+字节数元信息 |
 | turn_kind | String | 是 | 'normal' | 轮次类型，枚举：turn_kind（first/normal/tool_round），tool_round 优先级最高 |
 | model_name | String | 否 | '' | 模型名称维度字段，从 context/请求取得 |
 | channel_id | Int32 | 否 | 0 | 渠道 ID 维度字段 |
@@ -177,7 +177,7 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| Fingerprint | string | 上一轮 requestParts 的全字段指纹（`fingerprintMessages`，对 role+kind+text 整体 sha256，不截断） |
+| Fingerprint | string | 上一轮 requestParts 的全字段指纹（`fingerprintMessages`，对 role+kind+text 整体 sha256，不截断）；tool_use/tool_result 的 text 为「工具名+字节数」元信息，指纹粒度收窄的影响见 §3.6 已知局限 |
 | SessionKey | string | 会话标识，`common.NewRequestId()` 风格 |
 | Count | int | 上一轮 requestParts 条数，本轮条数须严格大于它才视为续链 |
 | ActiveTime | int64 | 上一轮活跃 unix 时间戳，用于超时淘汰 |

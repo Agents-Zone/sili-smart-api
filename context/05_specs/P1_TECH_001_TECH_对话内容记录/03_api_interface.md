@@ -151,8 +151,8 @@ curl -H "Authorization: Bearer <集成密钥>" \
       { "role": "user", "kind": "text", "text": "你好" },
       { "role": "assistant", "kind": "text", "text": "你好，有什么可以帮你？" },
       { "role": "user", "kind": "text", "text": "帮我查天气" },
-      { "role": "assistant", "kind": "tool_use", "text": "get_weather({\"city\":\"北京\"})" },
-      { "role": "tool", "kind": "tool_result", "text": "北京晴，25 度" },
+      { "role": "assistant", "kind": "tool_use", "text": "get_weather args=17" },
+      { "role": "tool", "kind": "tool_result", "text": "tool_result result=18" },
       { "role": "assistant", "kind": "text", "text": "北京今天晴天，气温 25 度。" }
     ]
   }
@@ -173,6 +173,6 @@ curl -H "Authorization: Bearer <集成密钥>" \
 |------|------|
 | role | `user` / `assistant` / `tool` / `system` |
 | kind | `text` / `tool_use` / `tool_result` |
-| text | 消息内容；`tool_use` 为函数名+参数，`tool_result` 为工具返回 |
+| text | 消息内容；`text` 存原文，`tool_use` 存「工具名 args=参数字节数」元信息，`tool_result` 存「工具名 result=结果字节数」元信息（OpenAI/Claude 协议无工具名字段，标签退化为 `tool_result`；Gemini `functionResponse` 带工具名，保留原名）。字节数为 UTF-8 字节长度，工具原始载荷不落库。注意：args 字节数为请求侧与响应侧各自序列化的原始字节数，同一调用走流式与非流式路径记出的数值可能不同（map 键序等因素），属可接受的口径偏差，不做归一化 |
 
 **turn_kind 枚举：** `first`（新建会话首轮）、`normal`（常规轮）、`tool_round`（含工具调用）。

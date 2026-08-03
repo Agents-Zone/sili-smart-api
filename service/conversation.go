@@ -21,7 +21,9 @@ import (
 )
 
 // MsgPart 消息片段，kind 区分 text/tool_use/tool_result。
-// Role 取值 user / assistant / tool / system。
+// Role 取值 user / assistant / tool / system。Text 含义随 Kind 变化：text 存原文，
+// tool_use 存元信息（工具名 + 参数字节数，如 Read args=234），tool_result 存元信息
+// （工具名 + 结果字节数，协议拿不到工具名时退化为 tool_result result=<N>）。
 type MsgPart struct {
 	Role string `json:"role"`
 	Kind string `json:"kind"`
@@ -126,6 +128,9 @@ type convOpenAIRequestMessage struct {
 	Role      string            `json:"role"`
 	Content   any               `json:"content"`
 	ToolCalls []convRequestTool `json:"tool_calls"`
+	// Name 防御性冗余：OpenAI tool 消息规范不含工具名字段，反序列化恒为空，
+	// 仅用于与 Gemini 侧 toolResultMeta 调用保持同构。
+	Name string `json:"name"`
 }
 
 type convRequestTool struct {
@@ -145,7 +150,7 @@ func parseOpenAIRequestMessages(body []byte) ([]MsgPart, error) {
 	parts := make([]MsgPart, 0, len(req.Messages))
 	for _, m := range req.Messages {
 		if m.Role == msgRoleTool {
-			parts = append(parts, MsgPart{Role: msgRoleTool, Kind: msgKindToolResult, Text: convMessageText(m.Content)})
+			parts = append(parts, MsgPart{Role: msgRoleTool, Kind: msgKindToolResult, Text: toolResultMeta(m.Name, convMessageText(m.Content))})
 			continue
 		}
 		if text := convMessageText(m.Content); text != "" {
@@ -155,7 +160,7 @@ func parseOpenAIRequestMessages(body []byte) ([]MsgPart, error) {
 			if tc.Function.Name == "" {
 				continue
 			}
-			parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolCallText(tc.Function.Name, tc.Function.Arguments)})
+			parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta(tc.Function.Name, len(tc.Function.Arguments))})
 		}
 	}
 	return parts, nil
@@ -196,7 +201,7 @@ func parseOpenAIResponsesInput(body []byte) ([]MsgPart, error) {
 			}
 			role, _ := m["role"].(string)
 			if role == msgRoleTool {
-				parts = append(parts, MsgPart{Role: msgRoleTool, Kind: msgKindToolResult, Text: convMessageText(m["content"])})
+				parts = append(parts, MsgPart{Role: msgRoleTool, Kind: msgKindToolResult, Text: toolResultMeta("", convMessageText(m["content"]))})
 				continue
 			}
 			if role == "" {
@@ -246,10 +251,10 @@ func parseClaudeRequestMessages(body []byte) ([]MsgPart, error) {
 					parts = append(parts, MsgPart{Role: m.Role, Kind: msgKindText, Text: s})
 				}
 			case "tool_result":
-				parts = append(parts, MsgPart{Role: msgRoleTool, Kind: msgKindToolResult, Text: claudeBlockText(block["content"])})
+				parts = append(parts, MsgPart{Role: msgRoleTool, Kind: msgKindToolResult, Text: toolResultMeta("", claudeBlockText(block["content"]))})
 			case "tool_use":
 				if name, ok := block["name"].(string); ok && name != "" {
-					parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolCallText(name, block["input"])})
+					parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta(name, anyLen(block["input"]))})
 				}
 			}
 		}
@@ -295,11 +300,11 @@ func parseGeminiRequestMessages(body []byte) ([]MsgPart, error) {
 			switch {
 			case part.FunctionCall != nil:
 				if part.FunctionCall.Name != "" {
-					parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolCallText(part.FunctionCall.Name, part.FunctionCall.Args)})
+					parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta(part.FunctionCall.Name, anyLen(part.FunctionCall.Args))})
 				}
 			case part.FunctionResponse != nil:
 				if part.FunctionResponse.Name != "" {
-					parts = append(parts, MsgPart{Role: msgRoleTool, Kind: msgKindToolResult, Text: compactJSONString(part.FunctionResponse.Response)})
+					parts = append(parts, MsgPart{Role: msgRoleTool, Kind: msgKindToolResult, Text: toolResultMeta(part.FunctionResponse.Name, compactJSONString(part.FunctionResponse.Response))})
 				}
 			case part.Text != "":
 				parts = append(parts, MsgPart{Role: role, Kind: msgKindText, Text: part.Text})
@@ -363,10 +368,33 @@ func claudeBlockText(content any) string {
 	}
 }
 
-// toolCallText 组装工具名与入参的紧凑表示，如 get_weather({"city":"北京"})。
-// args 为 string（OpenAI 已是 JSON 串）时直接拼接，否则 JSON 序列化。
-func toolCallText(name string, args any) string {
-	return name + "(" + compactJSONString(args) + ")"
+// anyLen 返回任意 args 的 UTF-8 字节数：string 取 len，其它经 common.Marshal 取 len，nil/失败返回 0。
+func anyLen(v any) int {
+	switch s := v.(type) {
+	case string:
+		return len(s)
+	case nil:
+		return 0
+	default:
+		if data, err := common.Marshal(v); err == nil {
+			return len(data)
+		}
+	}
+	return 0
+}
+
+// toolUseMeta 组装 tool_use 元信息：工具名 + 参数字节数，如 get_weather args=18。
+func toolUseMeta(name string, argsLen int) string {
+	return name + " args=" + strconv.Itoa(argsLen)
+}
+
+// toolResultMeta 组装 tool_result 元信息：工具名（空则 "tool_result"）+ 结果字节数。
+func toolResultMeta(name, text string) string {
+	label := name
+	if label == "" {
+		label = "tool_result"
+	}
+	return label + " result=" + strconv.Itoa(len(text))
 }
 
 // compactJSONString 把任意 JSON 值转为紧凑字符串：string 原样返回，
@@ -436,7 +464,7 @@ func parseOpenAIChatNonStream(respBytes []byte) []MsgPart {
 			if tc.Function.Name == "" {
 				continue
 			}
-			parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolCallText(tc.Function.Name, tc.Function.Arguments)})
+			parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta(tc.Function.Name, len(tc.Function.Arguments))})
 		}
 	}
 	return parts
@@ -489,7 +517,7 @@ func parseOpenAIResponsesNonStream(respBytes []byte) []MsgPart {
 			}
 		case "function_call":
 			if out.Name != "" {
-				parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolCallText(out.Name, out.Arguments)})
+				parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta(out.Name, anyLen(out.Arguments))})
 			}
 		}
 	}
@@ -517,7 +545,7 @@ func parseClaudeNonStream(respBytes []byte) []MsgPart {
 			}
 		case "tool_use":
 			if block.Name != "" {
-				parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolCallText(block.Name, block.Input)})
+				parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta(block.Name, anyLen(block.Input))})
 			}
 		}
 	}
@@ -540,10 +568,10 @@ func parseAssistantStream(protocol, path string, respBytes []byte) []MsgPart {
 	}
 }
 
-// accumToolCall 流式工具调用累积器，按 index 聚合 name 与增量 arguments。
+// accumToolCall 流式工具调用累积器，按 index 聚合 name 与增量 arguments 的字节数。
 type accumToolCall struct {
-	name string
-	args string
+	name    string
+	argsLen int
 }
 
 // convOpenAIStreamChunk OpenAI chat/completions 与 completions 流式 chunk。
@@ -594,7 +622,7 @@ func parseOpenAIChatStream(respBytes []byte) []MsgPart {
 				toolCalls[tc.Index] = acc
 			}
 			acc.name += tc.Function.Name
-			acc.args += tc.Function.Arguments
+			acc.argsLen += len(tc.Function.Arguments)
 		}
 	}
 	return assembleStreamParts(textParts, toolCalls)
@@ -638,7 +666,7 @@ func parseOpenAIResponsesStream(respBytes []byte) []MsgPart {
 					acc = &accumToolCall{}
 					toolCalls[*ev.OutputIndex] = acc
 				}
-				acc.args += ev.Delta
+				acc.argsLen += len(ev.Delta)
 			}
 		}
 	}
@@ -687,7 +715,7 @@ func parseClaudeStream(respBytes []byte) []MsgPart {
 					acc = &accumToolCall{}
 					toolCalls[idx] = acc
 				}
-				acc.args += ev.Delta.PartialJSON
+				acc.argsLen += len(ev.Delta.PartialJSON)
 			}
 		}
 	}
@@ -721,7 +749,7 @@ func parseGeminiStreamOrNonStream(respBytes []byte) []MsgPart {
 				switch {
 				case part.FunctionCall != nil:
 					if part.FunctionCall.Name != "" {
-						toolParts = append(toolParts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolCallText(part.FunctionCall.Name, part.FunctionCall.Args)})
+						toolParts = append(toolParts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta(part.FunctionCall.Name, anyLen(part.FunctionCall.Args))})
 					}
 				case part.Text != "":
 					textParts = append(textParts, part.Text)
@@ -758,7 +786,7 @@ func assembleStreamParts(textParts []string, toolCalls map[int]*accumToolCall) [
 		if tc.name == "" {
 			continue
 		}
-		parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: tc.name + "(" + tc.args + ")"})
+		parts = append(parts, MsgPart{Role: msgRoleAssistant, Kind: msgKindToolUse, Text: toolUseMeta(tc.name, tc.argsLen)})
 	}
 	return parts
 }

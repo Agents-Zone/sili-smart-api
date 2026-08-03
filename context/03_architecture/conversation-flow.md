@@ -52,7 +52,7 @@ flowchart TD
 | 6 | 同步段取值 | `middleware/conversation_log.go:78-95` | `c.Next()` 后捕获纯值标量（request_id、model、channel/token/user id、token_name、group、ip、is_stream、use_time、upstream_request_id），`bytes.Clone` 取出响应体，构造 `service.ConversationInput` |
 | 7 | 异步触发 | `middleware/conversation_log.go:97-99` `gopool.Go` → `service.RecordConversation`(`:1263`) | 闭包只捕获 `input` 纯值快照，不阻塞响应。`RecordConversation` 内部再起一个 `gopool.Go`(`:1264`) 执行步骤 8-15 |
 | 8 | 解析请求侧 | `service/conversation.go:116` `parseRequestMessages` | 按 path 分派协议（OpenAI/Claude/Gemini/Responses），把请求体 messages 归一化为 `[]MsgPart{role,kind,text}`，role=tool/tool_result 标 `Kind=tool_result` |
-| 9 | 解析响应侧 | `service/conversation.go:406` `parseAssistantContent` | 非流式按协议解析 JSON，流式逐行扫描 SSE，提取 assistant 文本段（`Kind=text`）与工具调用段（`Kind=tool_use`）；错误响应记空 |
+| 9 | 解析响应侧 | `service/conversation.go:406` `parseAssistantContent` | 非流式按协议解析 JSON，流式逐行扫描 SSE，提取 assistant 文本段（`Kind=text`，存原文）与工具调用段（`Kind=tool_use`，text 只记工具名+参数字节数元信息）；错误响应记空 |
 | 10 | 解析用量 | `service/conversation.go:808` `parseUsage` | 仅从响应字节取 prompt/completion tokens，不做计费运算；本表 token 计数的唯一来源 |
 | 11 | 会话识别 | `service/conversation.go:1145` `resolveSessionKey` | 多槽前缀匹配，返回 `sessionKey` 与 `isNew`（详见关键点「会话识别」与「多槽隔离」） |
 | 12 | 组装 messages | `service/conversation.go:1212` `joinConversationParts` / `:1197` `lastAssistantIndex` | `isNew=true` 存全量 `requestParts+assistant`；`isNew=false` 在 `lastAssistantIndex+1` 处切增量，避免拼接重复 |
@@ -101,7 +101,7 @@ flowchart TD
 2. 前 `slot.Count` 条的全字段指纹 `fingerprintMessages(requestParts[:slot.Count])` 等于 `slot.Fingerprint`（本轮请求体完整包含上一轮 request 侧内容）；
 3. slot 未超时（`ActiveTime` 晚于 `now - 30min`）。
 
-命中则续链该槽并刷新 `{Fingerprint=本轮全量, Count=本轮条数, ActiveTime}`；全不命中则追加新槽。全字段指纹 `fingerprintMessages`（`service/conversation.go:1040`）对 `[]MsgPart` 整体序列化做 sha256 不截断，技能 prompt 相同但 user 内容不同的调用指纹不同，不误并。条数增长检查零成本打散字节级相同请求体的顺序重放。
+命中则续链该槽并刷新 `{Fingerprint=本轮全量, Count=本轮条数, ActiveTime}`；全不命中则追加新槽。全字段指纹 `fingerprintMessages`（`service/conversation.go:1040`）对 `[]MsgPart` 整体序列化做 sha256 不截断，技能 prompt 相同但 user 内容不同的调用指纹不同，不误并。条数增长检查零成本打散字节级相同请求体的顺序重放。tool_use/tool_result 的 text 仅记工具名+字节数元信息，指纹在工具段上的区分度相应收窄（见功能规格 §3.6 已知局限），但请求前缀通常含每轮变化的纯文本、主导指纹，实际碰撞极罕见。
 
 ### 3.2 多槽隔离
 
