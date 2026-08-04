@@ -1,4 +1,4 @@
-# sili-smart-trace 编排（PostgreSQL 主库 + ClickHouse 日志库）
+# sili-smart-api 编排（PostgreSQL 主库 + ClickHouse 日志库）
 #
 # 数据分工：
 #   - 主库 PostgreSQL：业务数据（用户、令牌、渠道、配额等）
@@ -12,9 +12,9 @@
 # ⚠️ 生产部署请修改所有默认密码（postgres / redis / clickhouse）。
 
 services:
-  sili-smart-trace:
-    image: sili/sili-smart-trace:${TAG:-local}
-    container_name: sili-smart-trace
+  sili-smart-api:
+    image: sili/sili-smart-api:${TAG:-local}
+    container_name: sili-smart-api
     restart: always
     command: --log-dir /app/logs
     ports:
@@ -37,7 +37,7 @@ services:
       - TZ=Asia/Shanghai
       - ERROR_LOG_ENABLED=true
       - BATCH_UPDATE_ENABLED=true
-      - NODE_NAME=sili-smart-trace-node-1
+      - NODE_NAME=sili-smart-api-node-1
       - SEARCH_RATE_LIMIT_ENABLE=false
       - GODEBUG=http2client=0
     depends_on:

@@ -1,4 +1,4 @@
-# new-api AI 网关（sili-smart-trace）- 系统架构文档
+# new-api AI 网关（sili-smart-api）- 系统架构文档
 
 ## 1. 基础技术框架
 
