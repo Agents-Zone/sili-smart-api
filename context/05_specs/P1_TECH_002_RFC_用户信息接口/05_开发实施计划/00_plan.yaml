@@ -7,7 +7,7 @@ sub_plans:
   - id: "01"
     name: "用户字典"
     file: "01_用户字典.md"
-    status: "pending"
+    status: "completed"
 
 execution_order:
   - "01"
