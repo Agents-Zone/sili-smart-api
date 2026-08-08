@@ -112,3 +112,25 @@ func GetConversation(c *gin.Context) {
 		"messages": messages,
 	})
 }
+
+// ListConversationUsers 返回用户信息字典：启用状态用户及其名下启用 token 的精简信息
+// （user_id、username、token_id、token_name），按 user_id 升序分页。查询参数 username/
+// token_name 自由文本（空串即不过滤），p/page_size 由 common.GetPageQuery 兜底（page_size
+// 上限 100）。响应 data 为 {page, page_size, total, items}（SSOT §2.2 / §2.4 能力8）。
+// 查询参数全可选容错，无参数非法分支；鉴权 401/403 由路由组 ConversationLogAuth 中间件
+// 统一处理，handler 不重复实现。
+func ListConversationUsers(c *gin.Context) {
+	params := &model.ConversationUserQueryParams{
+		Username:  c.Query("username"),
+		TokenName: c.Query("token_name"),
+	}
+	pageInfo := common.GetPageQuery(c)
+	users, total, err := model.ListConversationUsers(params, pageInfo.GetPage(), pageInfo.GetPageSize())
+	if err != nil {
+		common.ApiErrorI18n(c, i18n.MsgDatabaseError)
+		return
+	}
+	pageInfo.SetTotal(int(total))
+	pageInfo.SetItems(users)
+	common.ApiSuccess(c, pageInfo)
+}
