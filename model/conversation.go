@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/QuantumNous/new-api/common"
+	"gorm.io/gorm"
 )
 
 // ConversationTurn 一行一轮的会话轮次记录，仅落 ClickHouse 日志库（LOG_SQL_DSN）。
@@ -158,4 +159,119 @@ func GetConversationTurns(sessionKey string) ([]ConversationTurn, error) {
 	err := LOG_DB.Table("conversation_turns").Where("session_key = ?", sessionKey).Order("created_at asc, request_id asc").Find(&turns).Error
 	assignTurnIds(turns, 0)
 	return turns, err
+}
+
+// ConversationToken 用户名下单个 API key 的精简信息，仅名称维度（SSOT §2.3）。
+type ConversationToken struct {
+	TokenID   int    `json:"token_id"`
+	TokenName string `json:"token_name"`
+}
+
+// ConversationUserSummary 用户信息字典聚合行，按用户聚合（SSOT §2.3）。
+type ConversationUserSummary struct {
+	UserID   int                 `json:"user_id"`
+	Username string              `json:"username"`
+	Tokens   []ConversationToken `json:"tokens"`
+}
+
+// ConversationUserQueryParams 用户信息字典过滤维度（内部参数传递，无 JSON tag）。
+type ConversationUserQueryParams struct {
+	Username  string
+	TokenName string
+}
+
+// convUserRow 用户分页查询的包内私有投影，只声明 id/username，
+// 从结构上保证不读 password/email/quota 等敏感列（SSOT §3.2 字段最小化）。
+type convUserRow struct {
+	Id       int
+	Username string
+}
+
+// convTokenRow 令牌批量查询的包内私有投影，只声明 id/user_id/name，
+// 从结构上保证不读 tokens.key 等敏感列（SSOT §3.2 字段最小化）。
+type convTokenRow struct {
+	Id     int
+	UserId int
+	Name   string
+}
+
+// ListConversationUsers 按用户聚合分页返回启用状态用户的 username 与名下启用 token_name。
+// users.status=1 且未软删除；tokens.status=1 且未软删除（GORM 自动过滤 DeletedAt）。
+// username 模糊过滤用户；token_name 模糊过滤用户名下的 token，仅保留至少含一个匹配 token 的用户。
+// 按 user_id 升序分页，每用户 tokens 按 token_id 升序。
+// 返回 ([]ConversationUserSummary, int64, error)，int64 为满足条件的用户总数（controller 分页 PageInfo 需要）。
+// 全程使用主库 DB 句柄（非 LOG_DB），两段式三库兼容实现（SSOT §3.1、04_model_interface.md §GORM 实现方案）。
+func ListConversationUsers(params *ConversationUserQueryParams, page, pageSize int) ([]ConversationUserSummary, int64, error) {
+	if page < 1 {
+		page = 1
+	}
+
+	// 步骤1：用户分页查询（含 token_name 资格收口）。
+	// token_name 指定时，把用户集合收口为名下至少含一个匹配启用 token 的用户，
+	// 必须在 Count/分页前完成，否则 total 与本页条数会因事后丢弃无匹配 token 的用户而失真。
+	userQuery := DB.Model(&User{}).Where("status = ?", common.UserStatusEnabled)
+	var tokenNameFilter string
+	if params != nil {
+		if params.Username != "" {
+			userQuery = userQuery.Where("username LIKE ?", "%"+params.Username+"%")
+		}
+		if params.TokenName != "" {
+			tokenNameFilter = params.TokenName
+			userQuery = userQuery.Where("id IN (?)", DB.Model(&Token{}).Select("user_id").Where("status = ?", common.UserStatusEnabled).Where("name LIKE ?", "%"+tokenNameFilter+"%"))
+		}
+	}
+
+	var total int64
+	if err := userQuery.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var userRows []convUserRow
+	if err := userQuery.Session(&gorm.Session{}).Select("id, username").Order("id asc").Limit(pageSize).Offset((page - 1) * pageSize).Find(&userRows).Error; err != nil {
+		return nil, 0, err
+	}
+
+	// 本页无用户：直接返回空 summary 切片、total、nil（result 仍为 [] 而非 nil）。
+	if len(userRows) == 0 {
+		return []ConversationUserSummary{}, total, nil
+	}
+
+	// 步骤2：令牌批量查询，对本页用户名下启用 token（token_name 指定时仅返回匹配项）。
+	userIDs := make([]int, 0, len(userRows))
+	for _, u := range userRows {
+		userIDs = append(userIDs, u.Id)
+	}
+
+	tokenQuery := DB.Model(&Token{}).Where("user_id IN ?", userIDs).Where("status = ?", common.UserStatusEnabled)
+	if tokenNameFilter != "" {
+		tokenQuery = tokenQuery.Where("name LIKE ?", "%"+tokenNameFilter+"%")
+	}
+	var tkRows []convTokenRow
+	if err := tokenQuery.Select("id, user_id, name").Order("user_id asc, id asc").Find(&tkRows).Error; err != nil {
+		return nil, 0, err
+	}
+
+	// 步骤3：内存聚合。每用户 Tokens 初始化为空数组（非 nil），
+	// 保证 JSON 序列化为 [] 而非 null（LEFT JOIN 空数组语义）。
+	result := make([]ConversationUserSummary, 0, len(userRows))
+	indexByID := make(map[int]int, len(userRows))
+	for i, u := range userRows {
+		result = append(result, ConversationUserSummary{
+			UserID:   u.Id,
+			Username: u.Username,
+			Tokens:   []ConversationToken{},
+		})
+		indexByID[u.Id] = i
+	}
+	// tkRows 已按 user_id asc, id asc 排序，按序挂到对应用户，
+	// 每用户 token 自然按 token_id 升序。
+	for _, tk := range tkRows {
+		if idx, ok := indexByID[tk.UserId]; ok {
+			result[idx].Tokens = append(result[idx].Tokens, ConversationToken{
+				TokenID:   tk.Id,
+				TokenName: tk.Name,
+			})
+		}
+	}
+	return result, total, nil
 }
