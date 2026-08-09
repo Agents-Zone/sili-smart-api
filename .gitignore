@@ -47,3 +47,6 @@ go.work.sum
 /docker-compose-clickhouse.yml
 # 离线交付镜像 tar
 /release/
+
+# 迁移脚本本地连接配置（含生产密码，不入库）
+/scripts/.migrate.env

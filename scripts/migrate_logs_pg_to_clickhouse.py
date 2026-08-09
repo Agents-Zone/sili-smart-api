@@ -47,11 +47,12 @@ import json
 import os
 
 # ClickHouse 建表列，与 model/main.go 的 clickHouseLogCreateTableSQL 一一对应。
-# `group` 是保留字，ClickHouse 侧须用反引号；clickhouse_connect 原样拼进 SQL。
+# `group` 是保留字，但 clickhouse_connect 的 column_names 须传裸列名，库会自动加反引号引用；
+# 若传 "`group`"，insert 前的列校验会把它当字面字符串，报 Unrecognized column。
 CH_COLUMNS = [
     "id", "user_id", "created_at", "type", "content", "username",
     "token_name", "model_name", "quota", "prompt_tokens", "completion_tokens",
-    "use_time", "is_stream", "channel_id", "token_id", "`group`",
+    "use_time", "is_stream", "channel_id", "token_id", "group",
     "ip", "request_id", "upstream_request_id", "other",
 ]
 
