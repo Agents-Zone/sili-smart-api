@@ -2,10 +2,14 @@ package service
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -506,4 +510,100 @@ func TestHandleRulesUpdateEmptyArrays(t *testing.T) {
 		HandleChannelAffinityRulesUpdate(`[{"name":"r1","include_rule_name":true,"exclusive_bind":false}]`, `[]`)
 	})
 	assertR1RuntimeCleared(t, false)
+}
+
+// ===== T8：降级审计标记与警告日志 =====
+// 覆盖 SSOT 5.3.2 第1、2条（admin_info 追加降级标记、LogWarn 警告日志）、
+// 5.3.3（审计仅存指纹，非管理员视图剥离 admin_info 沿用现有机制）、
+// 5.3.4 规则1（审计不改变请求响应与计费）、5.3.5（审计写入失败静默跳过）。
+
+// buildDegradeMarkContext 构造带亲和 meta 与降级标记的 gin context：
+// degrade 为 nil 时仅设 meta（无降级场景）。
+func buildDegradeMarkContext(t *testing.T, degrade map[string]interface{}) *gin.Context {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	setChannelAffinityContext(ctx, channelAffinityMeta{
+		CacheKey:       channelAffinityCacheNamespace + ":r1:default:key-a",
+		RuleName:       "r1",
+		UsingGroup:     "default",
+		ModelName:      "gpt-4",
+		RequestPath:    "/v1/chat/completions",
+		KeyFingerprint: "fp123456",
+	})
+	if degrade != nil {
+		ctx.Set(ginKeyChannelAffinityExclusiveDegrade, degrade)
+	}
+	return ctx
+}
+
+// TestMarkChannelAffinityUsedWithDegrade 计划核心断言：gin context 设降级标记后，
+// MarkChannelAffinityUsed 把 exclusive_degrade 并入 info map，经
+// AppendChannelAffinityAdminInfo 挂到 adminInfo["channel_affinity"]，
+// 四字段（rule_name/key_fp/channel_id/channel_binding_count）与输入深等
+// （SSOT 5.3.2 第1条，04 文档 §4.3 结构）。
+func TestMarkChannelAffinityUsedWithDegrade(t *testing.T) {
+	degrade := map[string]interface{}{
+		"rule_name":             "r1",
+		"key_fp":                "fp123456",
+		"channel_id":            9,
+		"channel_binding_count": 3,
+	}
+	ctx := buildDegradeMarkContext(t, degrade)
+
+	MarkChannelAffinityUsed(ctx, "default", 9)
+
+	adminInfo := map[string]interface{}{}
+	AppendChannelAffinityAdminInfo(ctx, adminInfo)
+
+	affinityAny, ok := adminInfo["channel_affinity"]
+	require.True(t, ok, "admin_info must carry channel_affinity")
+	affinity, ok := affinityAny.(map[string]interface{})
+	require.True(t, ok)
+	degradeOutAny, ok := affinity["exclusive_degrade"]
+	require.True(t, ok, "exclusive_degrade must be merged into info map")
+	assert.Equal(t, degrade, degradeOutAny, "exclusive_degrade fields must deep-equal the marker")
+}
+
+// TestMarkChannelAffinityUsedWithoutDegrade 计划核心断言：context 无降级标记时
+// info map 不含 exclusive_degrade 键（正常独占/软亲和路径无审计噪声）。
+func TestMarkChannelAffinityUsedWithoutDegrade(t *testing.T) {
+	ctx := buildDegradeMarkContext(t, nil)
+
+	MarkChannelAffinityUsed(ctx, "default", 9)
+
+	anyInfo, ok := ctx.Get(ginKeyChannelAffinityLogInfo)
+	require.True(t, ok)
+	info, ok := anyInfo.(map[string]interface{})
+	require.True(t, ok)
+	assert.NotContains(t, info, "exclusive_degrade")
+}
+
+// TestMarkChannelAffinityUsedDegradeMarkerTypeMismatch 降级标记类型不符
+//（非法写入场景）时静默跳过追加，请求链路照常完成（SSOT 5.3.5 审计写入失败
+// 静默跳过：map 写入无失败路径，防御类型断言失败分支）。
+func TestMarkChannelAffinityUsedDegradeMarkerTypeMismatch(t *testing.T) {
+	ctx := buildDegradeMarkContext(t, nil)
+	ctx.Set(ginKeyChannelAffinityExclusiveDegrade, "not-a-map")
+
+	require.NotPanics(t, func() {
+		MarkChannelAffinityUsed(ctx, "default", 9)
+	})
+
+	anyInfo, ok := ctx.Get(ginKeyChannelAffinityLogInfo)
+	require.True(t, ok)
+	info, ok := anyInfo.(map[string]interface{})
+	require.True(t, ok)
+	assert.NotContains(t, info, "exclusive_degrade")
+}
+
+// TestDegradedCounter 计划核心断言：两次模拟降级计数（直接 atomic.Add）后
+// GetChannelAffinityDegradedReuseTotal() 返回增量 2（SSOT 5.3.3 进程累计值，
+// 供统计接口 degraded_reuse_total 读取）。
+func TestDegradedCounter(t *testing.T) {
+	before := GetChannelAffinityDegradedReuseTotal()
+	atomic.AddUint64(&channelAffinityDegradedReuseTotal, 1)
+	atomic.AddUint64(&channelAffinityDegradedReuseTotal, 1)
+	assert.Equal(t, before+2, GetChannelAffinityDegradedReuseTotal())
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/cachex"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -351,6 +352,12 @@ func decideExclusiveBinding(candidates []int, occupancyCounts map[int]int, lastB
 // SSOT 5.3.3）。
 var channelAffinityDegradedReuseTotal uint64
 
+// GetChannelAffinityDegradedReuseTotal 返回累计降级次数，供缓存统计接口读取
+// degraded_reuse_total 字段（SSOT 5.3.2 第3条）。
+func GetChannelAffinityDegradedReuseTotal() uint64 {
+	return atomic.LoadUint64(&channelAffinityDegradedReuseTotal)
+}
+
 // channelAffinityBindLocks 为独占占位分段锁：按 cacheKeySuffix 哈希取锁，
 // 进程内串行化读-决策-写（内存模式先到先得；Redis 模式退化为本地收敛锁，
 // 跨实例原子性由 Lua/SetNX 保证，04 文档 §6.1）。
@@ -523,14 +530,19 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 
 	if decision.Mode == affinityBindModeShared {
 		// 满载降级：计数器原子加 1，gin context 写降级标记（04 文档 §4.3 结构，
-		// 供 MarkChannelAffinityUsed 合并进 admin_info，审计落点 T8 完善）。
+		// 供 MarkChannelAffinityUsed 合并进 admin_info），同步输出与请求关联的
+		// LogWarn（SSOT 5.3.2 第1、2条）。
 		atomic.AddUint64(&channelAffinityDegradedReuseTotal, 1)
+		bindingCount := occupancyCounts[winnerID]
+		logger.LogWarn(c, fmt.Sprintf(
+			"channel affinity exclusive degrade to shared reuse: rule=%s key_fp=%s channel=%d channel_binding_count=%d",
+			meta.RuleName, meta.KeyFingerprint, winnerID, bindingCount))
 		if c != nil {
 			c.Set(ginKeyChannelAffinityExclusiveDegrade, map[string]interface{}{
 				"rule_name":             meta.RuleName,
 				"key_fp":                meta.KeyFingerprint,
 				"channel_id":            winnerID,
-				"channel_binding_count": occupancyCounts[winnerID],
+				"channel_binding_count": bindingCount,
 			})
 		}
 	}
