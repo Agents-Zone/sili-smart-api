@@ -7,7 +7,7 @@ sub_plans:
   - id: "01"
     name: "独占引擎"
     file: "01_独占引擎.md"
-    status: "pending"
+    status: "completed"
 
   - id: "02"
     name: "清空与审计"
