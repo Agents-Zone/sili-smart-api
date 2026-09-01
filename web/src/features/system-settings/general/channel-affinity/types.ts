@@ -32,6 +32,7 @@ export interface AffinityRule {
   value_regex?: string
   ttl_seconds: number
   skip_retry_on_failure: boolean
+  exclusive_bind?: boolean
   include_using_group: boolean
   include_model_name: boolean
   include_rule_name: boolean
@@ -45,6 +46,9 @@ export interface CacheStats {
   by_rule_name: Record<string, number>
   cache_capacity: number
   cache_algo: string
+  exclusive_bindings?: number
+  shared_bindings?: number
+  degraded_reuse_total?: number
 }
 
 export interface ChannelAffinitySettings {

@@ -24,6 +24,7 @@ import { toast } from 'sonner'
 
 import { Dialog } from '@/components/dialog'
 import { JsonCodeEditor } from '@/components/json-code-editor'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Collapsible,
@@ -80,6 +81,7 @@ interface RuleFormValues {
   value_regex: string
   ttl_seconds: number
   skip_retry_on_failure: boolean
+  exclusive_bind: boolean
   include_using_group: boolean
   include_model_name: boolean
   include_rule_name: boolean
@@ -129,6 +131,7 @@ export function RuleEditorDialog(props: Props) {
       value_regex: '',
       ttl_seconds: 0,
       skip_retry_on_failure: false,
+      exclusive_bind: false,
       include_using_group: true,
       include_model_name: false,
       include_rule_name: true,
@@ -148,6 +151,7 @@ export function RuleEditorDialog(props: Props) {
       value_regex: r.value_regex || '',
       ttl_seconds: r.ttl_seconds || 0,
       skip_retry_on_failure: !!r.skip_retry_on_failure,
+      exclusive_bind: r.exclusive_bind ?? false,
       include_using_group: r.include_using_group ?? true,
       include_model_name: !!r.include_model_name,
       include_rule_name: r.include_rule_name ?? true,
@@ -180,6 +184,7 @@ export function RuleEditorDialog(props: Props) {
         value_regex: '',
         ttl_seconds: 0,
         skip_retry_on_failure: false,
+        exclusive_bind: false,
         include_using_group: true,
         include_model_name: false,
         include_rule_name: true,
@@ -234,6 +239,7 @@ export function RuleEditorDialog(props: Props) {
       value_regex: values.value_regex.trim(),
       ttl_seconds: Number(values.ttl_seconds || 0),
       skip_retry_on_failure: values.skip_retry_on_failure,
+      exclusive_bind: values.exclusive_bind,
       include_using_group: values.include_using_group,
       include_model_name: values.include_model_name,
       include_rule_name: values.include_rule_name,
@@ -304,6 +310,25 @@ export function RuleEditorDialog(props: Props) {
           onCheckedChange={(v) => form.setValue('skip_retry_on_failure', v)}
           label={t('Skip retry on failure')}
         />
+
+        <SettingsSwitchField
+          checked={form.watch('exclusive_bind')}
+          onCheckedChange={(v) => form.setValue('exclusive_bind', v)}
+          label={t('Exclusive Bind')}
+          description={t(
+            'When enabled, a channel is exclusively bound to a single affinity key; when all channels are occupied, the key with the fewest bindings is reused'
+          )}
+        />
+
+        {form.watch('exclusive_bind') ? (
+          <Alert variant='destructive'>
+            <AlertDescription>
+              {t(
+                "Exclusive bind granularity follows this rule's affinity key. With token_id it equals per api_key exclusivity; with other key types one api_key may occupy multiple or all channels. When all available channels are occupied, reuse applies and exclusivity is suspended"
+              )}
+            </AlertDescription>
+          </Alert>
+        ) : null}
 
         <Separator />
 
