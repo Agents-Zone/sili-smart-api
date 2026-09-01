@@ -530,5 +530,74 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 		}
 	}
 
+	// 记录本次请求首次占位渠道，供 RecordChannelAffinity 判定迁移、终态回滚判定切换。
+	if c != nil {
+		c.Set(ginKeyChannelAffinityBoundChannel, decision.ChannelID)
+	}
+
 	return winnerID, true
+}
+
+// registerBindingIndexes 绑定登记/迁移索引同步（SSOT 5.2.2 第1、2条）：
+// oldChannelID>0 为失败切换迁移场景，先从旧渠道条目移除该键；随后登记新渠道条目
+// （同 TTL），并写入最近绑定记录（两周期）。迁入豁免独占判定：直接登记，
+// 不检查新渠道占用（SSOT 5.1.2 第4条）。任一步失败记 SysError（含渠道与键指纹），
+// 不影响请求，残留随 TTL 过期（SSOT 5.1.5）。
+func registerBindingIndexes(cacheKeySuffix string, keyFP string, oldChannelID int, newChannelID int, ttl time.Duration) {
+	if oldChannelID > 0 {
+		if err := occupancyRemoveKeyFP(oldChannelID, keyFP); err != nil {
+			common.SysError(fmt.Sprintf("channel affinity occupancy migrate remove failed: channel=%d key_fp=%s err=%v", oldChannelID, keyFP, err))
+		}
+	}
+	if err := occupancyAddKeyFP(newChannelID, keyFP, ttl); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity occupancy register failed: channel=%d key_fp=%s err=%v", newChannelID, keyFP, err))
+	}
+	if err := lastBindSet(cacheKeySuffix, newChannelID, 2*ttl); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity last bind write failed: channel=%d key_fp=%s err=%v", newChannelID, keyFP, err))
+	}
+}
+
+// rollbackBindingPlacement 同批回滚占位三处（SSOT 5.1.2 第4条末）：
+// 正向绑定（传 full key）、反向占用索引、最近绑定记录（lastBind 命名空间自行加前缀）。
+// 失败记 SysError 后放行，残留随 TTL 过期（SSOT 5.1.5）。
+func rollbackBindingPlacement(cacheKey string, keyFP string, channelID int) {
+	cacheKeySuffix := strings.TrimPrefix(cacheKey, channelAffinityCacheNamespace+":")
+	if _, err := getChannelAffinityCache().DeleteMany([]string{cacheKey}); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity rollback forward delete failed: channel=%d key_fp=%s err=%v", channelID, keyFP, err))
+	}
+	if err := occupancyRemoveKeyFP(channelID, keyFP); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity rollback occupancy remove failed: channel=%d key_fp=%s err=%v", channelID, keyFP, err))
+	}
+	if err := lastBindDelete(cacheKeySuffix); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity rollback last bind delete failed: channel=%d key_fp=%s err=%v", channelID, keyFP, err))
+	}
+}
+
+// RollbackChannelAffinityOnFinalFailure 终态失败回滚入口（导出供 controller 调用，
+// SSOT 5.1.2 第4条末）：无 affinity meta 直接返回；SwitchOnSuccess 开启且本次请求
+// 已重试切换到新渠道（context channel_id 与首次占位渠道不同）视为已迁移，不回滚
+// （迁移语义由 RecordChannelAffinity 后续覆盖）；否则回滚占位三处。
+func RollbackChannelAffinityOnFinalFailure(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	meta, ok := getChannelAffinityMeta(c)
+	if !ok {
+		return
+	}
+	boundChannel := 0
+	if v, exists := c.Get(ginKeyChannelAffinityBoundChannel); exists {
+		if id, valid := v.(int); valid {
+			boundChannel = id
+		}
+	}
+	if boundChannel <= 0 {
+		return
+	}
+	if setting := operation_setting.GetChannelAffinitySetting(); setting != nil && setting.SwitchOnSuccess {
+		if currentChannel := c.GetInt("channel_id"); currentChannel > 0 && currentChannel != boundChannel {
+			return
+		}
+	}
+	rollbackBindingPlacement(meta.CacheKey, meta.KeyFingerprint, boundChannel)
 }

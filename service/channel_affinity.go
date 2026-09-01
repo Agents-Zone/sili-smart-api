@@ -26,6 +26,7 @@ const (
 	ginKeyChannelAffinityLogInfo          = "channel_affinity_log_info"
 	ginKeyChannelAffinitySkipRetry        = "channel_affinity_skip_retry_on_failure"
 	ginKeyChannelAffinityExclusiveDegrade = "channel_affinity_exclusive_degrade"
+	ginKeyChannelAffinityBoundChannel     = "channel_affinity_bound_channel"
 
 	channelAffinityCacheNamespace           = "new-api:channel_affinity:v1"
 	channelAffinityUsageCacheStatsNamespace = "new-api:channel_affinity_usage_cache_stats:v1"
@@ -625,6 +626,11 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 			meta, _ := getChannelAffinityMeta(c)
 			return acquireExclusiveBinding(c, meta, usingGroup, modelName)
 		}
+		// 未启用独占的软亲和请求同样记录首次占位渠道（值为 0，
+		// RecordChannelAffinity 时迁移前渠道取 0 即纯新增登记）。
+		if c != nil {
+			c.Set(ginKeyChannelAffinityBoundChannel, 0)
+		}
 		return 0, false
 	}
 	return 0, false
@@ -658,10 +664,24 @@ func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
 	}
 
 	cache := getChannelAffinityCache()
+	// 删除前先取出正向缓存值（即渠道 ID），供同步清理反向索引与最近绑定记录
+	// （keep_on_channel_disabled=false 清缓存路径，SSOT 5.1.2 第4条末）。
+	cachedChannelID := 0
+	if channelID, found, err := cache.Get(cacheKey); err == nil && found {
+		cachedChannelID = channelID
+	}
 	deleted, err := cache.DeleteMany([]string{cacheKey})
 	if err != nil {
 		common.SysError(fmt.Sprintf("channel affinity cache delete current failed: err=%v", err))
 		return false
+	}
+	if cachedChannelID > 0 {
+		meta, metaOK := getChannelAffinityMeta(c)
+		keyFP := ""
+		if metaOK {
+			keyFP = meta.KeyFingerprint
+		}
+		rollbackBindingPlacement(cacheKey, keyFP, cachedChannelID)
 	}
 	c.Set(ginKeyChannelAffinitySkipRetry, false)
 	for _, ok := range deleted {
@@ -703,6 +723,12 @@ func MarkChannelAffinityUsed(c *gin.Context, selectedGroup string, channelID int
 		"key_hint":       meta.KeyHint,
 		"key_fp":         meta.KeyFingerprint,
 	}
+	// 独占降级标记（满载复用）随现有 admin_info 链路输出（最终形态 T8 验证）。
+	if anyDegrade, exists := c.Get(ginKeyChannelAffinityExclusiveDegrade); exists {
+		if degrade, valid := anyDegrade.(map[string]interface{}); valid {
+			info["exclusive_degrade"] = degrade
+		}
+	}
 	c.Set(ginKeyChannelAffinityLogInfo, info)
 }
 
@@ -743,6 +769,22 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 	cache := getChannelAffinityCache()
 	if err := cache.SetWithTTL(cacheKey, channelID, time.Duration(ttlSeconds)*time.Second); err != nil {
 		common.SysError(fmt.Sprintf("channel affinity cache set failed: key=%s, err=%v", cacheKey, err))
+	}
+	// 登记反向占用索引与最近绑定记录：所有规则（无论是否启用独占）均登记
+	// （SSOT 5.2.4 规则1）。迁移前渠道取本次请求首次占位渠道：>0 即失败切换
+	// 迁移场景，旧渠道移除、迁入豁免独占判定（SSOT 5.1.2 第4条）。
+	if c != nil {
+		meta, metaOK := getChannelAffinityMeta(c)
+		if metaOK && meta.KeyFingerprint != "" {
+			oldChannelID := 0
+			if v, exists := c.Get(ginKeyChannelAffinityBoundChannel); exists {
+				if id, valid := v.(int); valid {
+					oldChannelID = id
+				}
+			}
+			cacheKeySuffix := strings.TrimPrefix(meta.CacheKey, channelAffinityCacheNamespace+":")
+			registerBindingIndexes(cacheKeySuffix, meta.KeyFingerprint, oldChannelID, channelID, time.Duration(ttlSeconds)*time.Second)
+		}
 	}
 }
 

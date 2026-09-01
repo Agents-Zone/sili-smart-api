@@ -896,3 +896,293 @@ func TestAcquireExclusiveBinding_AutoGroupExpandsCandidates(t *testing.T) {
 	require.True(t, found)
 	assert.Equal(t, 704, channelID)
 }
+
+// setupRecordAffinityTest 构造 RecordChannelAffinity 用例的公共夹具：
+// 内存模式存储 + 默认设置（Enabled/SwitchOnSuccess 由默认内置设置提供 true）。
+// 返回 gin context 与去前缀 suffix。cleanupChannelIDs 供用例结束清理占用条目。
+func setupRecordAffinityTest(t *testing.T, channelIDs ...int) (*gin.Context, string) {
+	t.Helper()
+	useExclusiveMemoryMode(t)
+	resetAffinityCacheSingleton()
+
+	setting := operation_setting.GetChannelAffinitySetting()
+	originalEnabled := setting.Enabled
+	originalSwitch := setting.SwitchOnSuccess
+	originalDefaultTTL := setting.DefaultTTLSeconds
+	setting.Enabled = true
+	setting.SwitchOnSuccess = true
+	allChannels := append([]int{501, 502, 601, 602}, channelIDs...)
+	t.Cleanup(func() {
+		setting.Enabled = originalEnabled
+		setting.SwitchOnSuccess = originalSwitch
+		setting.DefaultTTLSeconds = originalDefaultTTL
+		resetAffinityCacheSingleton()
+		keys := make([]string, 0, len(allChannels))
+		for _, id := range allChannels {
+			keys = append(keys, strconv.Itoa(id))
+		}
+		_, _ = getChannelAffinityOccupancyCache().DeleteMany(keys)
+	})
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	return ctx, ""
+}
+
+// recordAffinityMeta 构造登记用 meta（KeyFingerprint 与 CacheKey 由参数给出）。
+func recordAffinityMeta(keyFP string, suffix string) channelAffinityMeta {
+	return channelAffinityMeta{
+		CacheKey:       channelAffinityCacheNamespace + ":" + suffix,
+		TTLSeconds:     60,
+		RuleName:       "record-affinity-rule",
+		KeyFingerprint: keyFP,
+		UsingGroup:     "default",
+		ModelName:      "gpt-4",
+	}
+}
+
+// buildRecordAffinityContext 构造带 meta 的 gin context 并写入首次占位渠道标记。
+func buildRecordAffinityContext(t *testing.T, meta channelAffinityMeta, boundChannel int) *gin.Context {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	setChannelAffinityContext(ctx, meta)
+	if boundChannel > 0 {
+		ctx.Set(ginKeyChannelAffinityBoundChannel, boundChannel)
+	}
+	return ctx
+}
+
+// cleanupForwardAndLastBind 清理正向缓存与最近绑定记录残留。
+func cleanupForwardAndLastBind(t *testing.T, suffixes ...string) {
+	t.Helper()
+	t.Cleanup(func() {
+		_, _ = getChannelAffinityCache().DeleteMany(suffixes)
+		_, _ = getChannelAffinityLastBindCache().DeleteMany(suffixes)
+	})
+}
+
+// TestRecordChannelAffinityRegistersIndexes 计划核心断言（SSOT 5.2.2 第1条）：
+// RecordChannelAffinity(ctx, 501) 后 occupancyBindingCount(501) 键数 1 且含指纹，
+// lastBindGet(suffix) 指向 501、BoundAt>0。
+func TestRecordChannelAffinityRegistersIndexes(t *testing.T) {
+	suffix := fmt.Sprintf("record-rule:default:fp-%d", time.Now().UnixNano())
+	meta := recordAffinityMeta("fp1a2b3c4", suffix)
+	ctx := buildRecordAffinityContext(t, meta, 501)
+	setupRecordAffinityTest(t)
+	cleanupForwardAndLastBind(t, suffix)
+
+	RecordChannelAffinity(ctx, 501)
+
+	count, fps, err := occupancyBindingCount(501)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	assert.ElementsMatch(t, []string{"fp1a2b3c4"}, fps)
+
+	record, found, err := lastBindGet(suffix)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, 501, record.ChannelID)
+	assert.Greater(t, record.BoundAt, int64(0))
+}
+
+// TestRecordChannelAffinityMigratesIndexes 计划核心断言（SSOT 5.2.2 第2条）：
+// SwitchOnSuccess 开启、context channel_id=502 且首次占位渠道=501，
+// RecordChannelAffinity 后旧渠道 501 索引键数 0、新渠道 502 键数 1、lastBind 指向 502。
+func TestRecordChannelAffinityMigratesIndexes(t *testing.T) {
+	suffix := fmt.Sprintf("migrate-rule:default:fp-%d", time.Now().UnixNano())
+	meta := recordAffinityMeta("fp1a2b3c4", suffix)
+	ctx := buildRecordAffinityContext(t, meta, 501)
+	ctx.Set("channel_id", 502)
+	setupRecordAffinityTest(t)
+	cleanupForwardAndLastBind(t, suffix)
+
+	// 预置旧渠道索引：模拟首次占位已登记 501。
+	require.NoError(t, occupancyAddKeyFP(501, "fp1a2b3c4", 10*time.Second))
+
+	RecordChannelAffinity(ctx, 502)
+
+	count501, _, err := occupancyBindingCount(501)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count501, "old channel index must be removed on migration")
+
+	count502, fps, err := occupancyBindingCount(502)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count502)
+	assert.ElementsMatch(t, []string{"fp1a2b3c4"}, fps)
+
+	record, found, err := lastBindGet(suffix)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, 502, record.ChannelID)
+}
+
+// TestRecordChannelAffinityMigrateWithoutPriorIndex 迁移场景但旧渠道无既有登记
+// （首次占位记录值为 0 或索引已被回滚）：登记到新渠道，不因旧条目缺失而失败。
+func TestRecordChannelAffinityMigrateWithoutPriorIndex(t *testing.T) {
+	suffix := fmt.Sprintf("migrate-no-index:default:fp-%d", time.Now().UnixNano())
+	meta := recordAffinityMeta("migrate123", suffix)
+	ctx := buildRecordAffinityContext(t, meta, 0)
+	ctx.Set("channel_id", 502)
+	setupRecordAffinityTest(t)
+	cleanupForwardAndLastBind(t, suffix)
+
+	RecordChannelAffinity(ctx, 502)
+
+	count502, fps, err := occupancyBindingCount(502)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count502)
+	assert.ElementsMatch(t, []string{"migrate123"}, fps)
+
+	count501, _, err := occupancyBindingCount(501)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count501)
+}
+
+// TestRollbackBindingPlacement 计划核心断言（SSOT 5.1.2 第4条末）：
+// 三处占位登记后调 rollbackBindingPlacement，正向/反向/最近绑定全清。
+func TestRollbackBindingPlacement(t *testing.T) {
+	suffix := fmt.Sprintf("rollback-rule:default:fp-%d", time.Now().UnixNano())
+	cacheKeyFull := channelAffinityCacheNamespace + ":" + suffix
+	setupRecordAffinityTest(t)
+	cleanupForwardAndLastBind(t, suffix)
+
+	require.NoError(t, getChannelAffinityCache().SetWithTTL(suffix, 601, 10*time.Second))
+	require.NoError(t, occupancyAddKeyFP(601, "fp1a2b3c4", 10*time.Second))
+	require.NoError(t, lastBindSet(suffix, 601, 20*time.Second))
+
+	rollbackBindingPlacement(cacheKeyFull, "fp1a2b3c4", 601)
+
+	_, found, err := getChannelAffinityCache().Get(suffix)
+	require.NoError(t, err)
+	assert.False(t, found, "forward binding must be deleted")
+
+	count, _, err := occupancyBindingCount(601)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "occupancy index must be cleared")
+
+	_, found, err = lastBindGet(suffix)
+	require.NoError(t, err)
+	assert.False(t, found, "last bind record must be deleted")
+}
+
+// TestRollbackOnFinalFailure_NoSwitch 计划核心断言：占位渠道 601、context channel_id=601
+// （未切换），终态失败回滚后三处全清（SSOT 5.1.2 第4条末、5.1.5）。
+func TestRollbackOnFinalFailure_NoSwitch(t *testing.T) {
+	suffix := fmt.Sprintf("final-no-switch:default:fp-%d", time.Now().UnixNano())
+	meta := recordAffinityMeta("fp1a2b3c4", suffix)
+	ctx := buildRecordAffinityContext(t, meta, 601)
+	ctx.Set("channel_id", 601)
+	setupRecordAffinityTest(t)
+	cleanupForwardAndLastBind(t, suffix)
+
+	require.NoError(t, getChannelAffinityCache().SetWithTTL(suffix, 601, 10*time.Second))
+	require.NoError(t, occupancyAddKeyFP(601, "fp1a2b3c4", 10*time.Second))
+	require.NoError(t, lastBindSet(suffix, 601, 20*time.Second))
+
+	RollbackChannelAffinityOnFinalFailure(ctx)
+
+	_, found, err := getChannelAffinityCache().Get(suffix)
+	require.NoError(t, err)
+	assert.False(t, found)
+
+	count, _, err := occupancyBindingCount(601)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+
+	_, found, err = lastBindGet(suffix)
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+// TestRollbackOnFinalFailure_Switched 计划核心断言：占位渠道 601、context channel_id=602
+// （已成功切换），不回滚——迁移语义归 RecordChannelAffinity（SSOT 5.1.2 第4条）。
+func TestRollbackOnFinalFailure_Switched(t *testing.T) {
+	suffix := fmt.Sprintf("final-switched:default:fp-%d", time.Now().UnixNano())
+	meta := recordAffinityMeta("fp1a2b3c4", suffix)
+	ctx := buildRecordAffinityContext(t, meta, 601)
+	ctx.Set("channel_id", 602)
+	setupRecordAffinityTest(t)
+	cleanupForwardAndLastBind(t, suffix)
+
+	require.NoError(t, getChannelAffinityCache().SetWithTTL(suffix, 601, 10*time.Second))
+	require.NoError(t, occupancyAddKeyFP(601, "fp1a2b3c4", 10*time.Second))
+	require.NoError(t, lastBindSet(suffix, 601, 20*time.Second))
+
+	RollbackChannelAffinityOnFinalFailure(ctx)
+
+	cachedID, found, err := getChannelAffinityCache().Get(suffix)
+	require.NoError(t, err)
+	require.True(t, found, "placement must survive when a successful switch happened")
+	assert.Equal(t, 601, cachedID)
+
+	count, fps, err := occupancyBindingCount(601)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	assert.ElementsMatch(t, []string{"fp1a2b3c4"}, fps)
+
+	record, found, err := lastBindGet(suffix)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, 601, record.ChannelID)
+}
+
+// TestRollbackOnFinalFailure_NoMeta gin context 无 affinity meta 时直接返回，无副作用。
+func TestRollbackOnFinalFailure_NoMeta(t *testing.T) {
+	setupRecordAffinityTest(t)
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	assert.NotPanics(t, func() {
+		RollbackChannelAffinityOnFinalFailure(ctx)
+	})
+}
+
+// TestRollbackOnFinalFailure_SwitchOnSuccessDisabled SwitchOnSuccess 关闭时，
+// context channel_id 与占位渠道不同也不视为迁移，仍回滚占位（判定条件含 SwitchOnSuccess）。
+func TestRollbackOnFinalFailure_SwitchOnSuccessDisabled(t *testing.T) {
+	suffix := fmt.Sprintf("final-switch-off:default:fp-%d", time.Now().UnixNano())
+	meta := recordAffinityMeta("fp1a2b3c4", suffix)
+	ctx := buildRecordAffinityContext(t, meta, 601)
+	ctx.Set("channel_id", 602)
+	setupRecordAffinityTest(t)
+
+	setting := operation_setting.GetChannelAffinitySetting()
+	setting.SwitchOnSuccess = false
+	cleanupForwardAndLastBind(t, suffix)
+
+	require.NoError(t, getChannelAffinityCache().SetWithTTL(suffix, 601, 10*time.Second))
+	require.NoError(t, occupancyAddKeyFP(601, "fp1a2b3c4", 10*time.Second))
+	require.NoError(t, lastBindSet(suffix, 601, 20*time.Second))
+
+	RollbackChannelAffinityOnFinalFailure(ctx)
+
+	_, found, err := getChannelAffinityCache().Get(suffix)
+	require.NoError(t, err)
+	assert.False(t, found, "without SwitchOnSuccess a different channel_id is not a migration")
+}
+
+// TestRecordChannelAffinityDisabled 不启用亲和时 RecordChannelAffinity 不登记索引。
+func TestRecordChannelAffinityDisabled(t *testing.T) {
+	suffix := fmt.Sprintf("disabled-rule:default:fp-%d", time.Now().UnixNano())
+	meta := recordAffinityMeta("fp1a2b3c4", suffix)
+	ctx := buildRecordAffinityContext(t, meta, 0)
+	setupRecordAffinityTest(t)
+	cleanupForwardAndLastBind(t, suffix)
+
+	setting := operation_setting.GetChannelAffinitySetting()
+	setting.Enabled = false
+
+	RecordChannelAffinity(ctx, 501)
+
+	count, _, err := occupancyBindingCount(501)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+
+	_, found, err := lastBindGet(suffix)
+	require.NoError(t, err)
+	assert.False(t, found)
+}

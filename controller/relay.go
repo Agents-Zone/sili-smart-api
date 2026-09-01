@@ -249,6 +249,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		logger.LogInfo(c, retryLogStr)
 	}
 	if newAPIError != nil {
+		// 终态失败：回滚独占占位（无亲和 meta 时内部直接返回）。
+		service.RollbackChannelAffinityOnFinalFailure(c)
 		gopool.Go(func() {
 			perfmetrics.RecordRelaySample(relayInfo, false, 0)
 		})
@@ -607,6 +609,8 @@ func RelayTask(c *gin.Context) {
 	}
 
 	if taskErr != nil {
+		// 终态失败：回滚独占占位（无亲和 meta 时内部直接返回）。
+		service.RollbackChannelAffinityOnFinalFailure(c)
 		respondTaskError(c, taskErr)
 	}
 }
