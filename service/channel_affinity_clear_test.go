@@ -344,3 +344,166 @@ func TestClearAllReturnsForwardCountOnly(t *testing.T) {
 
 	assert.Equal(t, 0, ClearChannelAffinityCacheAll())
 }
+
+// useRulesUpdateTest 在 useClearAffinityTest 基础上注入开关清空测试规则 r1
+//（include_rule_name=true，键前缀 r1:），并对 r1 三命名空间各造一条数据
+//（正向键 "r1:fp1"、occupancy 渠道 311、lastBind 同 suffix）。
+func useRulesUpdateTest(t *testing.T) {
+	t.Helper()
+	useClearAffinityTest(t)
+
+	setting := operation_setting.GetChannelAffinitySetting()
+	originalRules := setting.Rules
+	setting.Rules = append(append([]operation_setting.ChannelAffinityRule{}, setting.Rules...),
+		operation_setting.ChannelAffinityRule{
+			Name:            "r1",
+			ModelRegex:      []string{"^gpt-.*$"},
+			KeySources:      []operation_setting.ChannelAffinityKeySource{{Type: "gjson", Path: "metadata.user_id"}},
+			IncludeRuleName: true,
+			ExclusiveBind:   false,
+		})
+	t.Cleanup(func() { setting.Rules = originalRules })
+
+	ttl := 10 * time.Second
+	forward := getChannelAffinityCache()
+	require.NoError(t, forward.SetWithTTL("r1:fp1", 311, ttl))
+	// 指纹与键末段一致（suffix "r1:fp1" 的亲和值段为 "fp1"）。
+	require.NoError(t, occupancyAddKeyFP(311, affinityFingerprint("fp1"), ttl))
+	require.NoError(t, lastBindSet("r1:fp1", 311, 2*ttl))
+}
+
+// assertR1RuntimeCleared 断言 r1 三处运行时数据状态：cleared 为 true 时
+// 正向、occupancy、lastBind 全清；false 时全部仍在。
+func assertR1RuntimeCleared(t *testing.T, cleared bool) {
+	t.Helper()
+	forward := getChannelAffinityCache()
+
+	_, found, err := forward.Get("r1:fp1")
+	require.NoError(t, err)
+	assert.Equal(t, !cleared, found, "forward r1:fp1 cleared=%v", cleared)
+
+	_, found, err = lastBindGet("r1:fp1")
+	require.NoError(t, err)
+	assert.Equal(t, !cleared, found, "lastBind r1:fp1 cleared=%v", cleared)
+
+	count, fps, err := occupancyBindingCount(311)
+	require.NoError(t, err)
+	if cleared {
+		assert.Equal(t, 0, count)
+		assert.Empty(t, fps)
+	} else {
+		assert.Equal(t, 1, count)
+		assert.ElementsMatch(t, []string{affinityFingerprint("fp1")}, fps)
+	}
+}
+
+// TestHandleChannelAffinityRulesUpdate 计划核心断言（SSOT 4.1.4 规则1、5.2.2 第4条）：
+// 例1 开关变化（false→true）触发 r1 三处全清；例2 开关未变不清空；
+// 例3 旧串非法 JSON 静默返回、无 panic、无清空。
+func TestHandleChannelAffinityRulesUpdate(t *testing.T) {
+	tests := []struct {
+		name     string
+		oldRules string
+		newRules string
+		cleared  bool
+	}{
+		{
+			name:     "toggle_changed",
+			oldRules: `[{"name":"r1","include_rule_name":true,"exclusive_bind":false}]`,
+			newRules: `[{"name":"r1","include_rule_name":true,"exclusive_bind":true}]`,
+			cleared:  true,
+		},
+		{
+			name:     "toggle_unchanged",
+			oldRules: `[{"name":"r1","include_rule_name":true,"exclusive_bind":true}]`,
+			newRules: `[{"name":"r1","include_rule_name":true,"exclusive_bind":true}]`,
+			cleared:  false,
+		},
+		{
+			name:     "invalid_old_json",
+			oldRules: `not-a-json-array`,
+			newRules: `[{"name":"r1","include_rule_name":true,"exclusive_bind":true}]`,
+			cleared:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			useRulesUpdateTest(t)
+
+			require.NotPanics(t, func() {
+				HandleChannelAffinityRulesUpdate(tt.oldRules, tt.newRules)
+			})
+			assertR1RuntimeCleared(t, tt.cleared)
+		})
+	}
+}
+
+// TestHandleRulesUpdateClearsNoPrefixRule 旧规则未启用 include_rule_name 且
+// 键构成无规则名前缀可区分时，开关变化退化为整体清空（SysLog 声明，
+// 03 文档 3.1 服务端处理逻辑第2条工程边界）：其它规则 r2 的正向数据同批清掉。
+func TestHandleRulesUpdateClearsNoPrefixRule(t *testing.T) {
+	useClearAffinityTest(t)
+
+	setting := operation_setting.GetChannelAffinitySetting()
+	originalRules := setting.Rules
+	setting.Rules = []operation_setting.ChannelAffinityRule{
+		{
+			Name:            "r2",
+			ModelRegex:      []string{"^gpt-.*$"},
+			KeySources:      []operation_setting.ChannelAffinityKeySource{{Type: "gjson", Path: "metadata.user_id"}},
+			IncludeRuleName: false,
+		},
+	}
+	t.Cleanup(func() { setting.Rules = originalRules })
+
+	ttl := 10 * time.Second
+	forward := getChannelAffinityCache()
+	require.NoError(t, forward.SetWithTTL("fp1-value", 311, ttl))
+	require.NoError(t, occupancyAddKeyFP(311, affinityFingerprint("fp1-value"), ttl))
+	require.NoError(t, lastBindSet("fp1-value", 311, 2*ttl))
+	// 另一规则前缀键，整体清空路径下一并清除。
+	require.NoError(t, forward.SetWithTTL("other-rule:key-x", 322, ttl))
+
+	HandleChannelAffinityRulesUpdate(
+		`[{"name":"r2","exclusive_bind":false}]`,
+		`[{"name":"r2","exclusive_bind":true}]`,
+	)
+
+	for _, suffix := range []string{"fp1-value", "other-rule:key-x"} {
+		_, found, err := forward.Get(suffix)
+		require.NoError(t, err)
+		assert.False(t, found, "forward %s should be cleared by full clear fallback", suffix)
+	}
+	count, fps, err := occupancyBindingCount(311)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+	assert.Empty(t, fps)
+	_, found, err := lastBindGet("fp1-value")
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+// TestHandleRulesUpdateInvalidNewJSON 新串非法 JSON 时同样静默返回，无清空。
+func TestHandleRulesUpdateInvalidNewJSON(t *testing.T) {
+	useRulesUpdateTest(t)
+
+	require.NotPanics(t, func() {
+		HandleChannelAffinityRulesUpdate(
+			`[{"name":"r1","include_rule_name":true,"exclusive_bind":false}]`,
+			`{invalid`,
+		)
+	})
+	assertR1RuntimeCleared(t, false)
+}
+
+// TestHandleRulesUpdateEmptyArrays 空数组与空串输入均静默返回，无清空、无 panic。
+func TestHandleRulesUpdateEmptyArrays(t *testing.T) {
+	useRulesUpdateTest(t)
+
+	require.NotPanics(t, func() {
+		HandleChannelAffinityRulesUpdate("", `[{"name":"r1","include_rule_name":true,"exclusive_bind":true}]`)
+		HandleChannelAffinityRulesUpdate(`[]`, `[]`)
+		HandleChannelAffinityRulesUpdate(`[{"name":"r1","include_rule_name":true,"exclusive_bind":false}]`, `[]`)
+	})
+	assertR1RuntimeCleared(t, false)
+}

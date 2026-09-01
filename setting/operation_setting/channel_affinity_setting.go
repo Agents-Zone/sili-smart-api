@@ -158,3 +158,8 @@ func init() {
 func GetChannelAffinitySetting() *ChannelAffinitySetting {
 	return &channelAffinitySetting
 }
+
+// OnRulesExclusiveBindChanged 为 rules 配置更新的联动钩子（SSOT 4.1.4 规则1）：
+// model 包 handleConfigUpdate 在配置覆盖后以旧/新 JSON 调用。model 依赖 service
+// 会成环，故经本包暴露回调，由 service 包 init 注册实现，默认 nil 时跳过联动。
+var OnRulesExclusiveBindChanged func(oldJSON, newJSON string)

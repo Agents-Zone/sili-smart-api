@@ -764,3 +764,94 @@ func clearExclusiveRuntimeByForwardKeys(forwardKeys []string, boundChannels map[
 		}
 	}
 }
+
+// clearExclusiveRuntimeByRuleNamePrefix 按规则名前缀清空（开关切换路径，跳过
+// ClearChannelAffinityCacheByRuleName 的 include_rule_name 校验——开关切换清空
+// 对未启用 include_rule_name 的规则同样生效）：收集前缀下全部正向键并读出绑定
+// 渠道后 DeleteByPrefix，再回放清理 occupancy 与 lastBind（三批同清，SSOT 5.2.2
+// 第4条）。清空失败 SysError 不中断（保存以配置落库为准，03 文档 3.1 第3条）。
+func clearExclusiveRuntimeByRuleNamePrefix(ruleName string) {
+	cache := getChannelAffinityCache()
+	fullPrefix := channelAffinityCacheNamespace + ":" + ruleName + ":"
+	ruleKeys := make([]string, 0)
+	boundChannels := make(map[string]int)
+	if keys, err := cache.Keys(); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity cache list keys failed: err=%v", err))
+	} else {
+		for _, k := range keys {
+			if !strings.HasPrefix(k, fullPrefix) {
+				continue
+			}
+			ruleKeys = append(ruleKeys, k)
+			suffix := strings.TrimPrefix(k, channelAffinityCacheNamespace+":")
+			if channelID, found, err := cache.Get(k); err == nil && found && channelID > 0 {
+				boundChannels[suffix] = channelID
+			}
+		}
+	}
+	if err := retryOnce(func() error {
+		_, err := cache.DeleteByPrefix(ruleName)
+		return err
+	}); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity forward clear by rule failed: rule=%s err=%v", ruleName, err))
+	}
+	clearExclusiveRuntimeByForwardKeys(ruleKeys, boundChannels)
+}
+
+// HandleChannelAffinityRulesUpdate 规则数组保存后的开关联动清空入口
+// （SSOT 4.1.4 规则1、5.2.2 第4条）：解析两侧规则数组（失败静默返回，保存主流程
+// 不受影响），按 name 对齐逐规则比对 ExclusiveBind，对发生变化的规则清空其三命名
+// space 运行时数据。旧规则启用 include_rule_name 时按规则名前缀清除；未启用且
+// 键构成（IncludeModelName/IncludeUsingGroup 组合 + 亲和值）无规则名维度、无法
+// 回放可区分前缀时，退化为正向缓存整体清空 + clearExclusiveRuntimeAll，并 SysLog
+// 声明该退化（03 文档 3.1 服务端处理逻辑第2条工程边界，清除范围扩大属工程兜底）。
+func HandleChannelAffinityRulesUpdate(oldRulesJSON string, newRulesJSON string) {
+	var oldRules, newRules []operation_setting.ChannelAffinityRule
+	if err := common.Unmarshal([]byte(oldRulesJSON), &oldRules); err != nil {
+		return
+	}
+	if err := common.Unmarshal([]byte(newRulesJSON), &newRules); err != nil {
+		return
+	}
+
+	newByName := make(map[string]bool, len(newRules))
+	for _, rule := range newRules {
+		newByName[strings.TrimSpace(rule.Name)] = rule.ExclusiveBind
+	}
+
+	for _, oldRule := range oldRules {
+		ruleName := strings.TrimSpace(oldRule.Name)
+		if ruleName == "" {
+			continue
+		}
+		newExclusive, ok := newByName[ruleName]
+		if !ok || newExclusive == oldRule.ExclusiveBind {
+			continue
+		}
+		if oldRule.IncludeRuleName {
+			clearExclusiveRuntimeByRuleNamePrefix(ruleName)
+			continue
+		}
+		if oldRule.IncludeModelName || oldRule.IncludeUsingGroup {
+			// 旧键构成含 model/group 段但无规则名段：组合同样无规则维度，
+			// 与纯亲和值键一致无法回放出可区分前缀，统一走整体清空兜底。
+			common.SysLog(fmt.Sprintf(
+				"channel affinity rules update clear fallback to full clear: rule=%s key layout (model=%t group=%t rule_name=false) has no rule-scoped prefix",
+				ruleName, oldRule.IncludeModelName, oldRule.IncludeUsingGroup))
+		} else {
+			common.SysLog(fmt.Sprintf(
+				"channel affinity rules update clear fallback to full clear: rule=%s key layout is raw affinity value only",
+				ruleName))
+		}
+		if err := retryOnce(func() error {
+			return getChannelAffinityCache().Purge()
+		}); err != nil {
+			common.SysError(fmt.Sprintf("channel affinity forward clear all failed: err=%v", err))
+		}
+		clearExclusiveRuntimeAll()
+	}
+}
+
+func init() {
+	operation_setting.OnRulesExclusiveBindChanged = HandleChannelAffinityRulesUpdate
+}

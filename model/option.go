@@ -624,6 +624,13 @@ func handleConfigUpdate(key, value string) bool {
 		return false // 未注册的配置
 	}
 
+	// channel_affinity_setting.rules 在覆盖前读旧值，供 exclusive_bind 变化的
+	// 联动清空比对（SSOT 4.1.4 规则1；经 operation_setting 钩子解耦，避免 model→service 环）。
+	oldAffinityRules := ""
+	if configName == "channel_affinity_setting" && configKey == "rules" {
+		oldAffinityRules = readChannelAffinityRulesJSON(cfg)
+	}
+
 	// 更新配置
 	configMap := map[string]string{
 		configKey: value,
@@ -636,7 +643,25 @@ func handleConfigUpdate(key, value string) bool {
 	} else if configName == "billing_setting" {
 		InvalidatePricingCache()
 		ratio_setting.InvalidateExposedDataCache()
+	} else if configName == "channel_affinity_setting" && configKey == "rules" {
+		if operation_setting.OnRulesExclusiveBindChanged != nil {
+			operation_setting.OnRulesExclusiveBindChanged(oldAffinityRules, value)
+		}
 	}
 
 	return true // 已处理
+}
+
+// readChannelAffinityRulesJSON 反射导出配置对象当前 rules 字段并序列化为 JSON 串；
+// 类型断言失败时返回空串（联动入口按解析失败静默返回）。
+func readChannelAffinityRulesJSON(cfg interface{}) string {
+	if cfg == nil {
+		return ""
+	}
+	if affinityCfg, ok := cfg.(*operation_setting.ChannelAffinitySetting); ok {
+		if data, err := common.Marshal(affinityCfg.Rules); err == nil {
+			return string(data)
+		}
+	}
+	return ""
 }
