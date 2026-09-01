@@ -477,9 +477,8 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 	}
 
 	redisMode := common.RedisEnabled && common.RDB != nil
-	won := true
 	if redisMode {
-		// Redis 模式：跨实例原子性由 SET NX PX 保证，败者重读胜者渠道（04 文档 §6.1）。
+		// Redis 模式：跨实例原子性由 SET NX PX 保证（04 文档 §6.1）。
 		ctx, cancel := context.WithTimeout(context.Background(), exclusiveRedisOpTimeout)
 		defer cancel()
 		ok, err := common.RDB.SetNX(ctx, cache.FullKey(cacheKeySuffix), strconv.Itoa(decision.ChannelID), ttl).Result()
@@ -488,7 +487,14 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 			return 0, false
 		}
 		if !ok {
-			won = false
+			// 跨实例竞争失败：读胜者结果使用同一渠道（SSOT 5.1.5），与内存模式锁内
+			// double-check 语义一致：跳过降级计数、不设首次占位标记（占位三写由胜者完成）。
+			winnerID, found, err := cache.Get(cacheKeySuffix)
+			if err != nil || !found || winnerID <= 0 {
+				common.SysError(fmt.Sprintf("channel affinity exclusive loser confirm failed: channel=%d key_fp=%s found=%v err=%v", decision.ChannelID, meta.KeyFingerprint, found, err))
+				return 0, false
+			}
+			return winnerID, true
 		}
 	} else {
 		// 内存模式：分段锁临界区内串行写入，进程内先到先得。
@@ -498,18 +504,17 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 		}
 	}
 
-	if won {
-		if err := occupancyAddKeyFPAtomic(decision.ChannelID, meta.KeyFingerprint, ttl); err != nil {
-			common.SysError(fmt.Sprintf("channel affinity occupancy register failed: channel=%d key_fp=%s err=%v", decision.ChannelID, meta.KeyFingerprint, err))
-			return 0, false
-		}
-		if err := lastBindSet(cacheKeySuffix, decision.ChannelID, 2*ttl); err != nil {
-			common.SysError(fmt.Sprintf("channel affinity last bind write failed: channel=%d key_fp=%s err=%v", decision.ChannelID, meta.KeyFingerprint, err))
-			return 0, false
-		}
+	// 胜者收尾：登记反向占用索引与最近绑定记录（正向绑定已写入）。
+	if err := occupancyAddKeyFPAtomic(decision.ChannelID, meta.KeyFingerprint, ttl); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity occupancy register failed: channel=%d key_fp=%s err=%v", decision.ChannelID, meta.KeyFingerprint, err))
+		return 0, false
+	}
+	if err := lastBindSet(cacheKeySuffix, decision.ChannelID, 2*ttl); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity last bind write failed: channel=%d key_fp=%s err=%v", decision.ChannelID, meta.KeyFingerprint, err))
+		return 0, false
 	}
 
-	// 占位完成后无论模式都在锁内 double-check 正向缓存确认胜者结果。
+	// 占位完成后读回正向缓存确认胜者结果。
 	winnerID, found, err := cache.Get(cacheKeySuffix)
 	if err != nil || !found || winnerID <= 0 {
 		common.SysError(fmt.Sprintf("channel affinity exclusive winner confirm failed: channel=%d key_fp=%s found=%v err=%v", decision.ChannelID, meta.KeyFingerprint, found, err))

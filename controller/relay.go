@@ -449,6 +449,8 @@ func RelayMidjourney(c *gin.Context) {
 		})
 		channelId := c.GetInt("channel_id")
 		logger.LogError(c, fmt.Sprintf("relay error (channel #%d, status code %d): %s", channelId, statusCode, fmt.Sprintf("%s %s", mjErr.Description, mjErr.Result)))
+		// 终态失败：回滚独占占位（无亲和 meta 时内部直接返回）。
+		service.RollbackChannelAffinityOnFinalFailure(c)
 	}
 }
 
