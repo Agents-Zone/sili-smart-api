@@ -17,7 +17,7 @@ sub_plans:
   - id: "03"
     name: "前端配置观测"
     file: "03_前端配置观测.md"
-    status: "pending"
+    status: "completed"
 
 execution_order:
   - "01"
