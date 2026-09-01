@@ -426,6 +426,8 @@ Token、Origin 驗證和 PAT 契約請參閱[使用者鑑權與登入工作階�
 - `REDIS_CONN_STRING`：Redis 快取（推薦）
 - `MEMORY_CACHE_ENABLED`：記憶體快取
 
+管道獨佔綁定依賴執行時共享快取：多實例部署且未啟用 Redis（記憶體快取模式）時，反向佔用索引與原子佔位在實例間不可見，獨佔判定與先到先得語意退化為現有軟親和。需要跨實例獨佔時，請配置 Redis（`REDIS_CONN_STRING`）。
+
 ---
 
 ## 🔗 相關項目

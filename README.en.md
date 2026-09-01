@@ -426,6 +426,8 @@ See [User authentication and login sessions](./docs/authentication.md) for the t
 - `REDIS_CONN_STRING`: Redis cache (recommended)
 - `MEMORY_CACHE_ENABLED`: Memory cache
 
+Channel exclusive bind relies on the runtime shared cache: in multi-instance deployments without Redis (memory cache mode), the reverse occupancy index and atomic claiming are not visible across instances, so exclusive binding decisions and first-come-first-served semantics degrade to the existing soft affinity. Configure Redis via `REDIS_CONN_STRING` when cross-instance exclusivity is required.
+
 ---
 
 ## 🔗 Related Projects

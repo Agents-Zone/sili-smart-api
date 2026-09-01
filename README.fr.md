@@ -427,6 +427,8 @@ Consultez [Authentification utilisateur et sessions de connexion](./docs/authent
 - `REDIS_CONN_STRING`: Cache Redis (recommandé)
 - `MEMORY_CACHE_ENABLED`: Cache mémoire
 
+La liaison exclusive de canal repose sur le cache partagé à l'exécution : lors d'un déploiement multi-instances sans Redis (mode cache mémoire), l'index d'occupation inverse et la réservation atomique ne sont pas visibles entre les instances, et la liaison exclusive avec la sémantique du premier arrivé dégrade vers l'affinité douce existante. Configurez Redis (`REDIS_CONN_STRING`) lorsque l'exclusivité entre instances est requise.
+
 ---
 
 ## 🔗 Projets connexes
