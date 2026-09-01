@@ -210,6 +210,9 @@ func ClearChannelAffinityCacheAll() int {
 			common.SysError(fmt.Sprintf("channel affinity cache delete many failed: err=%v", err))
 		}
 	}
+	// 正向清空后同步清空反向占用索引与最近绑定记录（三批同清，
+	// SSOT 5.2.2 第4条、5.2.4 规则2）；失败仅 SysError 不影响返回值。
+	clearExclusiveRuntimeAll()
 	return len(keys)
 }
 
@@ -241,10 +244,33 @@ func ClearChannelAffinityCacheByRuleName(ruleName string) (int, error) {
 	}
 
 	cache := getChannelAffinityCache()
+	// DeleteByPrefix 前先收集该前缀下全部键并读出各键的绑定渠道，供删除正向后
+	// 回放清理反向占用索引与最近绑定记录（三批同清，SSOT 5.2.2 第4条、5.2.4 规则2）。
+	// 渠道值必须在删除前读取：正向删除后无法再定位该键占用的渠道。
+	// boundChannels 的键与 clearExclusiveRuntimeByForwardKeys 的 suffix 同口径
+	//（full key 去正向命名空间前缀）。
+	fullPrefix := channelAffinityCacheNamespace + ":" + ruleName + ":"
+	ruleKeys := make([]string, 0)
+	boundChannels := make(map[string]int)
+	if keys, err := cache.Keys(); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity cache list keys failed: err=%v", err))
+	} else {
+		for _, k := range keys {
+			if !strings.HasPrefix(k, fullPrefix) {
+				continue
+			}
+			ruleKeys = append(ruleKeys, k)
+			suffix := strings.TrimPrefix(k, channelAffinityCacheNamespace+":")
+			if channelID, found, err := cache.Get(k); err == nil && found && channelID > 0 {
+				boundChannels[suffix] = channelID
+			}
+		}
+	}
 	deleted, err := cache.DeleteByPrefix(ruleName)
 	if err != nil {
 		return 0, err
 	}
+	clearExclusiveRuntimeByForwardKeys(ruleKeys, boundChannels)
 	return deleted, nil
 }
 

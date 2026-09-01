@@ -601,3 +601,166 @@ func RollbackChannelAffinityOnFinalFailure(c *gin.Context) {
 	}
 	rollbackBindingPlacement(meta.CacheKey, meta.KeyFingerprint, boundChannel)
 }
+
+// affinityKeysDeleter 为命名空间整体清空所需的最小缓存接口（Keys + DeleteMany）。
+type affinityKeysDeleter interface {
+	Keys() ([]string, error)
+	DeleteMany([]string) (map[string]bool, error)
+}
+
+// purgeAffinityNamespace 清空单个命名空间：列出全部键后批量删除。
+func purgeAffinityNamespace(cache affinityKeysDeleter) error {
+	keys, err := cache.Keys()
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	_, err = cache.DeleteMany(keys)
+	return err
+}
+
+// retryOnce 执行 fn，失败时重试一次（SSOT 5.2.5）。固定保留为独立函数：
+// clearExclusiveRuntimeAll 与 clearExclusiveRuntimeByForwardKeys 两处调用，
+// 表达清空路径的稳定重试语义。
+func retryOnce(fn func() error) error {
+	if err := fn(); err != nil {
+		return fn()
+	}
+	return nil
+}
+
+// clearExclusiveRuntimeAll 整体清空 occupancy 与 lastBind 两命名空间
+// （管理员全部清空路径，SSOT 5.2.2 第4条）：各自 Keys 后 DeleteMany，
+// 失败重试一次，仍失败记 SysError（SSOT 5.2.5），残留随 TTL 过期收敛。
+func clearExclusiveRuntimeAll() {
+	if err := retryOnce(func() error {
+		return purgeAffinityNamespace(getChannelAffinityOccupancyCache())
+	}); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity occupancy clear all failed: err=%v", err))
+	} else {
+		// 条目已整体删除，内存过期时刻表同步清空。
+		occupancyMemExpireAt.Range(func(key, _ any) bool {
+			occupancyMemExpireAt.Delete(key)
+			return true
+		})
+	}
+	if err := retryOnce(func() error {
+		return purgeAffinityNamespace(getChannelAffinityLastBindCache())
+	}); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity last bind clear all failed: err=%v", err))
+	}
+}
+
+// exclusiveKeyFingerprintsFromSuffix 由正向缓存键后缀推导候选键指纹：后缀按构成
+// 分段（buildChannelAffinityCacheKeySuffix 为 rule/model/group/value 依次拼接），
+// 末段起逐段取"该段及其后全部内容"为亲和值原文（值本身可含冒号），求指纹去重。
+func exclusiveKeyFingerprintsFromSuffix(suffix string) []string {
+	parts := strings.Split(suffix, ":")
+	fps := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for i := 1; i < len(parts); i++ {
+		fp := affinityFingerprint(strings.Join(parts[i:], ":"))
+		if fp == "" {
+			continue
+		}
+		if _, dup := seen[fp]; !dup {
+			seen[fp] = struct{}{}
+			fps = append(fps, fp)
+		}
+	}
+	return fps
+}
+
+// removeExclusiveOccupancyBySuffix 成员级移除：候选指纹中第一个存在于该渠道条目
+// 内的即命中并移除（命中即止），不整体删除渠道条目，避免误删其它规则同渠道的
+// 键指纹（04 文档 §6.2）。推导失败的键（无候选段或条目内无命中）跳过并 SysLog
+// 声明，残留依赖 TTL 收敛（SSOT 5.2.5）。
+func removeExclusiveOccupancyBySuffix(channelID int, suffix string) {
+	fps := exclusiveKeyFingerprintsFromSuffix(suffix)
+	if len(fps) == 0 {
+		common.SysLog(fmt.Sprintf("channel affinity clear skip: no fingerprint candidates derivable, key=%s", suffix))
+		return
+	}
+	_, members, err := occupancyBindingCount(channelID)
+	if err != nil {
+		common.SysError(fmt.Sprintf("channel affinity occupancy read failed on clear: channel=%d key=%s err=%v", channelID, suffix, err))
+		return
+	}
+	memberSet := make(map[string]struct{}, len(members))
+	for _, fp := range members {
+		memberSet[fp] = struct{}{}
+	}
+	for _, fp := range fps {
+		if _, hit := memberSet[fp]; !hit {
+			continue
+		}
+		if err := retryOnce(func() error {
+			return occupancyRemoveKeyFP(channelID, fp)
+		}); err != nil {
+			common.SysError(fmt.Sprintf("channel affinity occupancy remove on clear failed: channel=%d key=%s err=%v", channelID, suffix, err))
+		}
+		return
+	}
+	common.SysLog(fmt.Sprintf("channel affinity clear skip: fingerprint not located in occupancy, channel=%d key=%s", channelID, suffix))
+}
+
+// clearExclusiveRuntimeByForwardKeys 按正向缓存键回放清理 occupancy 与 lastBind
+// （管理员按规则清空路径，SSOT 5.2.2 第4条）：对每个 forwardKey（含命名空间前缀
+// 的 full key）定位该键的绑定渠道，键指纹由正向键推导（成员级移除，04 文档 §6.2），
+// 随后 lastBindDelete（去正向前缀）。渠道定位次序：boundChannels（调用方在正向
+// DeleteByPrefix 前读出的 suffix→渠道映射，主路径；正向删除后自身已读不到值）、
+// 正向缓存（调用方未删正向时兜底）、lastBind 记录（与正向同批写入、两周期 TTL，
+// 值一致）。边界：渠道无法定位或指纹无法命中的键跳过 occupancy 移除并 SysLog
+// 声明，残留依赖 TTL 收敛（SSOT 5.2.5）；清理失败重试一次，仍失败记 SysError。
+func clearExclusiveRuntimeByForwardKeys(forwardKeys []string, boundChannels map[string]int) {
+	if len(forwardKeys) == 0 {
+		return
+	}
+	forward := getChannelAffinityCache()
+	suffixes := make([]string, 0, len(forwardKeys))
+	for _, fullKey := range forwardKeys {
+		suffix, matched := strings.CutPrefix(fullKey, channelAffinityCacheNamespace+":")
+		if !matched || suffix == "" {
+			continue
+		}
+		suffixes = append(suffixes, suffix)
+
+		channelID := 0
+		if boundChannels != nil {
+			channelID = boundChannels[suffix]
+		}
+		if channelID <= 0 {
+			if v, found, err := forward.Get(suffix); err != nil {
+				common.SysError(fmt.Sprintf("channel affinity forward read failed on clear: key=%s err=%v", fullKey, err))
+				continue
+			} else if found {
+				channelID = v
+			}
+		}
+		if channelID <= 0 {
+			// 正向已被调用方删除且调用方未传渠道：回退读 lastBind 的绑定渠道
+			// （与正向同批写入，值一致）。
+			record, lbFound, lbErr := lastBindGet(suffix)
+			if lbErr != nil {
+				common.SysError(fmt.Sprintf("channel affinity last bind read failed on clear: key=%s err=%v", fullKey, lbErr))
+				continue
+			}
+			if !lbFound || record.ChannelID <= 0 {
+				common.SysLog(fmt.Sprintf("channel affinity clear skip: channel not resolvable, key=%s", suffix))
+				continue
+			}
+			channelID = record.ChannelID
+		}
+		removeExclusiveOccupancyBySuffix(channelID, suffix)
+	}
+	if len(suffixes) > 0 {
+		if err := retryOnce(func() error {
+			_, err := getChannelAffinityLastBindCache().DeleteMany(suffixes)
+			return err
+		}); err != nil {
+			common.SysError(fmt.Sprintf("channel affinity last bind clear by keys failed: err=%v", err))
+		}
+	}
+}
