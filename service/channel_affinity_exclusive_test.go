@@ -1,17 +1,27 @@
 package service
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/alicebob/miniredis/v2"
+	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // ChannelAffinityRule.ExclusiveBind 的 JSON 反序列化行为：
@@ -312,13 +322,13 @@ func TestDecideExclusiveBinding(t *testing.T) {
 	}
 
 	tests := []struct {
-		name             string
-		candidates       []int
-		occupancyCounts  map[int]int
+		name              string
+		candidates        []int
+		occupancyCounts   map[int]int
 		lastBindChannelID int
-		lastBindValid    bool
-		pickWeighted     func([]int) int
-		want             channelAffinityBindDecision
+		lastBindValid     bool
+		pickWeighted      func([]int) int
+		want              channelAffinityBindDecision
 	}{
 		{
 			name:              "free_channel_rebinds_last_bind",
@@ -514,4 +524,375 @@ func TestLastBindRedisRoundTrip(t *testing.T) {
 	_, found, err = lastBindGet("rule1:fp1")
 	require.NoError(t, err)
 	assert.False(t, found)
+}
+
+// resetAffinityCacheSingleton 重置正向亲和缓存单例（与 exclusive 存储层同模式），
+// 供用例切换 Redis 全局后重建。
+func resetAffinityCacheSingleton() {
+	channelAffinityCacheOnce = sync.Once{}
+	channelAffinityCache = nil
+}
+
+// setupExclusiveAcquireDB 建内存库表并注入独占测试渠道（701、702 属 default 分组，
+// gpt-4 模型）。内存缓存启用走 group2model2channels 候选分支（service 包 TestMain
+// 未跑 initCol，DB 分支的 group 列名未初始化，故按现有 service 选路用例的模式
+// 用内存缓存）。
+func setupExclusiveAcquireDB(t *testing.T) {
+	t.Helper()
+
+	originalDB := model.DB
+	originalMemoryCacheEnabled := common.MemoryCacheEnabled
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
+
+	priority := int64(0)
+	weight := uint(100)
+	for _, id := range []int{701, 702} {
+		require.NoError(t, db.Create(&model.Channel{
+			Id:       id,
+			Type:     constant.ChannelTypeOpenAI,
+			Key:      fmt.Sprintf("key-%d", id),
+			Status:   common.ChannelStatusEnabled,
+			Name:     fmt.Sprintf("exclusive-channel-%d", id),
+			Weight:   &weight,
+			Models:   "gpt-4",
+			Group:    "default",
+			Priority: &priority,
+		}).Error)
+		require.NoError(t, db.Create(&model.Ability{
+			Group:     "default",
+			Model:     "gpt-4",
+			ChannelId: id,
+			Enabled:   true,
+			Priority:  &priority,
+			Weight:    weight,
+		}).Error)
+	}
+
+	model.DB = db
+	common.MemoryCacheEnabled = true
+	model.InitChannelCache()
+	t.Cleanup(func() {
+		model.DB = originalDB
+		common.MemoryCacheEnabled = originalMemoryCacheEnabled
+		if originalMemoryCacheEnabled && originalDB != nil {
+			model.InitChannelCache()
+		}
+		sqlDB, err := db.DB()
+		if err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+}
+
+// buildExclusiveAcquireContext 构造带亲和 meta 的 gin context。
+func buildExclusiveAcquireContext(t *testing.T, meta channelAffinityMeta) *gin.Context {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	setChannelAffinityContext(ctx, meta)
+	return ctx
+}
+
+// exclusiveAcquireTestMeta 构造并发用例的 meta（候选集 [701,702]）。
+func exclusiveAcquireTestMeta() channelAffinityMeta {
+	return channelAffinityMeta{
+		CacheKey:       channelAffinityCacheNamespace + ":exclusive-test-rule:default:key-a",
+		TTLSeconds:     30,
+		RuleName:       "exclusive-test-rule",
+		ExclusiveBind:  true,
+		KeyFingerprint: "aaaa1111",
+		UsingGroup:     "default",
+		ModelName:      "gpt-4",
+		RequestPath:    "/v1/chat/completions",
+	}
+}
+
+// cleanupExclusiveAcquire 清理占位三处残留。
+func cleanupExclusiveAcquire(meta channelAffinityMeta) func() {
+	return func() {
+		_, _ = getChannelAffinityCache().DeleteMany([]string{meta.CacheKey})
+		_, _ = getChannelAffinityOccupancyCache().DeleteMany([]string{"701", "702"})
+		_, _ = getChannelAffinityLastBindCache().DeleteMany([]string{exclusiveCacheKeySuffix(meta)})
+		occupancyMemExpireAt.Range(func(key, _ any) bool {
+			occupancyMemExpireAt.Delete(key)
+			return true
+		})
+	}
+}
+
+// exclusiveCacheKeySuffix 由 meta.CacheKey 去正向前缀得到 suffix。
+func exclusiveCacheKeySuffix(meta channelAffinityMeta) string {
+	return strings.TrimPrefix(meta.CacheKey, channelAffinityCacheNamespace+":")
+}
+
+// TestAcquireExclusiveBinding_ConcurrentFirstWins 计划核心断言：两个 goroutine 并发
+// 对同一 cacheKeySuffix（同 meta、同候选集 [701,702]）调 acquireExclusiveBinding，
+// 汇合后两者返回同一 channelID（701 或 702 之一），且该渠道占用键数为 1
+// （仅胜者指纹登记一次）（SSOT 5.1.2 流程第2条末）。
+func TestAcquireExclusiveBinding_ConcurrentFirstWins(t *testing.T) {
+	useExclusiveMemoryMode(t)
+	setupExclusiveAcquireDB(t)
+	meta := exclusiveAcquireTestMeta()
+	t.Cleanup(cleanupExclusiveAcquire(meta))
+	resetAffinityCacheSingleton()
+
+	const goroutines = 2
+	results := make([]int, goroutines)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			channelID, found := acquireExclusiveBinding(buildExclusiveAcquireContext(t, meta), meta, meta.UsingGroup, meta.ModelName)
+			require.True(t, found)
+			require.Contains(t, []int{701, 702}, channelID)
+			results[idx] = channelID
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	assert.Equal(t, results[0], results[1], "concurrent first bind must converge to the winner channel")
+
+	count, fps, err := occupancyBindingCount(results[0])
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "only the winner fingerprint should be registered once")
+	assert.ElementsMatch(t, []string{meta.KeyFingerprint}, fps)
+
+	// 败者读胜者结果：正向缓存与最近绑定记录均指向胜者渠道。
+	cachedID, found, err := getChannelAffinityCache().Get(exclusiveCacheKeySuffix(meta))
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, results[0], cachedID)
+
+	record, found, err := lastBindGet(exclusiveCacheKeySuffix(meta))
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, results[0], record.ChannelID)
+}
+
+// TestAcquireExclusiveBinding_IndexErrorDegrades 计划核心断言：键指纹为空串属提取异常，
+// 守卫返回 (0, false) 直接降级软亲和，不阻塞请求且不写入任何占位（SSOT 5.1.5）。
+func TestAcquireExclusiveBinding_IndexErrorDegrades(t *testing.T) {
+	useExclusiveMemoryMode(t)
+	setupExclusiveAcquireDB(t)
+	meta := exclusiveAcquireTestMeta()
+	meta.KeyFingerprint = ""
+	t.Cleanup(cleanupExclusiveAcquire(meta))
+	resetAffinityCacheSingleton()
+
+	channelID, found := acquireExclusiveBinding(buildExclusiveAcquireContext(t, meta), meta, meta.UsingGroup, meta.ModelName)
+	assert.False(t, found)
+	assert.Equal(t, 0, channelID)
+
+	// 未写入任何占位：正向缓存、占用索引、最近绑定记录三处均空。
+	_, found, err := getChannelAffinityCache().Get(exclusiveCacheKeySuffix(meta))
+	require.NoError(t, err)
+	assert.False(t, found)
+
+	for _, id := range []int{701, 702} {
+		count, _, err := occupancyBindingCount(id)
+		require.NoError(t, err)
+		assert.Equal(t, 0, count)
+	}
+
+	_, found, err = lastBindGet(exclusiveCacheKeySuffix(meta))
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+// TestAcquireExclusiveBinding_EmptyCandidatesNoBind 候选集为空时无可绑定渠道，
+// 返回 (0, false) 且不写占位（分组无可用渠道场景）。
+func TestAcquireExclusiveBinding_EmptyCandidatesNoBind(t *testing.T) {
+	useExclusiveMemoryMode(t)
+	setupExclusiveAcquireDB(t)
+	meta := exclusiveAcquireTestMeta()
+	meta.UsingGroup = "no-such-group"
+	t.Cleanup(cleanupExclusiveAcquire(meta))
+	resetAffinityCacheSingleton()
+
+	channelID, found := acquireExclusiveBinding(buildExclusiveAcquireContext(t, meta), meta, meta.UsingGroup, meta.ModelName)
+	assert.False(t, found)
+	assert.Equal(t, 0, channelID)
+
+	_, found, err := lastBindGet(exclusiveCacheKeySuffix(meta))
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+// TestAcquireExclusiveBinding_ExcludesOtherKeyOccupancy 独占判定全局生效：另一键已占
+// 701 时，本键选 702（SSOT 5.1.4 规则1，经 occupancyCounts 覆盖全部键实现）。
+func TestAcquireExclusiveBinding_ExcludesOtherKeyOccupancy(t *testing.T) {
+	useExclusiveMemoryMode(t)
+	setupExclusiveAcquireDB(t)
+	meta := exclusiveAcquireTestMeta()
+	t.Cleanup(cleanupExclusiveAcquire(meta))
+	resetAffinityCacheSingleton()
+
+	require.NoError(t, occupancyAddKeyFP(701, "other1", 10*time.Second))
+
+	channelID, found := acquireExclusiveBinding(buildExclusiveAcquireContext(t, meta), meta, meta.UsingGroup, meta.ModelName)
+	require.True(t, found)
+	assert.Equal(t, 702, channelID)
+
+	count, fps, err := occupancyBindingCount(702)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	assert.ElementsMatch(t, []string{meta.KeyFingerprint}, fps)
+}
+
+// TestAcquireExclusiveBinding_FullLoadSharedDegrades 满载降级：两个渠道均被其它键占用，
+// 按最少绑定数优先复用（701 键数 1、702 键数 2，选 701），Mode=shared 触发降级计数与
+// gin context 降级标记（04 文档 §4.3 结构）。
+func TestAcquireExclusiveBinding_FullLoadSharedDegrades(t *testing.T) {
+	useExclusiveMemoryMode(t)
+	setupExclusiveAcquireDB(t)
+	meta := exclusiveAcquireTestMeta()
+	t.Cleanup(cleanupExclusiveAcquire(meta))
+	resetAffinityCacheSingleton()
+
+	require.NoError(t, occupancyAddKeyFP(701, "other1", 10*time.Second))
+	require.NoError(t, occupancyAddKeyFP(702, "other1", 10*time.Second))
+	require.NoError(t, occupancyAddKeyFP(702, "other2", 10*time.Second))
+
+	degradedBefore := atomic.LoadUint64(&channelAffinityDegradedReuseTotal)
+
+	ctx := buildExclusiveAcquireContext(t, meta)
+	channelID, found := acquireExclusiveBinding(ctx, meta, meta.UsingGroup, meta.ModelName)
+	require.True(t, found)
+	assert.Equal(t, 701, channelID, "full load should reuse the fewest-binding channel")
+
+	assert.Equal(t, degradedBefore+1, atomic.LoadUint64(&channelAffinityDegradedReuseTotal), "shared mode must bump degraded counter once")
+
+	anyDegrade, ok := ctx.Get(ginKeyChannelAffinityExclusiveDegrade)
+	require.True(t, ok, "shared mode must write degrade marker into gin context")
+	degrade, ok := anyDegrade.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, meta.RuleName, degrade["rule_name"])
+	assert.Equal(t, meta.KeyFingerprint, degrade["key_fp"])
+	assert.Equal(t, 701, degrade["channel_id"])
+	assert.Equal(t, 1, degrade["channel_binding_count"], "channel_binding_count is the count at decision time")
+}
+
+// TestAcquireExclusiveBinding_RebindsLastBindChannel TTL 到期重绑优先绑回原渠道：
+// lastBind 记录 702 且 702 空闲，选 702（SSOT 5.1.4 规则4）。
+func TestAcquireExclusiveBinding_RebindsLastBindChannel(t *testing.T) {
+	useExclusiveMemoryMode(t)
+	setupExclusiveAcquireDB(t)
+	meta := exclusiveAcquireTestMeta()
+	t.Cleanup(cleanupExclusiveAcquire(meta))
+	resetAffinityCacheSingleton()
+
+	require.NoError(t, lastBindSet(exclusiveCacheKeySuffix(meta), 702, 20*time.Second))
+
+	channelID, found := acquireExclusiveBinding(buildExclusiveAcquireContext(t, meta), meta, meta.UsingGroup, meta.ModelName)
+	require.True(t, found)
+	assert.Equal(t, 702, channelID, "rebind should prefer the last-bound channel when free")
+}
+
+// TestAcquireExclusiveBinding_ExistingWinnerShortCircuits 锁内 double-check：正向缓存
+// 已有胜者写入时（并发败者路径），直接返回胜者渠道，不重复登记指纹。
+func TestAcquireExclusiveBinding_ExistingWinnerShortCircuits(t *testing.T) {
+	useExclusiveMemoryMode(t)
+	setupExclusiveAcquireDB(t)
+	meta := exclusiveAcquireTestMeta()
+	t.Cleanup(cleanupExclusiveAcquire(meta))
+	resetAffinityCacheSingleton()
+
+	// 预置胜者占位：正向绑定 701 + 索引登记。
+	require.NoError(t, getChannelAffinityCache().SetWithTTL(exclusiveCacheKeySuffix(meta), 701, 10*time.Second))
+	require.NoError(t, occupancyAddKeyFP(701, "winner1", 10*time.Second))
+
+	channelID, found := acquireExclusiveBinding(buildExclusiveAcquireContext(t, meta), meta, meta.UsingGroup, meta.ModelName)
+	require.True(t, found)
+	assert.Equal(t, 701, channelID)
+
+	// 索引仍只含胜者指纹一次，本键指纹未追加。
+	count, fps, err := occupancyBindingCount(701)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	assert.ElementsMatch(t, []string{"winner1"}, fps)
+}
+
+// TestAcquireExclusiveBinding_AutoGroupExpandsCandidates usingGroup=auto 时候选集
+// 经 GetRequestAutoGroups 展开为多分组并集。
+func TestAcquireExclusiveBinding_AutoGroupExpandsCandidates(t *testing.T) {
+	useExclusiveMemoryMode(t)
+
+	originalDB := model.DB
+	originalMemoryCacheEnabled := common.MemoryCacheEnabled
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
+
+	priority := int64(0)
+	weight := uint(100)
+	// vip 分组 703、default 分组 704；703 被占后应经 auto 展开把 704 纳入候选。
+	for _, tc := range []struct {
+		id    int
+		group string
+	}{{703, "vip"}, {704, "default"}} {
+		require.NoError(t, db.Create(&model.Channel{
+			Id:       tc.id,
+			Type:     constant.ChannelTypeOpenAI,
+			Key:      fmt.Sprintf("key-%d", tc.id),
+			Status:   common.ChannelStatusEnabled,
+			Name:     fmt.Sprintf("auto-channel-%d", tc.id),
+			Weight:   &weight,
+			Models:   "gpt-4",
+			Group:    tc.group,
+			Priority: &priority,
+		}).Error)
+		require.NoError(t, db.Create(&model.Ability{
+			Group:     tc.group,
+			Model:     "gpt-4",
+			ChannelId: tc.id,
+			Enabled:   true,
+			Priority:  &priority,
+			Weight:    weight,
+		}).Error)
+	}
+	model.DB = db
+	common.MemoryCacheEnabled = true
+	model.InitChannelCache()
+
+	meta := exclusiveAcquireTestMeta()
+	meta.UsingGroup = "auto"
+	t.Cleanup(func() {
+		model.DB = originalDB
+		common.MemoryCacheEnabled = originalMemoryCacheEnabled
+		if originalMemoryCacheEnabled && originalDB != nil {
+			model.InitChannelCache()
+		}
+		_, _ = getChannelAffinityCache().DeleteMany([]string{meta.CacheKey})
+		_, _ = getChannelAffinityOccupancyCache().DeleteMany([]string{"703", "704"})
+		_, _ = getChannelAffinityLastBindCache().DeleteMany([]string{exclusiveCacheKeySuffix(meta)})
+		occupancyMemExpireAt.Range(func(key, _ any) bool {
+			occupancyMemExpireAt.Delete(key)
+			return true
+		})
+		sqlDB, err := db.DB()
+		if err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	resetAffinityCacheSingleton()
+
+	ctx := buildExclusiveAcquireContext(t, meta)
+	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+	common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"vip", "default"})
+
+	// 先占满 vip 分组的 703，auto 展开后应把 default 分组的 704 也纳入候选并选中。
+	require.NoError(t, occupancyAddKeyFP(703, "other1", 10*time.Second))
+
+	channelID, found := acquireExclusiveBinding(ctx, meta, meta.UsingGroup, meta.ModelName)
+	require.True(t, found)
+	assert.Equal(t, 704, channelID)
 }

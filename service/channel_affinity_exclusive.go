@@ -3,13 +3,19 @@ package service
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/cachex"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/samber/hot"
 )
@@ -339,4 +345,190 @@ func decideExclusiveBinding(candidates []int, occupancyCounts map[int]int, lastB
 		}
 	}
 	return channelAffinityBindDecision{ChannelID: pickWeighted(fewest), Mode: affinityBindModeShared}
+}
+
+// channelAffinityDegradedReuseTotal 为满载复用降级累计计数器（进程内，重启清零，
+// SSOT 5.3.3）。
+var channelAffinityDegradedReuseTotal uint64
+
+// channelAffinityBindLocks 为独占占位分段锁：按 cacheKeySuffix 哈希取锁，
+// 进程内串行化读-决策-写（内存模式先到先得；Redis 模式退化为本地收敛锁，
+// 跨实例原子性由 Lua/SetNX 保证，04 文档 §6.1）。
+var channelAffinityBindLocks [64]sync.Mutex
+
+func channelAffinityBindLock(cacheKeySuffix string) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(cacheKeySuffix))
+	idx := h.Sum32() % uint32(len(channelAffinityBindLocks))
+	return &channelAffinityBindLocks[idx]
+}
+
+// exclusiveAffinityTTL 由 meta 计算绑定 TTL：规则 TTL，缺省回退设置默认值再回退 3600。
+func exclusiveAffinityTTL(meta channelAffinityMeta) time.Duration {
+	seconds := meta.TTLSeconds
+	if seconds <= 0 {
+		if setting := operation_setting.GetChannelAffinitySetting(); setting != nil && setting.DefaultTTLSeconds > 0 {
+			seconds = setting.DefaultTTLSeconds
+		}
+	}
+	if seconds <= 0 {
+		seconds = 3600
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// exclusivePickWeighted 为 decideExclusiveBinding 注入的选定函数：候选集内等权随机
+// （现有选路为加权随机，独占空闲集无权重维度，按均匀随机在集内选定）。
+func exclusivePickWeighted(ids []int) int {
+	if len(ids) == 0 {
+		return 0
+	}
+	if len(ids) == 1 {
+		return ids[0]
+	}
+	return ids[common.GetRandomInt(len(ids))]
+}
+
+// exclusiveCandidateChannels 取候选集：普通分组单次查询；auto 分组经
+// GetRequestAutoGroups 展开为多分组并集（每分组一次查询后合并去重），
+// 用户分组取 context（与 distributor 的 auto 展开语义一致）。
+func exclusiveCandidateChannels(c *gin.Context, meta channelAffinityMeta, usingGroup string, modelName string) []int {
+	if usingGroup != "auto" {
+		return model.GetEnabledChannelIDsForGroupModel(usingGroup, modelName, meta.RequestPath)
+	}
+
+	userGroup := ""
+	if c != nil {
+		userGroup = common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+	}
+	autoGroups := GetRequestAutoGroups(c, userGroup)
+	seen := make(map[int]struct{})
+	merged := make([]int, 0)
+	for _, group := range autoGroups {
+		for _, id := range model.GetEnabledChannelIDsForGroupModel(group, modelName, meta.RequestPath) {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			merged = append(merged, id)
+		}
+	}
+	return merged
+}
+
+// acquireExclusiveBinding 在亲和 miss 且规则启用独占时完成绑定决策与原子占位
+// （SSOT 5.1.2 第2条）：读反向占用索引构造各候选渠道键数（本键既有绑定视为空闲，
+// 对本键已登记的渠道键数减 1），分段锁内 double-check 正向缓存后决策并写三处
+// （正向绑定、占用索引、最近绑定记录）。索引读写任一失败时降级软亲和返回 (0, false)
+// （SSOT 5.1.5）；锁内 double-check 命中即读胜者结果使用同一渠道（SSOT 5.1.5）。
+func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGroup string, modelName string) (int, bool) {
+	// 键指纹为空属提取异常：无法登记索引，直接降级软亲和，不阻塞请求（SSOT 5.1.5）。
+	if meta.KeyFingerprint == "" {
+		common.SysError(fmt.Sprintf("channel affinity exclusive bind skipped: empty key fingerprint, rule=%s key=%s", meta.RuleName, meta.CacheKey))
+		return 0, false
+	}
+
+	candidates := exclusiveCandidateChannels(c, meta, usingGroup, modelName)
+	if len(candidates) == 0 {
+		return 0, false
+	}
+
+	cacheKeySuffix := strings.TrimPrefix(meta.CacheKey, channelAffinityCacheNamespace+":")
+
+	// 读取本键现状：最近绑定记录（正向 miss 已由调用方保证）。
+	lastBindRecord, lastBindFound, err := lastBindGet(cacheKeySuffix)
+	if err != nil {
+		common.SysError(fmt.Sprintf("channel affinity last bind read failed: channel=0 key_fp=%s err=%v", meta.KeyFingerprint, err))
+		return 0, false
+	}
+
+	// 构造 occupancyCounts：本键指纹已登记的渠道键数减 1（本键既有绑定视为空闲）。
+	occupancyCounts := make(map[int]int, len(candidates))
+	for _, id := range candidates {
+		count, fps, err := occupancyBindingCount(id)
+		if err != nil {
+			common.SysError(fmt.Sprintf("channel affinity occupancy read failed: channel=%d key_fp=%s err=%v", id, meta.KeyFingerprint, err))
+			return 0, false
+		}
+		for _, fp := range fps {
+			if fp == meta.KeyFingerprint && count > 0 {
+				count--
+				break
+			}
+		}
+		occupancyCounts[id] = count
+	}
+
+	ttl := exclusiveAffinityTTL(meta)
+	cache := getChannelAffinityCache()
+
+	lock := channelAffinityBindLock(cacheKeySuffix)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// 锁内 double-check：胜者已写入正向绑定则直接读其结果（竞争失败语义，SSOT 5.1.5）。
+	if winnerID, found, err := cache.Get(cacheKeySuffix); err == nil && found && winnerID > 0 {
+		return winnerID, true
+	}
+
+	decision := decideExclusiveBinding(candidates, occupancyCounts, lastBindRecord.ChannelID, lastBindFound, exclusivePickWeighted)
+	if decision.ChannelID <= 0 {
+		return 0, false
+	}
+
+	redisMode := common.RedisEnabled && common.RDB != nil
+	won := true
+	if redisMode {
+		// Redis 模式：跨实例原子性由 SET NX PX 保证，败者重读胜者渠道（04 文档 §6.1）。
+		ctx, cancel := context.WithTimeout(context.Background(), exclusiveRedisOpTimeout)
+		defer cancel()
+		ok, err := common.RDB.SetNX(ctx, cache.FullKey(cacheKeySuffix), strconv.Itoa(decision.ChannelID), ttl).Result()
+		if err != nil {
+			common.SysError(fmt.Sprintf("channel affinity exclusive setnx failed: channel=%d key_fp=%s err=%v", decision.ChannelID, meta.KeyFingerprint, err))
+			return 0, false
+		}
+		if !ok {
+			won = false
+		}
+	} else {
+		// 内存模式：分段锁临界区内串行写入，进程内先到先得。
+		if err := cache.SetWithTTL(cacheKeySuffix, decision.ChannelID, ttl); err != nil {
+			common.SysError(fmt.Sprintf("channel affinity exclusive forward write failed: channel=%d key_fp=%s err=%v", decision.ChannelID, meta.KeyFingerprint, err))
+			return 0, false
+		}
+	}
+
+	if won {
+		if err := occupancyAddKeyFPAtomic(decision.ChannelID, meta.KeyFingerprint, ttl); err != nil {
+			common.SysError(fmt.Sprintf("channel affinity occupancy register failed: channel=%d key_fp=%s err=%v", decision.ChannelID, meta.KeyFingerprint, err))
+			return 0, false
+		}
+		if err := lastBindSet(cacheKeySuffix, decision.ChannelID, 2*ttl); err != nil {
+			common.SysError(fmt.Sprintf("channel affinity last bind write failed: channel=%d key_fp=%s err=%v", decision.ChannelID, meta.KeyFingerprint, err))
+			return 0, false
+		}
+	}
+
+	// 占位完成后无论模式都在锁内 double-check 正向缓存确认胜者结果。
+	winnerID, found, err := cache.Get(cacheKeySuffix)
+	if err != nil || !found || winnerID <= 0 {
+		common.SysError(fmt.Sprintf("channel affinity exclusive winner confirm failed: channel=%d key_fp=%s found=%v err=%v", decision.ChannelID, meta.KeyFingerprint, found, err))
+		return 0, false
+	}
+
+	if decision.Mode == affinityBindModeShared {
+		// 满载降级：计数器原子加 1，gin context 写降级标记（04 文档 §4.3 结构，
+		// 供 MarkChannelAffinityUsed 合并进 admin_info，审计落点 T8 完善）。
+		atomic.AddUint64(&channelAffinityDegradedReuseTotal, 1)
+		if c != nil {
+			c.Set(ginKeyChannelAffinityExclusiveDegrade, map[string]interface{}{
+				"rule_name":             meta.RuleName,
+				"key_fp":                meta.KeyFingerprint,
+				"channel_id":            winnerID,
+				"channel_binding_count": occupancyCounts[winnerID],
+			})
+		}
+	}
+
+	return winnerID, true
 }

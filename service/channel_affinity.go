@@ -20,11 +20,12 @@ import (
 )
 
 const (
-	ginKeyChannelAffinityCacheKey   = "channel_affinity_cache_key"
-	ginKeyChannelAffinityTTLSeconds = "channel_affinity_ttl_seconds"
-	ginKeyChannelAffinityMeta       = "channel_affinity_meta"
-	ginKeyChannelAffinityLogInfo    = "channel_affinity_log_info"
-	ginKeyChannelAffinitySkipRetry  = "channel_affinity_skip_retry_on_failure"
+	ginKeyChannelAffinityCacheKey         = "channel_affinity_cache_key"
+	ginKeyChannelAffinityTTLSeconds       = "channel_affinity_ttl_seconds"
+	ginKeyChannelAffinityMeta             = "channel_affinity_meta"
+	ginKeyChannelAffinityLogInfo          = "channel_affinity_log_info"
+	ginKeyChannelAffinitySkipRetry        = "channel_affinity_skip_retry_on_failure"
+	ginKeyChannelAffinityExclusiveDegrade = "channel_affinity_exclusive_degrade"
 
 	channelAffinityCacheNamespace           = "new-api:channel_affinity:v1"
 	channelAffinityUsageCacheStatsNamespace = "new-api:channel_affinity_usage_cache_stats:v1"
@@ -54,6 +55,7 @@ type channelAffinityMeta struct {
 	UsingGroup     string
 	ModelName      string
 	RequestPath    string
+	ExclusiveBind  bool
 }
 
 type ChannelAffinityStatsContext struct {
@@ -607,6 +609,7 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 			UsingGroup:     usingGroup,
 			ModelName:      modelName,
 			RequestPath:    path,
+			ExclusiveBind:  rule.ExclusiveBind,
 		})
 
 		cache := getChannelAffinityCache()
@@ -617,6 +620,10 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 		}
 		if found {
 			return channelID, true
+		}
+		if rule.ExclusiveBind {
+			meta, _ := getChannelAffinityMeta(c)
+			return acquireExclusiveBinding(c, meta, usingGroup, modelName)
 		}
 		return 0, false
 	}
