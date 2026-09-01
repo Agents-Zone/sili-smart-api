@@ -71,8 +71,8 @@ await i18n.use(initReactI18next).init({
     en: {
       translation: {
         'Exclusive Bind': EXCLUSIVE_BIND_LABEL,
-        'When enabled, a channel is exclusively bound to a single affinity key; when all channels are occupied, the key with the fewest bindings is reused':
-          'When enabled, a channel is exclusively bound to a single affinity key; when all channels are occupied, the key with the fewest bindings is reused',
+        'When enabled, a channel is exclusively bound to a single affinity key; when all channels are occupied, the channel with the fewest bindings is reused':
+          'When enabled, a channel is exclusively bound to a single affinity key; when all channels are occupied, the channel with the fewest bindings is reused',
         [EXCLUSIVE_BIND_WARNING_KEY]: EXCLUSIVE_BIND_WARNING_KEY,
       },
     },

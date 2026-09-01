@@ -5152,7 +5152,7 @@
     "When a token uses the auto group, the system tries groups from top to bottom until it finds an available group.": "當令牌使用 auto 分組時，系統會按從上到下的順序嘗試，直到找到可用分組。",
     "When billed as {{group}}": "按 {{group}} 收費時",
     "When conditions match, the final price is multiplied by X. Multiple matches multiply together; values < 1 act as discounts.": "條件滿足時，最終價格乘以 X；多條命中的倍率會相乘；小於 1 的值為折扣。",
-    "When enabled, a channel is exclusively bound to a single affinity key; when all channels are occupied, the key with the fewest bindings is reused": "開啟後，同一渠道同時只被一個親和鍵獨占；所有可用渠道均被佔用時，優先複用綁定數最少的渠道",
+    "When enabled, a channel is exclusively bound to a single affinity key; when all channels are occupied, the channel with the fewest bindings is reused": "開啟後，同一渠道同時只被一個親和鍵獨占；所有可用渠道均被佔用時，優先複用綁定數最少的渠道",
     "When enabled, if channels in the current group fail, it will try channels in the next group in order.": "開啟後，目前分組渠道失敗時會按順序嘗試下一個分組的渠道。",
     "When enabled, keep the affinity entry even if the affinity channel is disabled or no longer usable for the current group/model. Leave it off to delete the entry and select another channel.": "開啟後，親和到的渠道被停用，或不再適用於目前分組/模型時，仍保留這條親和；關閉時會刪除並重新選擇渠道。",
     "When enabled, large request bodies are temporarily stored on disk instead of memory, significantly reducing memory usage. SSD recommended.": "啟用磁碟緩存後，大請求體將臨時儲存到磁碟而非記憶體，可顯著降低記憶體佔用。建議在 SSD 環境下使用。",
