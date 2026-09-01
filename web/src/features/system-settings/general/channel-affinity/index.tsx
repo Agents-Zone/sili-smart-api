@@ -118,6 +118,11 @@ function serializeRules(rules: AffinityRule[]): string {
   return JSON.stringify(rules.map(({ id: _, ...rest }) => rest))
 }
 
+// 统计值缺省（旧后端或索引失败）时显示 -
+function formatStat(v: number | undefined): string {
+  return v === undefined || v === null ? '-' : String(v)
+}
+
 interface Props {
   defaultValues: ChannelAffinitySettings
 }
@@ -539,7 +544,11 @@ export function ChannelAffinitySection(props: Props) {
           {cacheStats && (
             <span className='text-muted-foreground text-xs'>
               {t('Cache Entries')}: {cacheStats.total} /{' '}
-              {cacheStats.cache_capacity}
+              {cacheStats.cache_capacity} · {t('Exclusive Bindings')}:{' '}
+              {formatStat(cacheStats.exclusive_bindings)} ·{' '}
+              {t('Shared Bindings')}: {formatStat(cacheStats.shared_bindings)} ·{' '}
+              {t('Degraded Reuse Total')}:{' '}
+              {formatStat(cacheStats.degraded_reuse_total)}
             </span>
           )}
         </SettingsPageActionsPortal>
