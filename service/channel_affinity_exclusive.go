@@ -574,9 +574,9 @@ func rollbackBindingPlacement(cacheKey string, keyFP string, channelID int) {
 }
 
 // RollbackChannelAffinityOnFinalFailure 终态失败回滚入口（导出供 controller 调用，
-// SSOT 5.1.2 第4条末）：无 affinity meta 直接返回；SwitchOnSuccess 开启且本次请求
-// 已重试切换到新渠道（context channel_id 与首次占位渠道不同）视为已迁移，不回滚
-// （迁移语义由 RecordChannelAffinity 后续覆盖）；否则回滚占位三处。
+// SSOT 5.1.2 第4条末）：无 affinity meta 直接返回；终态失败必然未发生成功切换
+// （成功回写仅走 RecordChannelAffinity），一律回滚首次占位渠道三处，避免失败
+// 占位把亲和键钉在失败渠道上直至 TTL 到期。
 func RollbackChannelAffinityOnFinalFailure(c *gin.Context) {
 	if c == nil {
 		return
@@ -593,11 +593,6 @@ func RollbackChannelAffinityOnFinalFailure(c *gin.Context) {
 	}
 	if boundChannel <= 0 {
 		return
-	}
-	if setting := operation_setting.GetChannelAffinitySetting(); setting != nil && setting.SwitchOnSuccess {
-		if currentChannel := c.GetInt("channel_id"); currentChannel > 0 && currentChannel != boundChannel {
-			return
-		}
 	}
 	rollbackBindingPlacement(meta.CacheKey, meta.KeyFingerprint, boundChannel)
 }

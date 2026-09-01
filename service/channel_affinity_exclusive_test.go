@@ -1097,9 +1097,10 @@ func TestRollbackOnFinalFailure_NoSwitch(t *testing.T) {
 	assert.False(t, found)
 }
 
-// TestRollbackOnFinalFailure_Switched 计划核心断言：占位渠道 601、context channel_id=602
-// （已成功切换），不回滚——迁移语义归 RecordChannelAffinity（SSOT 5.1.2 第4条）。
-func TestRollbackOnFinalFailure_Switched(t *testing.T) {
+// TestRollbackOnFinalFailure_RetrySwitchedAlsoRollsBack 计划核心断言：占位渠道 601、
+// 重试切换到 602 后仍终态失败（context channel_id=602），三处占位全清——终态失败
+// 出口必然未发生成功切换，失败重试切换同样回滚（SSOT 5.1.2 第4条末）。
+func TestRollbackOnFinalFailure_RetrySwitchedAlsoRollsBack(t *testing.T) {
 	suffix := fmt.Sprintf("final-switched:default:fp-%d", time.Now().UnixNano())
 	meta := recordAffinityMeta("fp1a2b3c4", suffix)
 	ctx := buildRecordAffinityContext(t, meta, 601)
@@ -1113,20 +1114,17 @@ func TestRollbackOnFinalFailure_Switched(t *testing.T) {
 
 	RollbackChannelAffinityOnFinalFailure(ctx)
 
-	cachedID, found, err := getChannelAffinityCache().Get(suffix)
+	_, found, err := getChannelAffinityCache().Get(suffix)
 	require.NoError(t, err)
-	require.True(t, found, "placement must survive when a successful switch happened")
-	assert.Equal(t, 601, cachedID)
+	assert.False(t, found, "final failure must roll back forward binding even after retry switch")
 
-	count, fps, err := occupancyBindingCount(601)
+	count, _, err := occupancyBindingCount(601)
 	require.NoError(t, err)
-	assert.Equal(t, 1, count)
-	assert.ElementsMatch(t, []string{"fp1a2b3c4"}, fps)
+	assert.Equal(t, 0, count)
 
-	record, found, err := lastBindGet(suffix)
+	_, found, err = lastBindGet(suffix)
 	require.NoError(t, err)
-	require.True(t, found)
-	assert.Equal(t, 601, record.ChannelID)
+	assert.False(t, found)
 }
 
 // TestRollbackOnFinalFailure_NoMeta gin context 无 affinity meta 时直接返回，无副作用。
@@ -1142,7 +1140,7 @@ func TestRollbackOnFinalFailure_NoMeta(t *testing.T) {
 }
 
 // TestRollbackOnFinalFailure_SwitchOnSuccessDisabled SwitchOnSuccess 关闭时，
-// context channel_id 与占位渠道不同也不视为迁移，仍回滚占位（判定条件含 SwitchOnSuccess）。
+// 终态失败同样回滚占位（回滚判定与 SwitchOnSuccess 无关，仅看终态失败出口）。
 func TestRollbackOnFinalFailure_SwitchOnSuccessDisabled(t *testing.T) {
 	suffix := fmt.Sprintf("final-switch-off:default:fp-%d", time.Now().UnixNano())
 	meta := recordAffinityMeta("fp1a2b3c4", suffix)
@@ -1162,7 +1160,7 @@ func TestRollbackOnFinalFailure_SwitchOnSuccessDisabled(t *testing.T) {
 
 	_, found, err := getChannelAffinityCache().Get(suffix)
 	require.NoError(t, err)
-	assert.False(t, found, "without SwitchOnSuccess a different channel_id is not a migration")
+	assert.False(t, found, "final failure rolls back placement regardless of SwitchOnSuccess")
 }
 
 // TestRecordChannelAffinityDisabled 不启用亲和时 RecordChannelAffinity 不登记索引。

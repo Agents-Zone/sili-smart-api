@@ -620,6 +620,11 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 			return 0, false
 		}
 		if found {
+			// 命中渠道记为首次占位渠道：后续失败切换迁移时从该渠道条目
+			// 移除本键指纹（SSOT 5.2.2 第2条），终态失败也据此回滚。
+			if c != nil {
+				c.Set(ginKeyChannelAffinityBoundChannel, channelID)
+			}
 			return channelID, true
 		}
 		if rule.ExclusiveBind {
