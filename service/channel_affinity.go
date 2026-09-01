@@ -79,6 +79,12 @@ type ChannelAffinityCacheStats struct {
 	ByRuleName    map[string]int `json:"by_rule_name"`
 	CacheCapacity int            `json:"cache_capacity"`
 	CacheAlgo     string         `json:"cache_algo"`
+	// 三指标为向后兼容扩展（SSOT 4.2.2、5.3.2 第3条、5.3.4 规则2）：
+	// exclusive/shared 按反向占用索引实时统计（4.2.4 规则1，跨规则全局口径），
+	// degraded 为进程启动累计降级次数（重启清零）。
+	ExclusiveBindings  int    `json:"exclusive_bindings"`
+	SharedBindings     int    `json:"shared_bindings"`
+	DegradedReuseTotal uint64 `json:"degraded_reuse_total"`
 }
 
 func getChannelAffinityCache() *cachex.HybridCache[int] {
@@ -188,13 +194,17 @@ func GetChannelAffinityCacheStats() ChannelAffinityCacheStats {
 		byRuleName[ruleName]++
 	}
 
+	exclusive, shared := GetChannelAffinityExclusiveStats()
 	return ChannelAffinityCacheStats{
-		Enabled:       setting.Enabled,
-		Total:         total,
-		Unknown:       unknown,
-		ByRuleName:    byRuleName,
-		CacheCapacity: mainCap,
-		CacheAlgo:     mainAlgo,
+		Enabled:            setting.Enabled,
+		Total:              total,
+		Unknown:            unknown,
+		ByRuleName:         byRuleName,
+		CacheCapacity:      mainCap,
+		CacheAlgo:          mainAlgo,
+		ExclusiveBindings:  exclusive,
+		SharedBindings:     shared,
+		DegradedReuseTotal: GetChannelAffinityDegradedReuseTotal(),
 	}
 }
 

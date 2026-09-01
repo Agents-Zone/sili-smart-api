@@ -350,8 +350,8 @@ func TestClearAllReturnsForwardCountOnly(t *testing.T) {
 }
 
 // useRulesUpdateTest 在 useClearAffinityTest 基础上注入开关清空测试规则 r1
-//（include_rule_name=true，键前缀 r1:），并对 r1 三命名空间各造一条数据
-//（正向键 "r1:fp1"、occupancy 渠道 311、lastBind 同 suffix）。
+// （include_rule_name=true，键前缀 r1:），并对 r1 三命名空间各造一条数据
+// （正向键 "r1:fp1"、occupancy 渠道 311、lastBind 同 suffix）。
 func useRulesUpdateTest(t *testing.T) {
 	t.Helper()
 	useClearAffinityTest(t)
@@ -581,7 +581,7 @@ func TestMarkChannelAffinityUsedWithoutDegrade(t *testing.T) {
 }
 
 // TestMarkChannelAffinityUsedDegradeMarkerTypeMismatch 降级标记类型不符
-//（非法写入场景）时静默跳过追加，请求链路照常完成（SSOT 5.3.5 审计写入失败
+// （非法写入场景）时静默跳过追加，请求链路照常完成（SSOT 5.3.5 审计写入失败
 // 静默跳过：map 写入无失败路径，防御类型断言失败分支）。
 func TestMarkChannelAffinityUsedDegradeMarkerTypeMismatch(t *testing.T) {
 	ctx := buildDegradeMarkContext(t, nil)
@@ -606,4 +606,72 @@ func TestDegradedCounter(t *testing.T) {
 	atomic.AddUint64(&channelAffinityDegradedReuseTotal, 1)
 	atomic.AddUint64(&channelAffinityDegradedReuseTotal, 1)
 	assert.Equal(t, before+2, GetChannelAffinityDegradedReuseTotal())
+}
+
+// ===== T9：缓存统计接口扩展三指标 =====
+// 覆盖 SSOT 4.2.2（三个只读显示字段）、4.2.4 规则1（指标口径）、5.3.2 第3条
+//（统计接口扩展三字段）、5.3.4 规则2（向后兼容仅新增字段）、03 文档 3.2 边界值
+//（索引键遍历失败返回 0）。
+
+// TestGetChannelAffinityExclusiveStats_Empty 计划核心断言：occupancy 无任何条目时
+// GetChannelAffinityExclusiveStats 返回 (0, 0)（空分支）。
+func TestGetChannelAffinityExclusiveStats_Empty(t *testing.T) {
+	useClearAffinityTest(t)
+
+	exclusive, shared := GetChannelAffinityExclusiveStats()
+	assert.Equal(t, 0, exclusive)
+	assert.Equal(t, 0, shared)
+}
+
+// TestGetChannelAffinityCacheStatsExclusiveMetrics 计划核心断言：
+// occupancy 造数渠道 A（411）键数 1、渠道 B（421）键数 3，降级计数器置 5 后
+// GetChannelAffinityCacheStats 返回 ExclusiveBindings=1（A 贡献 1）、
+// SharedBindings=3（B 贡献 3）、DegradedReuseTotal=5；原有字段 Total/ByRuleName
+// 与正向造数一致（向后兼容无回归，SSOT 5.3.4 规则2）。
+func TestGetChannelAffinityCacheStatsExclusiveMetrics(t *testing.T) {
+	useClearAffinityTest(t)
+	ttl := 10 * time.Second
+	forward := getChannelAffinityCache()
+
+	// 正向造数：ruleA 两键 + ruleB 一键（Total=3、ByRuleName={ruleA:2, ruleB:1}）。
+	require.NoError(t, forward.SetWithTTL("ruleA:stat-key-a1", 411, ttl))
+	require.NoError(t, forward.SetWithTTL("ruleA:stat-key-a2", 421, ttl))
+	require.NoError(t, forward.SetWithTTL("ruleB:stat-key-b1", 421, ttl))
+	// occupancy 造数：渠道 A 键数 1（独占）、渠道 B 键数 3（复用）。
+	require.NoError(t, occupancyAddKeyFP(411, affinityFingerprint("stat-a1"), ttl))
+	require.NoError(t, occupancyAddKeyFP(421, affinityFingerprint("stat-b1"), ttl))
+	require.NoError(t, occupancyAddKeyFP(421, affinityFingerprint("stat-b2"), ttl))
+	require.NoError(t, occupancyAddKeyFP(421, affinityFingerprint("stat-b3"), ttl))
+
+	// 降级计数器为进程累计值（重启清零，SSOT 4.2.2）：置 5 造数，用例结束恢复。
+	degradedBefore := GetChannelAffinityDegradedReuseTotal()
+	atomic.StoreUint64(&channelAffinityDegradedReuseTotal, 5)
+	t.Cleanup(func() {
+		atomic.StoreUint64(&channelAffinityDegradedReuseTotal, degradedBefore)
+	})
+
+	stats := GetChannelAffinityCacheStats()
+	assert.Equal(t, 1, stats.ExclusiveBindings, "channel A with 1 key contributes 1 exclusive binding")
+	assert.Equal(t, 3, stats.SharedBindings, "channel B with 3 keys contributes 3 shared bindings")
+	assert.Equal(t, uint64(5), stats.DegradedReuseTotal)
+
+	// 原有字段无回归。
+	assert.Equal(t, 3, stats.Total)
+	assert.Equal(t, 0, stats.Unknown)
+	assert.Equal(t, map[string]int{"ruleA": 2, "ruleB": 1}, stats.ByRuleName)
+}
+
+// TestGetChannelAffinityExclusiveStats_CrossRuleChannelAggregation 口径全局性
+// （SSOT 4.2.4 规则1：不区分规则来源，按渠道全局口径）：同一渠道上来自不同规则的
+// 两个键（键数 2）记入 shared 而非按规则拆成两个独占。
+func TestGetChannelAffinityExclusiveStats_CrossRuleChannelAggregation(t *testing.T) {
+	useClearAffinityTest(t)
+	ttl := 10 * time.Second
+
+	require.NoError(t, occupancyAddKeyFP(431, affinityFingerprint("cross-rule-a"), ttl))
+	require.NoError(t, occupancyAddKeyFP(431, affinityFingerprint("cross-rule-b"), ttl))
+
+	exclusive, shared := GetChannelAffinityExclusiveStats()
+	assert.Equal(t, 0, exclusive)
+	assert.Equal(t, 2, shared)
 }

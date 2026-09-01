@@ -358,6 +358,33 @@ func GetChannelAffinityDegradedReuseTotal() uint64 {
 	return atomic.LoadUint64(&channelAffinityDegradedReuseTotal)
 }
 
+// GetChannelAffinityExclusiveStats 按反向占用索引实时统计独占/复用绑定键数
+// （SSOT 4.2.4 规则1）：遍历全部渠道条目，键数为 1 的渠道贡献 1 记独占、
+// 键数大于 1 的渠道贡献其键数记复用，不区分规则来源（渠道全局口径）。
+// 索引键遍历失败返回 (0, 0) 并记 SysError（03 文档 3.2 边界值：失败返回 0）。
+// 成员残留滞后窗口属设计内（04 文档 §4.1），不做成员级精确过期。
+func GetChannelAffinityExclusiveStats() (exclusive int, shared int) {
+	cache := getChannelAffinityOccupancyCache()
+	keys, err := cache.Keys()
+	if err != nil {
+		common.SysError(fmt.Sprintf("channel affinity occupancy list keys failed: err=%v", err))
+		return 0, 0
+	}
+	for _, k := range keys {
+		entry, found, err := cache.Get(k)
+		if err != nil || !found {
+			continue
+		}
+		n := len(entry.KeyFPs)
+		if n == 1 {
+			exclusive += 1
+		} else if n > 1 {
+			shared += n
+		}
+	}
+	return exclusive, shared
+}
+
 // channelAffinityBindLocks 为独占占位分段锁：按 cacheKeySuffix 哈希取锁，
 // 进程内串行化读-决策-写（内存模式先到先得；Redis 模式退化为本地收敛锁，
 // 跨实例原子性由 Lua/SetNX 保证，04 文档 §6.1）。
