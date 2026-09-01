@@ -804,12 +804,17 @@ func clearExclusiveRuntimeByForwardKeys(forwardKeys []string, boundChannels map[
 	}
 }
 
-// clearExclusiveRuntimeByRuleNamePrefix 按规则名前缀清空（开关切换路径，跳过
-// ClearChannelAffinityCacheByRuleName 的 include_rule_name 校验——开关切换清空
-// 对未启用 include_rule_name 的规则同样生效）：收集前缀下全部正向键并读出绑定
-// 渠道后 DeleteByPrefix，再回放清理 occupancy 与 lastBind（三批同清，SSOT 5.2.2
-// 第4条）。清空失败 SysError 不中断（保存以配置落库为准，03 文档 3.1 第3条）。
-func clearExclusiveRuntimeByRuleNamePrefix(ruleName string) {
+// clearExclusiveRuntimeByRuleNamePrefix 按规则名前缀清空正向缓存并回放清理
+// occupancy 与 lastBind（三批同清，SSOT 5.2.2 第4条）：DeleteByPrefix 前先收集
+// 该前缀下全部正向键并读出绑定渠道（渠道值必须在删除前读取：删除后无法再定位
+// 该键占用的渠道；boundChannels 的键与 clearExclusiveRuntimeByForwardKeys 的
+// suffix 同口径，full key 去正向命名空间前缀），DeleteByPrefix 失败重试一次
+//（SSOT 5.2.5），仍失败返回 error 且不回放（正向可能未删，回放会造成正反不一致，
+// 残留随 TTL 收敛）。调用方两种：ClearChannelAffinityCacheByRuleName 复用本路径
+// 并透传返回值（跳过其 include_rule_name 校验的开关切换路径同理，清空对未启用
+// include_rule_name 的规则同样生效）；HandleChannelAffinityRulesUpdate 对返回的
+// error 仅 SysError 不中断保存（保存以配置落库为准，03 文档 3.1 第3条）。
+func clearExclusiveRuntimeByRuleNamePrefix(ruleName string) (int, error) {
 	cache := getChannelAffinityCache()
 	fullPrefix := channelAffinityCacheNamespace + ":" + ruleName + ":"
 	ruleKeys := make([]string, 0)
@@ -828,13 +833,18 @@ func clearExclusiveRuntimeByRuleNamePrefix(ruleName string) {
 			}
 		}
 	}
+	var deleted int
 	if err := retryOnce(func() error {
-		_, err := cache.DeleteByPrefix(ruleName)
+		d, err := cache.DeleteByPrefix(ruleName)
+		if err == nil {
+			deleted = d
+		}
 		return err
 	}); err != nil {
-		common.SysError(fmt.Sprintf("channel affinity forward clear by rule failed: rule=%s err=%v", ruleName, err))
+		return 0, err
 	}
 	clearExclusiveRuntimeByForwardKeys(ruleKeys, boundChannels)
+	return deleted, nil
 }
 
 // HandleChannelAffinityRulesUpdate 规则数组保存后的开关联动清空入口
@@ -868,7 +878,10 @@ func HandleChannelAffinityRulesUpdate(oldRulesJSON string, newRulesJSON string) 
 			continue
 		}
 		if oldRule.IncludeRuleName {
-			clearExclusiveRuntimeByRuleNamePrefix(ruleName)
+			// 清空失败仅 SysError 不中断保存（保存以配置落库为准，03 文档 3.1 第3条）。
+			if _, err := clearExclusiveRuntimeByRuleNamePrefix(ruleName); err != nil {
+				common.SysError(fmt.Sprintf("channel affinity forward clear by rule failed: rule=%s err=%v", ruleName, err))
+			}
 			continue
 		}
 		if oldRule.IncludeModelName || oldRule.IncludeUsingGroup {
