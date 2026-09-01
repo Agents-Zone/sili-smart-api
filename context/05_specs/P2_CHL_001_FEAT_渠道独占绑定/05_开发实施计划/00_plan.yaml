@@ -12,7 +12,7 @@ sub_plans:
   - id: "02"
     name: "清空与审计"
     file: "02_清空与审计.md"
-    status: "pending"
+    status: "completed"
 
   - id: "03"
     name: "前端配置观测"
