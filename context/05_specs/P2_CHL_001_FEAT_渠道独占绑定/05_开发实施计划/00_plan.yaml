@@ -1,7 +1,7 @@
 feature_id: "P2_CHL_001_FEAT_渠道独占绑定"
 name: "渠道独占绑定"
 created_at: "2026-09-01"
-finalized: false
+finalized: true
 
 sub_plans:
   - id: "01"
