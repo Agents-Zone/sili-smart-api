@@ -303,6 +303,136 @@ func TestLastBindDeleteMissing(t *testing.T) {
 	require.NoError(t, lastBindDelete("rule-missing:key"))
 }
 
+// TestDecideExclusiveBinding 覆盖计划核心断言（表驱动，4 例）：
+// 有空闲+绑回、有空闲无记录、满载降级、空候选。
+func TestDecideExclusiveBinding(t *testing.T) {
+	firstPick := func(ids []int) int {
+		require.NotEmpty(t, ids)
+		return ids[0]
+	}
+
+	tests := []struct {
+		name             string
+		candidates       []int
+		occupancyCounts  map[int]int
+		lastBindChannelID int
+		lastBindValid    bool
+		pickWeighted     func([]int) int
+		want             channelAffinityBindDecision
+	}{
+		{
+			name:              "free_channel_rebinds_last_bind",
+			candidates:        []int{1, 2, 3},
+			occupancyCounts:   map[int]int{1: 0, 2: 1, 3: 0},
+			lastBindChannelID: 3,
+			lastBindValid:     true,
+			pickWeighted:      firstPick,
+			want:              channelAffinityBindDecision{ChannelID: 3, Mode: affinityBindModeExclusive},
+		},
+		{
+			name:            "free_channel_no_record_picks_weighted",
+			candidates:      []int{1, 2},
+			occupancyCounts: map[int]int{1: 1, 2: 0},
+			lastBindValid:   false,
+			pickWeighted:    firstPick,
+			want:            channelAffinityBindDecision{ChannelID: 2, Mode: affinityBindModeExclusive},
+		},
+		{
+			name:            "full_load_picks_fewest_shared",
+			candidates:      []int{1, 2, 3},
+			occupancyCounts: map[int]int{1: 3, 2: 1, 3: 2},
+			lastBindValid:   false,
+			pickWeighted:    firstPick,
+			want:            channelAffinityBindDecision{ChannelID: 2, Mode: affinityBindModeShared},
+		},
+		{
+			name:         "empty_candidates",
+			candidates:   []int{},
+			pickWeighted: firstPick,
+			want:         channelAffinityBindDecision{ChannelID: 0, Mode: ""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := decideExclusiveBinding(tt.candidates, tt.occupancyCounts, tt.lastBindChannelID, tt.lastBindValid, tt.pickWeighted)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestDecideExclusiveBinding_RebindChannelNotFree lastBind 记录的渠道已被其它键占用
+// （不在空闲集）时，忽略记录走正常独占选路（SSOT 5.1.4 规则4）。
+func TestDecideExclusiveBinding_RebindChannelNotFree(t *testing.T) {
+	got := decideExclusiveBinding(
+		[]int{1, 2},
+		map[int]int{1: 1, 2: 0},
+		1, true,
+		func(ids []int) int { return ids[0] },
+	)
+	assert.Equal(t, channelAffinityBindDecision{ChannelID: 2, Mode: affinityBindModeExclusive}, got)
+}
+
+// TestDecideExclusiveBinding_RebindChannelNotCandidate lastBind 记录的渠道已不在候选集
+// （渠道不可用）时，走正常独占选路（SSOT 5.1.4 规则4）。
+func TestDecideExclusiveBinding_RebindChannelNotCandidate(t *testing.T) {
+	got := decideExclusiveBinding(
+		[]int{1, 2},
+		map[int]int{1: 0, 2: 0},
+		99, true,
+		func(ids []int) int { return ids[0] },
+	)
+	assert.Equal(t, channelAffinityBindDecision{ChannelID: 1, Mode: affinityBindModeExclusive}, got)
+}
+
+// TestDecideExclusiveBinding_FullLoadTieBrokenByPick 满载时最少绑定数并列，
+// pickWeighted 在同层内选定（SSOT 5.1.4 规则3）。
+func TestDecideExclusiveBinding_FullLoadTieBrokenByPick(t *testing.T) {
+	got := decideExclusiveBinding(
+		[]int{1, 2, 3},
+		map[int]int{1: 2, 2: 1, 3: 1},
+		0, false,
+		func(ids []int) int {
+			require.Equal(t, []int{2, 3}, ids, "pickWeighted should receive the fewest-binding tier only")
+			return 3
+		},
+	)
+	assert.Equal(t, channelAffinityBindDecision{ChannelID: 3, Mode: affinityBindModeShared}, got)
+}
+
+// TestDecideExclusiveBinding_OwnBindingTreatedAsFree 本键既有绑定视为空闲：
+// 调用方已把本键登记的渠道键数减 1 后传入（SSOT 5.1.2 流程第2条），
+// occupancyCounts[id]==0 即空闲，决策函数不区分来源。
+func TestDecideExclusiveBinding_OwnBindingTreatedAsFree(t *testing.T) {
+	// 渠道 1 索引键数为 1，但那是本键自己的登记，调用方传入 0：空闲，绑回。
+	got := decideExclusiveBinding(
+		[]int{1},
+		map[int]int{1: 0},
+		1, true,
+		func(ids []int) int { return ids[0] },
+	)
+	assert.Equal(t, channelAffinityBindDecision{ChannelID: 1, Mode: affinityBindModeExclusive}, got)
+}
+
+// TestDecideExclusiveBinding_FullLoadAllOccupied 独占判定以渠道为单位全局生效：
+// occupancyCounts 覆盖全部键，候选渠道全部被占用（满载）即降级复用，
+// 即便只有一个候选渠道也走 shared（SSOT 5.1.4 规则1+规则3）。
+func TestDecideExclusiveBinding_FullLoadAllOccupied(t *testing.T) {
+	got := decideExclusiveBinding(
+		[]int{1},
+		map[int]int{1: 5},
+		1, true, // 记录渠道被占用，空闲集为空
+		func(ids []int) int { return ids[0] },
+	)
+	assert.Equal(t, channelAffinityBindDecision{ChannelID: 1, Mode: affinityBindModeShared}, got)
+}
+
+// TestAffinityBindModeConstants Mode 常量取值与计划契约一致。
+func TestAffinityBindModeConstants(t *testing.T) {
+	assert.Equal(t, "exclusive", affinityBindModeExclusive)
+	assert.Equal(t, "shared", affinityBindModeShared)
+}
+
 // useExclusiveRedisMode 将存储层切到 miniredis（Redis 模式），返回 server 供键断言。
 func useExclusiveRedisMode(t *testing.T) *miniredis.Miniredis {
 	t.Helper()

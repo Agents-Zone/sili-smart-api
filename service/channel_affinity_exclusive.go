@@ -18,6 +18,9 @@ const (
 	channelAffinityOccupancyNamespace = "new-api:channel_affinity_occupancy:v1"
 	channelAffinityLastBindNamespace  = "new-api:channel_affinity_last_bind:v1"
 
+	affinityBindModeExclusive = "exclusive"
+	affinityBindModeShared    = "shared"
+
 	exclusiveRedisOpTimeout = 2 * time.Second
 )
 
@@ -279,4 +282,61 @@ func occupancyAddKeyFPAtomic(channelID int, keyFP string, ttl time.Duration) err
 		return occupancyAddScript.Run(ctx, common.RDB, []string{fullKey}, keyFP, ttl.Milliseconds()).Err()
 	}
 	return occupancyAddKeyFP(channelID, keyFP, ttl)
+}
+
+// channelAffinityBindDecision 为独占绑定决策结果：选定渠道与绑定模式
+// （exclusive=独占空闲渠道，shared=满载复用降级，SSOT 5.1.2 第2条）。
+type channelAffinityBindDecision struct {
+	ChannelID int
+	Mode      string
+}
+
+// decideExclusiveBinding 为独占绑定决策纯函数（SSOT 5.1.2 第2条）：
+// 空闲集合 = candidates 中 occupancyCounts[id]==0 的渠道。调用方须把本键既有绑定
+// 从索引剔除后传入（对本键已登记的渠道键数减 1，本键既有绑定视为空闲）。
+//   - 空闲集非空且 lastBindValid 且记录渠道在空闲集内：绑回原渠道，Mode=exclusive
+//     （TTL 到期优先绑回，SSOT 5.1.4 规则4）
+//   - 空闲集非空无有效记录：pickWeighted 在空闲集内选定，Mode=exclusive
+//   - 空闲集为空（满载）：全部候选按 occupancyCounts 升序取最少绑定数层，
+//     Mode=shared（并列时 pickWeighted 在同层内选定，SSOT 5.1.4 规则3）
+//   - candidates 为空：返回 ChannelID=0
+//
+// pickWeighted 由调用方注入（现有加权随机逻辑或首个空闲渠道），保证本函数纯。
+func decideExclusiveBinding(candidates []int, occupancyCounts map[int]int, lastBindChannelID int, lastBindValid bool, pickWeighted func([]int) int) channelAffinityBindDecision {
+	if len(candidates) == 0 {
+		return channelAffinityBindDecision{}
+	}
+
+	free := make([]int, 0, len(candidates))
+	for _, id := range candidates {
+		if occupancyCounts[id] == 0 {
+			free = append(free, id)
+		}
+	}
+
+	if len(free) > 0 {
+		if lastBindValid {
+			for _, id := range free {
+				if id == lastBindChannelID {
+					return channelAffinityBindDecision{ChannelID: id, Mode: affinityBindModeExclusive}
+				}
+			}
+		}
+		return channelAffinityBindDecision{ChannelID: pickWeighted(free), Mode: affinityBindModeExclusive}
+	}
+
+	// 满载降级：最少绑定数优先，pickWeighted 在同层内选定。
+	fewest := make([]int, 0, len(candidates))
+	minCount := -1
+	for _, id := range candidates {
+		count := occupancyCounts[id]
+		if minCount == -1 || count < minCount {
+			minCount = count
+			fewest = fewest[:0]
+		}
+		if count == minCount {
+			fewest = append(fewest, id)
+		}
+	}
+	return channelAffinityBindDecision{ChannelID: pickWeighted(fewest), Mode: affinityBindModeShared}
 }
