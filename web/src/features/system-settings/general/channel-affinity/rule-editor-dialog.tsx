@@ -316,7 +316,7 @@ export function RuleEditorDialog(props: Props) {
           onCheckedChange={(v) => form.setValue('exclusive_bind', v)}
           label={t('Exclusive Bind')}
           description={t(
-            'When enabled, a channel is exclusively bound to a single affinity key; when all channels are occupied, the channel with the fewest bindings is reused'
+            'When enabled, a channel is exclusively bound to a single affinity key; when all available channels are occupied, the channel with the fewest bindings is reused'
           )}
         />
 

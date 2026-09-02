@@ -96,16 +96,14 @@ type ChannelAffinityRule struct {
 
 | 字段名 | 类型（MySQL）| 类型（PostgreSQL）| 类型（SQLite）| 必填 | 默认值 | 说明 |
 |--------|------|------|------|--------|--------|------|
-| id | BIGINT | BIGINT | INTEGER | 是 | GORM 生成 | 主键 |
-| key | VARCHAR(255) | VARCHAR(255) | TEXT | 是 | - | 配置键，本功能涉及值为 `channel_affinity_setting.rules` |
+| key | VARCHAR(255) | VARCHAR(255) | TEXT | 是 | - | 主键。配置键，本功能涉及值为 `channel_affinity_setting.rules` |
 | value | TEXT | TEXT | TEXT | 是 | - | 配置值，本功能为规则数组 JSON 字符串 |
 
 **索引说明：**
 
 | 索引名 | 类型 | 字段 | 用途 |
 |--------|------|------|------|
-| PRIMARY | PRIMARY KEY | id | 主键索引 |
-| idx_options_key（现状） | UNIQUE | key | 按键读写配置 |
+| PRIMARY | PRIMARY KEY | key | 按键读写配置 |
 
 **业务规则：**
 
@@ -152,7 +150,7 @@ type ChannelAffinityRule struct {
 | 统计 | 遍历全部条目，键数 1 计独占、大于 1 计复用 | SSOT 4.2.4 规则1 |
 | 登记/移除 | 集合成员增删，与正向绑定写入/清除同批 | SSOT 5.2.2 第1、2条 |
 
-Redis 模式下登记/移除经 Lua 脚本原子完成"读条目→增删成员→写回（SET PX 续期）"，与正向绑定的原子写入配合实现先到先得；条目值与内存模式同构（JSON 序列化的键指纹集合，经 cachex.JSONCodec 读写），保持与正向缓存同一 HybridCache 体系、三命名空间统一清空路径。内存回退模式用带分段锁的进程内 map[string]map[string]struct{} 实现（HybridCache 内存侧为条目级 SET/GET/DEL，成员进出在值内完成），单实例内串行化满足先到先得（SSOT 5.1.2 第2条末）。
+Redis 模式下**登记**经 Lua 脚本原子完成"读条目→增成员→写回（SET PX 续期）"（occupancyAddScript），与正向绑定的原子写入配合实现先到先得；**移除**（迁移/回滚/清空）为读条目→删成员→按剩余 TTL 写回的非原子读改写（移除操作幂等且方向为收敛，无并发正确性风险，残留随 TTL 过期）；条目值与内存模式同构（JSON 序列化的键指纹集合，经 cachex.JSONCodec 读写），保持与正向缓存同一 HybridCache 体系、三命名空间统一清空路径。内存回退模式用带分段锁的进程内 map[string]map[string]struct{} 实现（HybridCache 内存侧为条目级 SET/GET/DEL，成员进出在值内完成），单实例内串行化满足先到先得（SSOT 5.1.2 第2条末）。
 
 **业务规则：**
 
@@ -172,7 +170,7 @@ Redis 模式下登记/移除经 Lua 脚本原子完成"读条目→增删成员�
 | 维度 | 设计 | 说明 |
 |------|------|------|
 | 键 | 与正向亲和缓存键一致（规则作用域构成 + 亲和键，即正向键去掉正向命名空间前缀） | 与正向绑定一一对应，迁移/清除时按键同步 |
-| 值 | JSON：`{channel_id: int, bound_at: int64}`，经 `common.Marshal` 序列化 | channel_id 业务关联 channels.id，无外键；bound_at 为 Unix 秒级时间戳（`common.GetTimestamp()`） |
+| 值 | JSON：`{channel_id: int, bound_at: int64}`，经 cachex.JSONCodec（HybridCache 内建编解码，与正向缓存同体系）序列化 | channel_id 业务关联 channels.id，无外键；bound_at 为 Unix 秒级时间戳（`common.GetTimestamp()`） |
 | TTL | 正向绑定两个周期（2 × 规则 TTL） | 条目在正向绑定过期后再保留一个 TTL 周期，到期自动清除（SSOT 5.1.3、5.2.2 第3条） |
 
 **字段说明：**
@@ -218,7 +216,7 @@ Redis 模式下登记/移除经 Lua 脚本原子完成"读条目→增删成员�
 
 - 审计不改变请求正常响应与计费，仅追加日志信息（SSOT 5.3.4 规则1）
 - 写入失败静默跳过，记服务端错误日志（SSOT 5.3.5）
-- JSON 序列化经 `common.Marshal`（规则文件 §1.1）
+- JSON 序列化经消费日志 other 列现有链路（`common.MapToJsonStr`，规则文件 §1.1 的既有包装路径）
 
 ---
 
@@ -252,7 +250,7 @@ stateDiagram-v2
 | 部署形态 | 机制 | 语义保证 |
 |---------|------|---------|
 | 单实例（内存模式） | 按亲和键哈希分段锁（参考现有 channelAffinityUsageCacheStatsLocks 模式），绑定决策与占位写入临界区内串行 | 同键并发首次绑定，首个完成占位者生效，其余读胜者结果 |
-| 多实例（Redis 模式） | 反向索引集合操作与正向写入经 Lua 脚本原子执行 | 跨实例先到先得，占位写入原子生效 |
+| 多实例（Redis 模式） | 正向绑定写入与反向索引登记经 Lua 脚本/SetNX 原子执行（索引移除为幂等读改写，见 4.1） | 跨实例先到先得，占位写入原子生效 |
 
 ### 6.2 同批清理一致性（SSOT 5.2.4 规则2）
 
@@ -277,7 +275,7 @@ stateDiagram-v2
 |-------|------|
 | 新增表 | 无。运行时数据走 HybridCache，持久化仅扩展 options 行 JSON |
 | DDL 变更 | 无。SQLite / MySQL / PostgreSQL 零迁移成本 |
-| 主键策略 | 不涉及新表主键；options.id 沿用现状（规则文件 §1.2） |
+| 主键策略 | 不涉及新表主键；options 表以 key 为主键（现状，规则文件 §1.2） |
 | 公共字段 | 不涉及新表；运行时数据以 TTL 管理生命周期，记录内 bound_at 为 Unix 秒级时间戳（规则文件 §1.3、§1.7） |
 | 字段命名 | 新增 JSON 字段 exclusive_bind、channel_id、bound_at、key_fp 均为 snake_case（规则文件 §1.4） |
 | 字段类型约束 | 无 JSON 列类型（other 列为 TEXT 存序列化 JSON，经 common.Marshal 读写）；无外键约束，渠道关联走业务字段 channel_id（规则文件 §1.5） |
@@ -301,8 +299,8 @@ stateDiagram-v2
 
 ---
 
-**文档版本：** v1.2
-**最后更新：** 2026-09-01
+**文档版本：** v1.3
+**最后更新：** 2026-09-02
 **作者：** lixuetao
 
 **变更记录：**
@@ -312,3 +310,4 @@ stateDiagram-v2
 | v1.0 | 2026-08-31 | 初始版本 |
 | v1.1 | 2026-09-01 | 监理扫描修复：4.1 声明成员级过期滞后窗口设计边界；6.3 明确三命名空间容量独立持有；第 5 节状态机修正迁移边标签 |
 | v1.2 | 2026-09-01 | 监理扫描修复：4.1 Redis 模式实现表述从 SADD/SREM 集合命令改为 HybridCache JSON 条目 + Lua 原子读改写（与开发计划 T2 方案对齐） |
+| v1.3 | 2026-09-02 | 监理扫描修复（模式四）：3.1 存量字段说明订正为以 key 为主键、无 id 列与 idx_options_key（对齐 model/option.go 实际结构）；4.1/6.1 Redis 移除路径如实描述为幂等读改写（仅登记路径经 Lua）；4.2/4.3 序列化表述对齐实际实现（cachex.JSONCodec / common.MapToJsonStr） |
