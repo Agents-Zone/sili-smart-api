@@ -38,7 +38,6 @@ interface Props {
   target: {
     rule_name: string
     using_group: string
-    key_hint: string
     key_fp: string
   } | null
 }
@@ -95,8 +94,6 @@ export function CacheStatsDialog(props: Props) {
         key: t('Group'),
         value: (s.using_group || props.target?.using_group || '') as string,
       })
-    if (props.target?.key_hint)
-      data.push({ key: t('Key Summary'), value: props.target.key_hint })
     if (s.key_fp || props.target?.key_fp)
       data.push({
         key: t('Key Fingerprint'),

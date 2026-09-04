@@ -53,7 +53,6 @@ export async function clearRuleCache(
 export async function getAffinityUsageCache(params: {
   rule_name: string
   using_group: string
-  key_hint: string
   key_fp: string
 }): Promise<{ success: boolean; message?: string; data?: unknown }> {
   const res = await api.get('/api/log/channel_affinity_usage_cache', {

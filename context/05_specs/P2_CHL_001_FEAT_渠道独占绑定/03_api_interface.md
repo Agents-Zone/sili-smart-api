@@ -6,7 +6,7 @@
 |------|------|
 | Feature ID | P2_CHL_001_FEAT_渠道独占绑定 |
 | 模块前缀 | chl_affinity（复用现有渠道亲和性配置区，无新资源前缀） |
-| 文档版本 | v1.0 |
+| 文档版本 | v1.8 |
 | 创建日期 | 2026-08-31 |
 | 上游文档 | 01_功能需求规格说明书.md（SSOT）、AGENTS_DATABASE_API_RULE.md、context/03_architecture/architecture.md |
 
@@ -52,6 +52,7 @@
 | 2 | 查询亲和缓存统计（含独占指标） | GET | `/api/option/channel_affinity_cache` | 存量接口，响应体扩展 3 个字段 | SSOT 4.2（F-设置区统计行）、5.3.3 |
 | 3 | 清空亲和缓存 | DELETE | `/api/option/channel_affinity_cache` | 存量接口，清空范围扩展 | SSOT 5.2.2 第4条 |
 | 4 | 查询亲和键上游缓存命中统计 | GET | `/api/log/channel_affinity_usage_cache` | 无变更，列出以完整性 | 现状（SSOT 4.2 为另一弹窗，本功能不改） |
+| 5 | 读取选项配置（含 `channel_affinity_setting.rules` 初始值） | GET | `/api/option/` | 无变更，全站通用存量读取链路（前端设置页 defaultValues 加载），列出以完整性 | 现状（接口 1 保存值的读取侧） |
 
 ### 2.2 接口关系说明
 
@@ -302,8 +303,8 @@
 
 ---
 
-**文档版本：** v1.6
-**最后更新：** 2026-09-03
+**文档版本：** v1.8
+**最后更新：** 2026-09-04
 **作者：** lixuetao
 
 **变更记录：**
@@ -318,3 +319,4 @@
 | v1.5 | 2026-09-02 | 监理扫描修复（模式四）：3.4 参数清单订正为 rule_name/using_group/key_fp（对齐 controller 实际读取的查询参数，删 key_hint）；3.1 成功响应示例删去 data:null（实际响应无 data 键）；3.1 错误场景表经用户决策改为如实描述 value JSON 解析失败的现状行为（静默跳过内存更新、返回 success:true），删去未实现的 success:false 响应示例 |
 | v1.6 | 2026-09-03 | 代码评审修复（第二轮）：4.2 键指纹长度由 SHA1 前 8 位订正为前 16 位 hex（实现同步加长，SSOT 偏离 D5）；3.2 统计口径滞后窗口上界陈述订正（活跃渠道条目按登记续期、无固定上界）；第 6 节安全敏感数据同步指纹长度 |
 | v1.7 | 2026-09-04 | 监理扫描修复（模式四第二轮）：3.1 服务端处理逻辑第 2 条补记规则删除/改名后旧名残留的联动清空触发（v1.7 代码修复行为回写，对齐 SSOT v1.8）；3.1 value 字段说明补注源码 any 声明归一化落库的存量形态 |
+| v1.8 | 2026-09-04 | 监理扫描修复（模式四第三轮）：2.1 接口总表补列 GET /api/option/（全站通用存量读取链路，前端设置页 defaultValues 加载侧，列出以完整性）；同步清理前端 getAffinityUsageCache 残留的 key_hint 查询参数（v1.5 文档订正后前端未同步，本次代码侧一并移除） |
