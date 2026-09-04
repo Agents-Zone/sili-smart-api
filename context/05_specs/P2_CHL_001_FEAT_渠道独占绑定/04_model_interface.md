@@ -129,17 +129,17 @@ type ChannelAffinityRule struct {
 | 维度 | 设计 | 说明 |
 |------|------|------|
 | 键 | `{channel_id}`（渠道 ID 十进制字符串） | 以渠道为聚合维度 |
-| 值 | 键指纹集合（string set，元素为 affinityFingerprint 输出，SHA1 前 8 位 hex） | 索引不存原始键值，避免敏感信息扩散 [需求：SSOT 5.2.3] |
+| 值 | 键指纹集合（string set，元素为 affinityFingerprint 输出，SHA1 前 16 位 hex；Redis 模式条目值为 JSON 序列化对象 `{"key_fps": [...]}`，经 occupancyAddScript 内 cjson 编解码） | 索引不存原始键值，避免敏感信息扩散 [需求：SSOT 5.2.3] |
 | TTL | 与对应正向绑定一致（规则 TTL，缺省 DefaultTTLSeconds） | 条目内成员随正向绑定逐个登记，条目整体 TTL 按最近一次登记续期（SSOT 5.2.4 规则1） |
 
-**成员过期滞后窗口（设计内边界）：** 条目为渠道级整体 TTL，成员无独立过期。某键的正向绑定过期后，其指纹残留于渠道条目直至条目整体过期，滞后窗口最长一个 TTL。窗口内独占判定偏保守（渠道看似被占用，可能诱发不必要的满载降级复用），统计口径偏高。该滞后方向保守、随 TTL 自然收敛，与 SSOT 5.2.2 第3条的粗粒度过期取向一致，不做成员级精确过期。
+**成员过期滞后窗口（设计内边界）：** 条目为渠道级整体 TTL，成员无独立过期。某键的正向绑定过期后，其指纹残留于渠道条目直至条目整体过期。注意条目 TTL 按最近一次登记续期：持续有流量的活跃渠道上，残留成员的滞留无固定上界（其它成员的每次成功请求都会续期整条目），仅静默渠道上滞后窗口最长一个 TTL。窗口内独占判定偏保守（渠道看似被占用，可能诱发不必要的满载降级复用），统计口径偏高。该滞后方向保守，管理员按规则/整体清空可立即收敛，与 SSOT 5.2.2 第3条的粗粒度过期取向一致，不做成员级精确过期。
 
 **字段说明：**
 
 | 成员 | 类型 | 说明 |
 |------|------|------|
 | 渠道 ID（条目键） | string | 业务关联字段，指向 channels.id，无外键约束 |
-| 键指纹（集合元素） | string，8 位 hex | 亲和键哈希截断标识 [需求：SSOT 8.1 键指纹] |
+| 键指纹（集合元素） | string，16 位 hex | 亲和键哈希截断标识 [需求：SSOT 8.1 键指纹、偏离 D5] |
 
 **访问模式与索引说明（Redis 键设计）：**
 
@@ -150,7 +150,7 @@ type ChannelAffinityRule struct {
 | 统计 | 遍历全部条目，键数 1 计独占、大于 1 计复用 | SSOT 4.2.4 规则1 |
 | 登记/移除 | 集合成员增删，与正向绑定写入/清除同批 | SSOT 5.2.2 第1、2条 |
 
-Redis 模式下**登记**经 Lua 脚本原子完成"读条目→增成员→写回（SET PX 续期）"（occupancyAddScript），与正向绑定的原子写入配合实现先到先得；**移除**（迁移/回滚/清空）为读条目→删成员→按剩余 TTL 写回的非原子读改写（移除操作幂等且方向为收敛，无并发正确性风险，残留随 TTL 过期）；条目值与内存模式同构（JSON 序列化的键指纹集合，经 cachex.JSONCodec 读写），保持与正向缓存同一 HybridCache 体系、三命名空间统一清空路径。内存回退模式用带分段锁的进程内 map[string]map[string]struct{} 实现（HybridCache 内存侧为条目级 SET/GET/DEL，成员进出在值内完成），单实例内串行化满足先到先得（SSOT 5.1.2 第2条末）。
+Redis 模式下**登记**（acquire 胜者、RecordChannelAffinity 续期、迁移迁入等全部登记路径）经 Lua 脚本原子完成"读条目→增成员→写回（SET PX 续期）"（occupancyAddScript），与正向绑定的原子写入配合实现先到先得，且登记并发不再丢失其它实例的成员写入；**移除**（迁移/回滚/清空）为读条目→删成员→按剩余 TTL 写回的非原子读改写（移除操作幂等且方向为收敛，无并发正确性风险，残留随 TTL 过期）；条目值与内存模式同构（JSON 序列化的键指纹集合，经 cachex.JSONCodec 读写），保持与正向缓存同一 HybridCache 体系、三命名空间统一清空路径。内存回退模式用带分段锁的进程内 map[string]map[string]struct{} 实现（HybridCache 内存侧为条目级 SET/GET/DEL，成员进出在值内完成），单实例内串行化满足先到先得（SSOT 5.1.2 第2条末）。
 
 **业务规则：**
 
@@ -197,7 +197,7 @@ Redis 模式下**登记**经 Lua 脚本原子完成"读条目→增成员→写�
 ```json
 {
   "rule_name": "claude cli trace",
-  "key_fp": "a1b2c3d4",
+  "key_fp": "a1b2c3d4e5f60718",
   "channel_id": 42,
   "channel_binding_count": 3
 }
@@ -208,7 +208,7 @@ Redis 模式下**登记**经 Lua 脚本原子完成"读条目→增成员→写�
 | 字段名 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
 | rule_name | string | 是 | 触发降级的亲和规则名 [需求：SSOT 5.3.2 第1条] |
-| key_fp | string | 是 | 亲和键指纹（8 位 hex），不存原始键值 [需求：SSOT 5.3.3] |
+| key_fp | string | 是 | 亲和键指纹（16 位 hex），不存原始键值 [需求：SSOT 5.3.3，偏离 D5] |
 | channel_id | int | 是 | 降级复用目标渠道 ID，业务关联字段 [需求：SSOT 5.3.2 第1条] |
 | channel_binding_count | int | 是 | 该渠道降级发生时的绑定键数 [需求：SSOT 5.3.2 第1条] |
 
@@ -279,7 +279,7 @@ stateDiagram-v2
 | 公共字段 | 不涉及新表；运行时数据以 TTL 管理生命周期，记录内 bound_at 为 Unix 秒级时间戳（规则文件 §1.3、§1.7） |
 | 字段命名 | 新增 JSON 字段 exclusive_bind、channel_id、bound_at、key_fp 均为 snake_case（规则文件 §1.4） |
 | 字段类型约束 | 无 JSON 列类型（other 列为 TEXT 存序列化 JSON，经 common.Marshal 读写）；无外键约束，渠道关联走业务字段 channel_id（规则文件 §1.5） |
-| VARCHAR 长度 | 不涉及新增长字符串字段；key_fp 固定 8 位 hex（规则文件 §1.6） |
+| VARCHAR 长度 | 不涉及新增长字符串字段；key_fp 固定 16 位 hex（规则文件 §1.6，偏离 D5） |
 | 日期时间 | bound_at 为 int64 Unix 秒级时间戳，无 DATETIME 类字段（规则文件 §1.7） |
 | 字典数据 | 无字典字段，不生成字典 INSERT 语句（规则文件 §1.8） |
 | 表命名 | 无新表命名（规则文件 §1.9） |
@@ -311,3 +311,5 @@ stateDiagram-v2
 | v1.1 | 2026-09-01 | 监理扫描修复：4.1 声明成员级过期滞后窗口设计边界；6.3 明确三命名空间容量独立持有；第 5 节状态机修正迁移边标签 |
 | v1.2 | 2026-09-01 | 监理扫描修复：4.1 Redis 模式实现表述从 SADD/SREM 集合命令改为 HybridCache JSON 条目 + Lua 原子读改写（与开发计划 T2 方案对齐） |
 | v1.3 | 2026-09-02 | 监理扫描修复（模式四）：3.1 存量字段说明订正为以 key 为主键、无 id 列与 idx_options_key（对齐 model/option.go 实际结构）；4.1/6.1 Redis 移除路径如实描述为幂等读改写（仅登记路径经 Lua）；4.2/4.3 序列化表述对齐实际实现（cachex.JSONCodec / common.MapToJsonStr） |
+| v1.4 | 2026-09-03 | 代码评审修复（第二轮）：4.1 键指纹长度由 SHA1 前 8 位订正为前 16 位 hex（实现同步加长，SSOT 偏离 D5）；4.1 登记路径 Lua 原子化范围订正（全部登记路径经 occupancyAddScript，非仅 acquire 胜者路径）；4.1 成员过期滞后窗口上界陈述订正（活跃渠道条目 TTL 按登记续期、滞留无固定上界，静默渠道最长一个 TTL） |
+| v1.5 | 2026-09-03 | 监理扫描修复（模式四第二轮）：4.3 字段说明表、4.3 标记结构示例、第 7 节 VARCHAR 长度行三处 key_fp 位数补改为 16 位 hex（v1.4 遗漏，对齐偏离 D5 与源码 affinityFingerprint）；4.1 条目值补充 Redis 模式 JSON 结构键名 key_fps 的显式定义 |

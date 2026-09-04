@@ -3,6 +3,7 @@ package model
 import (
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -187,7 +188,16 @@ func InitOptionMap() {
 	loadOptionsFromDatabase()
 }
 
+// optionsLoadedFromDB 标记当前处于数据库加载阶段（启动首扫或周期同步）。
+// channel_affinity_setting.rules 的开关联动钩子在该阶段跳过：启动首扫时内存配置
+// 仍是内置默认，与库值比对会把"进程重启"误判为"开关变化"，错误触发独占运行时
+// 清空（多节点部署下即单节点重启清空全集群）。周期同步稳态 old==new 本就不触发；
+// 跨节点变更经保存节点的钩子执行，清空作用于共享 Redis，无需本节点重复联动。
+var optionsLoadedFromDB atomic.Bool
+
 func loadOptionsFromDatabase() {
+	optionsLoadedFromDB.Store(true)
+	defer optionsLoadedFromDB.Store(false)
 	options, _ := AllOption()
 	for _, option := range options {
 		err := updateOptionMap(option.Key, option.Value)
@@ -644,7 +654,9 @@ func handleConfigUpdate(key, value string) bool {
 		InvalidatePricingCache()
 		ratio_setting.InvalidateExposedDataCache()
 	} else if configName == "channel_affinity_setting" && configKey == "rules" {
-		if operation_setting.OnRulesExclusiveBindChanged != nil {
+		// 启动/周期同步的数据库加载阶段跳过联动：此时"旧值"是进程内置默认或
+		// 上一轮同步值，与库值比对不代表用户开关操作（误触发会清空独占运行时数据）。
+		if !optionsLoadedFromDB.Load() && operation_setting.OnRulesExclusiveBindChanged != nil {
 			operation_setting.OnRulesExclusiveBindChanged(oldAffinityRules, value)
 		}
 	}
@@ -652,8 +664,9 @@ func handleConfigUpdate(key, value string) bool {
 	return true // 已处理
 }
 
-// readChannelAffinityRulesJSON 反射导出配置对象当前 rules 字段并序列化为 JSON 串；
-// 类型断言失败时返回空串（联动入口按解析失败静默返回）。
+// readChannelAffinityRulesJSON 读配置对象当前 rules 字段并序列化为 JSON 串
+// （cfg 为 config.GlobalConfig.Get 返回的 interface{}，按具体类型断言取值）；
+// 类型不匹配时返回空串（联动入口按解析失败静默返回）。
 func readChannelAffinityRulesJSON(cfg interface{}) string {
 	if cfg == nil {
 		return ""

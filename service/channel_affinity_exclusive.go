@@ -78,72 +78,65 @@ redis.call('SET', KEYS[1], cjson.encode({key_fps = fps}), 'PX', ARGV[2])
 return 1
 `)
 
+// newAffinityStoreCache 为独占运行时命名空间构造 HybridCache：容量与默认 TTL
+// 取亲和设置，缺省回退 100_000 / 3600（与正向缓存 getter 的回退口径一致）。
+func newAffinityStoreCache[V any](namespace string, codec cachex.ValueCodec[V]) *cachex.HybridCache[V] {
+	setting := operation_setting.GetChannelAffinitySetting()
+	capacity := setting.MaxEntries
+	if capacity <= 0 {
+		capacity = 100_000
+	}
+	defaultTTLSeconds := setting.DefaultTTLSeconds
+	if defaultTTLSeconds <= 0 {
+		defaultTTLSeconds = 3600
+	}
+	return cachex.NewHybridCache[V](cachex.HybridCacheConfig[V]{
+		Namespace: cachex.Namespace(namespace),
+		// 实时解析 RDB：缓存单例可能在 Redis 初始化前（启动加载钩子路径）
+		// 构造，构造时捕获指针会把实例永久锁死在内存模式。
+		RedisClient: func() *redis.Client {
+			return common.RDB
+		},
+		RedisEnabled: func() bool {
+			return common.RedisEnabled && common.RDB != nil
+		},
+		RedisCodec: codec,
+		Memory: func() *hot.HotCache[string, V] {
+			return hot.NewHotCache[string, V](hot.LRU, capacity).
+				WithTTL(time.Duration(defaultTTLSeconds) * time.Second).
+				WithJanitor().
+				Build()
+		},
+	})
+}
+
 func getChannelAffinityOccupancyCache() *cachex.HybridCache[channelAffinityOccupancyEntry] {
 	channelAffinityOccupancyOnce.Do(func() {
-		setting := operation_setting.GetChannelAffinitySetting()
-		capacity := setting.MaxEntries
-		if capacity <= 0 {
-			capacity = 100_000
-		}
-		defaultTTLSeconds := setting.DefaultTTLSeconds
-		if defaultTTLSeconds <= 0 {
-			defaultTTLSeconds = 3600
-		}
-
-		channelAffinityOccupancyCache = cachex.NewHybridCache[channelAffinityOccupancyEntry](cachex.HybridCacheConfig[channelAffinityOccupancyEntry]{
-			Namespace: cachex.Namespace(channelAffinityOccupancyNamespace),
-			Redis:     common.RDB,
-			RedisEnabled: func() bool {
-				return common.RedisEnabled && common.RDB != nil
-			},
-			RedisCodec: cachex.JSONCodec[channelAffinityOccupancyEntry]{},
-			Memory: func() *hot.HotCache[string, channelAffinityOccupancyEntry] {
-				return hot.NewHotCache[string, channelAffinityOccupancyEntry](hot.LRU, capacity).
-					WithTTL(time.Duration(defaultTTLSeconds) * time.Second).
-					WithJanitor().
-					Build()
-			},
-		})
+		channelAffinityOccupancyCache = newAffinityStoreCache(channelAffinityOccupancyNamespace, cachex.JSONCodec[channelAffinityOccupancyEntry]{})
 	})
 	return channelAffinityOccupancyCache
 }
 
 func getChannelAffinityLastBindCache() *cachex.HybridCache[channelAffinityLastBindRecord] {
 	channelAffinityLastBindOnce.Do(func() {
-		setting := operation_setting.GetChannelAffinitySetting()
-		capacity := setting.MaxEntries
-		if capacity <= 0 {
-			capacity = 100_000
-		}
-		defaultTTLSeconds := setting.DefaultTTLSeconds
-		if defaultTTLSeconds <= 0 {
-			defaultTTLSeconds = 3600
-		}
-
-		channelAffinityLastBindCache = cachex.NewHybridCache[channelAffinityLastBindRecord](cachex.HybridCacheConfig[channelAffinityLastBindRecord]{
-			Namespace: cachex.Namespace(channelAffinityLastBindNamespace),
-			Redis:     common.RDB,
-			RedisEnabled: func() bool {
-				return common.RedisEnabled && common.RDB != nil
-			},
-			RedisCodec: cachex.JSONCodec[channelAffinityLastBindRecord]{},
-			Memory: func() *hot.HotCache[string, channelAffinityLastBindRecord] {
-				return hot.NewHotCache[string, channelAffinityLastBindRecord](hot.LRU, capacity).
-					WithTTL(time.Duration(defaultTTLSeconds) * time.Second).
-					WithJanitor().
-					Build()
-			},
-		})
+		channelAffinityLastBindCache = newAffinityStoreCache(channelAffinityLastBindNamespace, cachex.JSONCodec[channelAffinityLastBindRecord]{})
 	})
 	return channelAffinityLastBindCache
 }
 
 // occupancyAddKeyFP 向渠道条目登记键指纹：条目缺失则新建，已含该指纹则仅续期整条目，
 // 否则追加后按本次 TTL 写回（条目整体 TTL 按最近一次登记续期，04 文档 §4.1）。
-// 读改写失败返回 error 由调用方降级（SSOT 5.1.5）；内存模式的进程内原子性由 T4 分段锁保证。
+// Redis 模式经 occupancyAddScript 原子执行读改写（登记路径无分段锁覆盖，非原子
+// GET→SET 在并发下会丢失其它实例的成员写入）；内存模式由 T4 分段锁保证进程内原子性。
+// 读改写失败返回 error 由调用方降级（SSOT 5.1.5）。
 func occupancyAddKeyFP(channelID int, keyFP string, ttl time.Duration) error {
 	cache := getChannelAffinityOccupancyCache()
 	key := strconv.Itoa(channelID)
+	if redisMode := common.RedisEnabled && common.RDB != nil; redisMode {
+		ctx, cancel := context.WithTimeout(context.Background(), exclusiveRedisOpTimeout)
+		defer cancel()
+		return occupancyAddScript.Run(ctx, common.RDB, []string{cache.FullKey(key)}, keyFP, ttl.Milliseconds()).Err()
+	}
 	entry, found, err := cache.Get(key)
 	if err != nil {
 		return fmt.Errorf("channel affinity occupancy read failed: channel=%d err=%w", channelID, err)
@@ -303,12 +296,12 @@ type channelAffinityBindDecision struct {
 // 从索引剔除后传入（对本键已登记的渠道键数减 1，本键既有绑定视为空闲）。
 //   - 空闲集非空且 lastBindValid 且记录渠道在空闲集内：绑回原渠道，Mode=exclusive
 //     （TTL 到期优先绑回，SSOT 5.1.4 规则4）
-//   - 空闲集非空无有效记录：pickWeighted 在空闲集内选定，Mode=exclusive
+//   - 空闲集非空无有效记录：选定函数在空闲集内选定，Mode=exclusive
 //   - 空闲集为空（满载）：全部候选按 occupancyCounts 升序取最少绑定数层，
-//     Mode=shared（并列时 pickWeighted 在同层内选定，SSOT 5.1.4 规则3）
+//     Mode=shared（并列时选定函数在同层内选定，SSOT 5.1.4 规则3）
 //   - candidates 为空：返回 ChannelID=0
 //
-// pickWeighted 由调用方注入（现有加权随机逻辑或首个空闲渠道），保证本函数纯。
+// 选定函数由调用方注入（现有实现的均匀随机，偏离记录 SSOT 8.3 D1），保证本函数纯。
 func decideExclusiveBinding(candidates []int, occupancyCounts map[int]int, lastBindChannelID int, lastBindValid bool, pickWeighted func([]int) int) channelAffinityBindDecision {
 	if len(candidates) == 0 {
 		return channelAffinityBindDecision{}
@@ -332,7 +325,7 @@ func decideExclusiveBinding(candidates []int, occupancyCounts map[int]int, lastB
 		return channelAffinityBindDecision{ChannelID: pickWeighted(free), Mode: affinityBindModeExclusive}
 	}
 
-	// 满载降级：最少绑定数优先，pickWeighted 在同层内选定。
+	// 满载降级：最少绑定数优先，选定函数在同层内选定。
 	fewest := make([]int, 0, len(candidates))
 	minCount := -1
 	for _, id := range candidates {
@@ -401,7 +394,7 @@ func channelAffinityBindLock(cacheKeySuffix string) *sync.Mutex {
 func exclusiveAffinityTTL(meta channelAffinityMeta) time.Duration {
 	seconds := meta.TTLSeconds
 	if seconds <= 0 {
-		if setting := operation_setting.GetChannelAffinitySetting(); setting != nil && setting.DefaultTTLSeconds > 0 {
+		if setting := operation_setting.GetChannelAffinitySetting(); setting != nil {
 			seconds = setting.DefaultTTLSeconds
 		}
 	}
@@ -411,9 +404,9 @@ func exclusiveAffinityTTL(meta channelAffinityMeta) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// exclusivePickWeighted 为 decideExclusiveBinding 注入的选定函数：候选集内等权随机
-// （现有选路为加权随机，独占空闲集无权重维度，按均匀随机在集内选定）。
-func exclusivePickWeighted(ids []int) int {
+// exclusivePickRandom 为 decideExclusiveBinding 注入的选定函数：候选集内均匀随机
+// （现有选路为加权随机，独占空闲集无权重维度，偏离记录见 SSOT 8.3 D1）。
+func exclusivePickRandom(ids []int) int {
 	if len(ids) == 0 {
 		return 0
 	}
@@ -453,8 +446,9 @@ func exclusiveCandidateChannels(c *gin.Context, meta channelAffinityMeta, usingG
 // acquireExclusiveBinding 在亲和 miss 且规则启用独占时完成绑定决策与原子占位
 // （SSOT 5.1.2 第2条）：读反向占用索引构造各候选渠道键数（本键既有绑定视为空闲，
 // 对本键已登记的渠道键数减 1），分段锁内 double-check 正向缓存后决策并写三处
-// （正向绑定、占用索引、最近绑定记录）。索引读写任一失败时降级软亲和返回 (0, false)
-// （SSOT 5.1.5）；锁内 double-check 命中即读胜者结果使用同一渠道（SSOT 5.1.5）。
+// （正向绑定、占用索引、最近绑定记录）。索引读写任一失败时回滚本次已写入的
+// 占位并降级软亲和返回 (0, false)（SSOT 5.1.5）；锁内 double-check 命中即读
+// 胜者结果使用同一渠道（SSOT 5.1.5）。
 func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGroup string, modelName string) (int, bool) {
 	// 键指纹为空属提取异常：无法登记索引，直接降级软亲和，不阻塞请求（SSOT 5.1.5）。
 	if meta.KeyFingerprint == "" {
@@ -502,10 +496,15 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 
 	// 锁内 double-check：胜者已写入正向绑定则直接读其结果（竞争失败语义，SSOT 5.1.5）。
 	if winnerID, found, err := cache.Get(cacheKeySuffix); err == nil && found && winnerID > 0 {
+		// 竞争失败同样记胜者渠道为首次占位渠道：该键重试切换成功时旧渠道索引
+		// 才能正确迁移移除（缺标记时 old=0，旧渠道占位残留至 TTL）。
+		if c != nil {
+			c.Set(ginKeyChannelAffinityBoundChannel, winnerID)
+		}
 		return winnerID, true
 	}
 
-	decision := decideExclusiveBinding(candidates, occupancyCounts, lastBindRecord.ChannelID, lastBindFound, exclusivePickWeighted)
+	decision := decideExclusiveBinding(candidates, occupancyCounts, lastBindRecord.ChannelID, lastBindFound, exclusivePickRandom)
 	if decision.ChannelID <= 0 {
 		return 0, false
 	}
@@ -522,11 +521,15 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 		}
 		if !ok {
 			// 跨实例竞争失败：读胜者结果使用同一渠道（SSOT 5.1.5），与内存模式锁内
-			// double-check 语义一致：跳过降级计数、不设首次占位标记（占位三写由胜者完成）。
+			// double-check 语义一致：跳过降级计数、不重复占位三写（占位三写由胜者完成）。
 			winnerID, found, err := cache.Get(cacheKeySuffix)
 			if err != nil || !found || winnerID <= 0 {
 				common.SysError(fmt.Sprintf("channel affinity exclusive loser confirm failed: channel=%d key_fp=%s found=%v err=%v", decision.ChannelID, meta.KeyFingerprint, found, err))
 				return 0, false
+			}
+			// 同上：竞争失败记胜者渠道为首次占位渠道，供迁移移除与终态回滚使用。
+			if c != nil {
+				c.Set(ginKeyChannelAffinityBoundChannel, winnerID)
 			}
 			return winnerID, true
 		}
@@ -539,32 +542,41 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 	}
 
 	// 胜者收尾：登记反向占用索引与最近绑定记录（正向绑定已写入）。
+	// 任一步失败即回滚正向绑定后降级软亲和：残留孤儿正向绑定无占位三写配套
+	// （终态失败时无 boundChannel 标记可回滚），按独占未生效处理（SSOT 5.1.5），
+	// 清除失败记 SysError，残留随 TTL 过期。
 	if err := occupancyAddKeyFPAtomic(decision.ChannelID, meta.KeyFingerprint, ttl); err != nil {
 		common.SysError(fmt.Sprintf("channel affinity occupancy register failed: channel=%d key_fp=%s err=%v", decision.ChannelID, meta.KeyFingerprint, err))
+		rollbackBindingPlacement(cache.FullKey(cacheKeySuffix), meta.KeyFingerprint, decision.ChannelID)
 		return 0, false
 	}
 	if err := lastBindSet(cacheKeySuffix, decision.ChannelID, 2*ttl); err != nil {
 		common.SysError(fmt.Sprintf("channel affinity last bind write failed: channel=%d key_fp=%s err=%v", decision.ChannelID, meta.KeyFingerprint, err))
+		rollbackBindingPlacement(cache.FullKey(cacheKeySuffix), meta.KeyFingerprint, decision.ChannelID)
 		return 0, false
 	}
 
-	// 占位完成后读回正向缓存确认胜者结果。
+	// 占位完成后读回正向缓存确认胜者结果。读回失败同样回滚：三处占位已全部写入，
+	// 若放行降级软亲和，请求成功后 RecordChannelAffinity 会以 old=0 在另一渠道
+	// 重复登记同一指纹，双渠道占位污染独占判定与统计（SSOT 5.1.5 任一步失败即回滚）。
 	winnerID, found, err := cache.Get(cacheKeySuffix)
 	if err != nil || !found || winnerID <= 0 {
 		common.SysError(fmt.Sprintf("channel affinity exclusive winner confirm failed: channel=%d key_fp=%s found=%v err=%v", decision.ChannelID, meta.KeyFingerprint, found, err))
+		rollbackBindingPlacement(cache.FullKey(cacheKeySuffix), meta.KeyFingerprint, decision.ChannelID)
 		return 0, false
 	}
 
 	if decision.Mode == affinityBindModeShared {
 		// 满载降级：计数器原子加 1，gin context 写降级标记（04 文档 §4.3 结构，
 		// 供 MarkChannelAffinityUsed 合并进 admin_info），同步输出与请求关联的
-		// LogWarn（SSOT 5.3.2 第1、2条）。
+		// LogWarn（SSOT 5.3.2 第1、2条）。nil context 下仅计数与日志（logHelper
+		// 的 ctx.Value 在 nil *gin.Context 上会 panic，与下方 c==nil 守卫同口径）。
 		atomic.AddUint64(&channelAffinityDegradedReuseTotal, 1)
 		bindingCount := occupancyCounts[winnerID]
-		logger.LogWarn(c, fmt.Sprintf(
-			"channel affinity exclusive degrade to shared reuse: rule=%s key_fp=%s channel=%d channel_binding_count=%d",
-			meta.RuleName, meta.KeyFingerprint, winnerID, bindingCount))
 		if c != nil {
+			logger.LogWarn(c, fmt.Sprintf(
+				"channel affinity exclusive degrade to shared reuse: rule=%s key_fp=%s channel=%d channel_binding_count=%d",
+				meta.RuleName, meta.KeyFingerprint, winnerID, bindingCount))
 			c.Set(ginKeyChannelAffinityExclusiveDegrade, map[string]interface{}{
 				"rule_name":             meta.RuleName,
 				"key_fp":                meta.KeyFingerprint,
@@ -583,12 +595,13 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 }
 
 // registerBindingIndexes 绑定登记/迁移索引同步（SSOT 5.2.2 第1、2条）：
-// oldChannelID>0 为失败切换迁移场景，先从旧渠道条目移除该键；随后登记新渠道条目
-// （同 TTL），并写入最近绑定记录（两周期）。迁入豁免独占判定：直接登记，
-// 不检查新渠道占用（SSOT 5.1.2 第4条）。任一步失败记 SysError（含渠道与键指纹），
-// 不影响请求，残留随 TTL 过期（SSOT 5.1.5）。
+// oldChannelID>0 且不等于新渠道为失败切换迁移场景，先从旧渠道条目移除该键；随后
+// 登记新渠道条目（同 TTL），并写入最近绑定记录（两周期）。old==new（亲和命中续期）
+// 直接走登记续期，跳过移除：先删后加会在同渠道制造无锁空闲窗口，并发独占 miss
+// 可借此误占。迁入豁免独占判定：直接登记，不检查新渠道占用（SSOT 5.1.2 第4条）。
+// 任一步失败记 SysError（含渠道与键指纹），不影响请求，残留随 TTL 过期（SSOT 5.1.5）。
 func registerBindingIndexes(cacheKeySuffix string, keyFP string, oldChannelID int, newChannelID int, ttl time.Duration) {
-	if oldChannelID > 0 {
+	if oldChannelID > 0 && oldChannelID != newChannelID {
 		if err := occupancyRemoveKeyFP(oldChannelID, keyFP); err != nil {
 			common.SysError(fmt.Sprintf("channel affinity occupancy migrate remove failed: channel=%d key_fp=%s err=%v", oldChannelID, keyFP, err))
 		}
@@ -620,7 +633,9 @@ func rollbackBindingPlacement(cacheKey string, keyFP string, channelID int) {
 // RollbackChannelAffinityOnFinalFailure 终态失败回滚入口（导出供 controller 调用，
 // SSOT 5.1.2 第4条末）：无 affinity meta 直接返回；终态失败必然未发生成功切换
 // （成功回写仅走 RecordChannelAffinity），一律回滚首次占位渠道三处，避免失败
-// 占位把亲和键钉在失败渠道上直至 TTL 到期。
+// 占位把亲和键钉在失败渠道上直至 TTL 到期。回滚后在 gin context 标记终态失败，
+// 供 RecordChannelAffinity 跳过重建（错误经 status_code_mapping 映射为 2xx 或
+// WS 已升级 101 时，distributor 的 status<400 判定无法识别失败）。
 func RollbackChannelAffinityOnFinalFailure(c *gin.Context) {
 	if c == nil {
 		return
@@ -629,6 +644,7 @@ func RollbackChannelAffinityOnFinalFailure(c *gin.Context) {
 	if !ok {
 		return
 	}
+	c.Set(ginKeyChannelAffinityFinalFailure, true)
 	boundChannel := 0
 	if v, exists := c.Get(ginKeyChannelAffinityBoundChannel); exists {
 		if id, valid := v.(int); valid {
@@ -809,7 +825,7 @@ func clearExclusiveRuntimeByForwardKeys(forwardKeys []string, boundChannels map[
 // 该前缀下全部正向键并读出绑定渠道（渠道值必须在删除前读取：删除后无法再定位
 // 该键占用的渠道；boundChannels 的键与 clearExclusiveRuntimeByForwardKeys 的
 // suffix 同口径，full key 去正向命名空间前缀），DeleteByPrefix 失败重试一次
-//（SSOT 5.2.5），仍失败返回 error 且不回放（正向可能未删，回放会造成正反不一致，
+// （SSOT 5.2.5），仍失败返回 error 且不回放（正向可能未删，回放会造成正反不一致，
 // 残留随 TTL 收敛）。调用方两种：ClearChannelAffinityCacheByRuleName 复用本路径
 // 并透传返回值（跳过其 include_rule_name 校验的开关切换路径同理，清空对未启用
 // include_rule_name 的规则同样生效）；HandleChannelAffinityRulesUpdate 对返回的
@@ -874,7 +890,13 @@ func HandleChannelAffinityRulesUpdate(oldRulesJSON string, newRulesJSON string) 
 			continue
 		}
 		newExclusive, ok := newByName[ruleName]
-		if !ok || newExclusive == oldRule.ExclusiveBind {
+		if ok && newExclusive == oldRule.ExclusiveBind {
+			continue
+		}
+		// 规则被删除（!ok）或改名后旧名残留：与开关切换同样按旧规则清空，
+		// 避免已删规则的键继续占用渠道至 TTL（改名场景旧前缀残留会双计占用）。
+		if !ok && !oldRule.ExclusiveBind {
+			// 旧规则本就未启用独占：无独占语义数据需要联动，跳过。
 			continue
 		}
 		if oldRule.IncludeRuleName {

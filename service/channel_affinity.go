@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/samber/hot"
 	"github.com/tidwall/gjson"
 )
@@ -27,6 +28,7 @@ const (
 	ginKeyChannelAffinitySkipRetry        = "channel_affinity_skip_retry_on_failure"
 	ginKeyChannelAffinityExclusiveDegrade = "channel_affinity_exclusive_degrade"
 	ginKeyChannelAffinityBoundChannel     = "channel_affinity_bound_channel"
+	ginKeyChannelAffinityFinalFailure     = "channel_affinity_final_failure"
 
 	channelAffinityCacheNamespace           = "new-api:channel_affinity:v1"
 	channelAffinityUsageCacheStatsNamespace = "new-api:channel_affinity_usage_cache_stats:v1"
@@ -101,7 +103,10 @@ func getChannelAffinityCache() *cachex.HybridCache[int] {
 
 		channelAffinityCache = cachex.NewHybridCache[int](cachex.HybridCacheConfig[int]{
 			Namespace: cachex.Namespace(channelAffinityCacheNamespace),
-			Redis:     common.RDB,
+			// 实时解析 RDB：避免构造时捕获指针把单例锁死在构造时点的模式。
+			RedisClient: func() *redis.Client {
+				return common.RDB
+			},
 			RedisEnabled: func() bool {
 				return common.RedisEnabled && common.RDB != nil
 			},
@@ -429,8 +434,10 @@ func affinityFingerprint(s string) string {
 		return ""
 	}
 	hex := common.Sha1([]byte(s))
-	if len(hex) >= 8 {
-		return hex[:8]
+	// 截断 16 位 hex（64bit）：10 万键容量下 32bit 生日碰撞近乎必然（约 6.5 万键
+	// 即 50%），碰撞会跨键误判占用与误删成员；64bit 下同容量碰撞概率可忽略。
+	if len(hex) >= 16 {
+		return hex[:16]
 	}
 	return hex
 }
@@ -759,12 +766,27 @@ func AppendChannelAffinityAdminInfo(c *gin.Context, adminInfo map[string]interfa
 	adminInfo["channel_affinity"] = anyInfo
 }
 
+// channelAffinityFinalFailed 报告本请求是否已执行终态失败回滚（controller 出口
+// 调用 RollbackChannelAffinityOnFinalFailure 后置位）。置位后 distributor 仍可能
+// 因 2xx 状态码映射误判成功并调用 RecordChannelAffinity，此处据此跳过重建。
+func channelAffinityFinalFailed(c *gin.Context) bool {
+	v, ok := c.Get(ginKeyChannelAffinityFinalFailure)
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
 func RecordChannelAffinity(c *gin.Context, channelID int) {
 	if channelID <= 0 {
 		return
 	}
 	setting := operation_setting.GetChannelAffinitySetting()
 	if setting == nil || !setting.Enabled {
+		return
+	}
+	if c != nil && channelAffinityFinalFailed(c) {
 		return
 	}
 	if setting.SwitchOnSuccess && c != nil {
@@ -1044,7 +1066,9 @@ func getChannelAffinityUsageCacheStatsCache() *cachex.HybridCache[ChannelAffinit
 
 		channelAffinityUsageCacheStatsCache = cachex.NewHybridCache[ChannelAffinityUsageCacheCounters](cachex.HybridCacheConfig[ChannelAffinityUsageCacheCounters]{
 			Namespace: cachex.Namespace(channelAffinityUsageCacheStatsNamespace),
-			Redis:     common.RDB,
+			RedisClient: func() *redis.Client {
+				return common.RDB
+			},
 			RedisEnabled: func() bool {
 				return common.RedisEnabled && common.RDB != nil
 			},

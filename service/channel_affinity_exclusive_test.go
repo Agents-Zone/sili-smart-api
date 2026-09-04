@@ -243,11 +243,6 @@ func TestOccupancyAddKeyFPAtomicMemoryMode(t *testing.T) {
 	assert.ElementsMatch(t, []string{"a1b2c3d4"}, fps)
 }
 
-// TestOccupancyAddScriptRegistered Lua 脚本常量已注册（Redis 模式原子登记用）。
-func TestOccupancyAddScriptRegistered(t *testing.T) {
-	require.NotNil(t, occupancyAddScript)
-}
-
 // TestLastBindRoundTrip 覆盖计划核心断言：set/get/delete 往返。
 func TestLastBindRoundTrip(t *testing.T) {
 	useExclusiveMemoryMode(t)
@@ -303,7 +298,6 @@ func TestLastBindKeysIndependentOfOccupancy(t *testing.T) {
 
 	cache := getChannelAffinityLastBindCache()
 	assert.Equal(t, channelAffinityLastBindNamespace+":rule1:fp1", cache.FullKey("rule1:fp1"))
-	assert.NotEqual(t, channelAffinityOccupancyNamespace, channelAffinityLastBindNamespace)
 }
 
 // TestLastBindDeleteMissing 删除不存在的键不报错（幂等删除）。
@@ -327,7 +321,7 @@ func TestDecideExclusiveBinding(t *testing.T) {
 		occupancyCounts   map[int]int
 		lastBindChannelID int
 		lastBindValid     bool
-		pickWeighted      func([]int) int
+		pickFn            func([]int) int
 		want              channelAffinityBindDecision
 	}{
 		{
@@ -336,7 +330,7 @@ func TestDecideExclusiveBinding(t *testing.T) {
 			occupancyCounts:   map[int]int{1: 0, 2: 1, 3: 0},
 			lastBindChannelID: 3,
 			lastBindValid:     true,
-			pickWeighted:      firstPick,
+			pickFn:            firstPick,
 			want:              channelAffinityBindDecision{ChannelID: 3, Mode: affinityBindModeExclusive},
 		},
 		{
@@ -344,7 +338,7 @@ func TestDecideExclusiveBinding(t *testing.T) {
 			candidates:      []int{1, 2},
 			occupancyCounts: map[int]int{1: 1, 2: 0},
 			lastBindValid:   false,
-			pickWeighted:    firstPick,
+			pickFn:          firstPick,
 			want:            channelAffinityBindDecision{ChannelID: 2, Mode: affinityBindModeExclusive},
 		},
 		{
@@ -352,20 +346,20 @@ func TestDecideExclusiveBinding(t *testing.T) {
 			candidates:      []int{1, 2, 3},
 			occupancyCounts: map[int]int{1: 3, 2: 1, 3: 2},
 			lastBindValid:   false,
-			pickWeighted:    firstPick,
+			pickFn:          firstPick,
 			want:            channelAffinityBindDecision{ChannelID: 2, Mode: affinityBindModeShared},
 		},
 		{
-			name:         "empty_candidates",
-			candidates:   []int{},
-			pickWeighted: firstPick,
-			want:         channelAffinityBindDecision{ChannelID: 0, Mode: ""},
+			name:       "empty_candidates",
+			candidates: []int{},
+			pickFn:     firstPick,
+			want:       channelAffinityBindDecision{ChannelID: 0, Mode: ""},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := decideExclusiveBinding(tt.candidates, tt.occupancyCounts, tt.lastBindChannelID, tt.lastBindValid, tt.pickWeighted)
+			got := decideExclusiveBinding(tt.candidates, tt.occupancyCounts, tt.lastBindChannelID, tt.lastBindValid, tt.pickFn)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -396,14 +390,14 @@ func TestDecideExclusiveBinding_RebindChannelNotCandidate(t *testing.T) {
 }
 
 // TestDecideExclusiveBinding_FullLoadTieBrokenByPick 满载时最少绑定数并列，
-// pickWeighted 在同层内选定（SSOT 5.1.4 规则3）。
+// pickFn 在同层内选定（SSOT 5.1.4 规则3）。
 func TestDecideExclusiveBinding_FullLoadTieBrokenByPick(t *testing.T) {
 	got := decideExclusiveBinding(
 		[]int{1, 2, 3},
 		map[int]int{1: 2, 2: 1, 3: 1},
 		0, false,
 		func(ids []int) int {
-			require.Equal(t, []int{2, 3}, ids, "pickWeighted should receive the fewest-binding tier only")
+			require.Equal(t, []int{2, 3}, ids, "pickFn should receive the fewest-binding tier only")
 			return 3
 		},
 	)
@@ -1183,4 +1177,85 @@ func TestRecordChannelAffinityDisabled(t *testing.T) {
 	_, found, err := lastBindGet(suffix)
 	require.NoError(t, err)
 	assert.False(t, found)
+}
+
+// TestRecordChannelAffinitySkippedAfterFinalFailure 终态失败回滚后，distributor 仍
+// 因 2xx 状态码映射误判成功调用 RecordChannelAffinity 时必须跳过（否则回滚的占位
+// 被重建，失败绑定钉在渠道上直至 TTL）。
+func TestRecordChannelAffinitySkippedAfterFinalFailure(t *testing.T) {
+	suffix := fmt.Sprintf("final-failed-record:default:fp-%d", time.Now().UnixNano())
+	meta := recordAffinityMeta("fp1a2b3c4", suffix)
+	ctx := buildRecordAffinityContext(t, meta, 501)
+	ctx.Set("channel_id", 501)
+	setupRecordAffinityTest(t)
+	cleanupForwardAndLastBind(t, suffix)
+
+	RollbackChannelAffinityOnFinalFailure(ctx)
+	RecordChannelAffinity(ctx, 501)
+
+	count, _, err := occupancyBindingCount(501)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "record must not rebuild rolled-back placement")
+
+	_, found, err := getChannelAffinityCache().Get(suffix)
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+// TestRecordChannelAffinitySameChannelSkipsRemove 亲和命中续期（old==new）时跳过
+// 旧渠道移除：先删后加会在同渠道制造无锁空闲窗口，并发独占 miss 可借此误占。
+func TestRecordChannelAffinitySameChannelSkipsRemove(t *testing.T) {
+	suffix := fmt.Sprintf("same-channel:default:fp-%d", time.Now().UnixNano())
+	meta := recordAffinityMeta("fp1a2b3c4", suffix)
+	ctx := buildRecordAffinityContext(t, meta, 501)
+	ctx.Set("channel_id", 501)
+	setupRecordAffinityTest(t)
+	cleanupForwardAndLastBind(t, suffix)
+
+	require.NoError(t, occupancyAddKeyFP(501, "fp1a2b3c4", 10*time.Second))
+
+	RecordChannelAffinity(ctx, 501)
+
+	count, fps, err := occupancyBindingCount(501)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	assert.ElementsMatch(t, []string{"fp1a2b3c4"}, fps)
+}
+
+// TestAcquireLoserSetsBoundChannel 锁内 double-check 命中胜者（竞争失败路径）同样
+// 设置首次占位渠道标记：该键后续重试切换成功时旧渠道索引才能正确迁移移除。
+func TestAcquireLoserSetsBoundChannel(t *testing.T) {
+	useExclusiveMemoryMode(t)
+	setupExclusiveAcquireDB(t)
+	meta := exclusiveAcquireTestMeta()
+	t.Cleanup(cleanupExclusiveAcquire(meta))
+	resetAffinityCacheSingleton()
+
+	// 预置胜者占位（正向 + 索引 + lastBind 三写由胜者完成）。
+	require.NoError(t, getChannelAffinityCache().SetWithTTL(exclusiveCacheKeySuffix(meta), 701, 10*time.Second))
+	require.NoError(t, occupancyAddKeyFP(701, meta.KeyFingerprint, 10*time.Second))
+	require.NoError(t, lastBindSet(exclusiveCacheKeySuffix(meta), 701, 20*time.Second))
+
+	ctx := buildExclusiveAcquireContext(t, meta)
+	channelID, found := acquireExclusiveBinding(ctx, meta, meta.UsingGroup, meta.ModelName)
+	require.True(t, found)
+	assert.Equal(t, 701, channelID)
+
+	v, exists := ctx.Get(ginKeyChannelAffinityBoundChannel)
+	require.True(t, exists, "loser path must record winner channel as bound channel")
+	assert.Equal(t, 701, v.(int))
+}
+
+// TestHandleRulesUpdateClearsDeletedRule 规则被删除（新列表无该名）时同样触发
+// 联动清空：已删规则的键不应继续占用渠道直至 TTL。
+func TestHandleRulesUpdateClearsDeletedRule(t *testing.T) {
+	useRulesUpdateTest(t)
+
+	// r1 运行时数据已由夹具造好（enabled: true 才有清空价值，重写开关状态）。
+	HandleChannelAffinityRulesUpdate(
+		`[{"name":"r1","include_rule_name":true,"exclusive_bind":true}]`,
+		`[{"name":"other","include_rule_name":true,"exclusive_bind":true}]`,
+	)
+
+	assertR1RuntimeCleared(t, true)
 }

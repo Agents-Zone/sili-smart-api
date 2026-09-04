@@ -118,9 +118,9 @@ function serializeRules(rules: AffinityRule[]): string {
   return JSON.stringify(rules.map(({ id: _, ...rest }) => rest))
 }
 
-// 统计值缺省（旧后端或索引失败）时显示 -
+// 字段缺失（旧后端未返回）时显示 -；索引失败时后端返回 0，显示 0
 function formatStat(v: number | undefined): string {
-  return v === undefined || v === null ? '-' : String(v)
+  return v === undefined ? '-' : String(v)
 }
 
 interface Props {
