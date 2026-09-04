@@ -126,12 +126,15 @@ func getChannelAffinityLastBindCache() *cachex.HybridCache[channelAffinityLastBi
 
 // occupancyAddKeyFP 向渠道条目登记键指纹：条目缺失则新建，已含该指纹则仅续期整条目，
 // 否则追加后按本次 TTL 写回（条目整体 TTL 按最近一次登记续期，04 文档 §4.1）。
-// Redis 模式经 occupancyAddScript 原子执行读改写（登记路径无分段锁覆盖，非原子
-// GET→SET 在并发下会丢失其它实例的成员写入）；内存模式由 T4 分段锁保证进程内原子性。
-// 读改写失败返回 error 由调用方降级（SSOT 5.1.5）。
+// 渠道条目分段锁内执行，跨键并发的读-改-写不丢失成员（Redis 模式脚本原子，
+// 锁退化为同实例收敛；内存模式锁是唯一的原子性保证）。读改写失败返回 error
+// 由调用方降级（SSOT 5.1.5）。
 func occupancyAddKeyFP(channelID int, keyFP string, ttl time.Duration) error {
 	cache := getChannelAffinityOccupancyCache()
 	key := strconv.Itoa(channelID)
+	lock := occupancyEntryLock(channelID)
+	lock.Lock()
+	defer lock.Unlock()
 	if redisMode := common.RedisEnabled && common.RDB != nil; redisMode {
 		ctx, cancel := context.WithTimeout(context.Background(), exclusiveRedisOpTimeout)
 		defer cancel()
@@ -163,10 +166,15 @@ func occupancyAddKeyFP(channelID int, keyFP string, ttl time.Duration) error {
 }
 
 // occupancyRemoveKeyFP 从渠道条目移除键指纹：集合清空则删除条目，否则按剩余 TTL 写回
-// （不续期）；成员或条目不存在时幂等 no-op。
+// （不续期）；成员或条目不存在时幂等 no-op。内存模式与登记共用渠道条目分段锁，
+// 并发登记与移除对同一渠道条目互斥，写回不覆盖对方结果；Redis 模式同样本地加锁
+// 覆盖同实例并发，跨实例由登记脚本原子性兜底。
 func occupancyRemoveKeyFP(channelID int, keyFP string) error {
 	cache := getChannelAffinityOccupancyCache()
 	key := strconv.Itoa(channelID)
+	lock := occupancyEntryLock(channelID)
+	lock.Lock()
+	defer lock.Unlock()
 	entry, found, err := cache.Get(key)
 	if err != nil {
 		return fmt.Errorf("channel affinity occupancy read failed: channel=%d err=%w", channelID, err)
@@ -388,6 +396,20 @@ func channelAffinityBindLock(cacheKeySuffix string) *sync.Mutex {
 	_, _ = h.Write([]byte(cacheKeySuffix))
 	idx := h.Sum32() % uint32(len(channelAffinityBindLocks))
 	return &channelAffinityBindLocks[idx]
+}
+
+// occupancyEntryLocks 为占用索引条目分段锁：按渠道 ID 哈希取锁，内存模式下
+// 串行化登记/移除的读-改-写。Redis 模式经 Lua 原子执行，锁退化为本地收敛，
+// 语义不变。缺这层锁时跨键并发对同一渠道条目的 GET→改→SET 会 lost update，
+// 成员丢失导致占用被低估、后续独占判定误判空闲（进程内等价于登记脚本要解决的
+// 跨实例问题，见 occupancyAddScript 注释）。
+var occupancyEntryLocks [64]sync.Mutex
+
+func occupancyEntryLock(channelID int) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strconv.Itoa(channelID)))
+	idx := h.Sum32() % uint32(len(occupancyEntryLocks))
+	return &occupancyEntryLocks[idx]
 }
 
 // exclusiveAffinityTTL 由 meta 计算绑定 TTL：规则 TTL，缺省回退设置默认值再回退 3600。

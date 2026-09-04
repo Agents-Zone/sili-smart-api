@@ -243,6 +243,93 @@ func TestOccupancyAddKeyFPAtomicMemoryMode(t *testing.T) {
 	assert.ElementsMatch(t, []string{"a1b2c3d4"}, fps)
 }
 
+// TestOccupancyAddKeyFPConcurrentConservation 内存模式跨键并发登记的成员守恒回归：
+// 亲和键分段锁（T4）按键哈希，跨键并发对同一渠道条目的 GET→改→SET 无互斥，
+// lost update 会丢失成员，渠道占用被低估、后续独占判定误判空闲。
+func TestOccupancyAddKeyFPConcurrentConservation(t *testing.T) {
+	useExclusiveMemoryMode(t)
+	t.Cleanup(func() {
+		_, _ = getChannelAffinityOccupancyCache().DeleteMany([]string{"901"})
+	})
+
+	const goroutines = 64
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			if err := occupancyAddKeyFP(901, fmt.Sprintf("fp-%03d", idx), 10*time.Second); err != nil {
+				t.Errorf("concurrent add %d failed: %v", idx, err)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	count, fps, err := occupancyBindingCount(901)
+	require.NoError(t, err)
+	assert.Equal(t, goroutines, count, "all concurrent registrations must be conserved, got %d", count)
+
+	seen := make(map[string]struct{}, len(fps))
+	for _, fp := range fps {
+		seen[fp] = struct{}{}
+	}
+	assert.Len(t, seen, goroutines, "registrations must be distinct")
+}
+
+// TestOccupancyAddRemoveConcurrentNoInterleave 内存模式并发登记与移除同一渠道条目：
+// 移除的写回不得覆盖并发的登记（反向亦然），终态成员精确等于期望集合。
+func TestOccupancyAddRemoveConcurrentNoInterleave(t *testing.T) {
+	useExclusiveMemoryMode(t)
+	t.Cleanup(func() {
+		_, _ = getChannelAffinityOccupancyCache().DeleteMany([]string{"902"})
+	})
+
+	const keepCount = 2
+	const addCount = 32
+	const removeCount = 16
+	for _, fp := range []string{"keep-01", "keep-02"} {
+		require.NoError(t, occupancyAddKeyFP(902, fp, 10*time.Second))
+	}
+	for i := 0; i < removeCount; i++ {
+		require.NoError(t, occupancyAddKeyFP(902, fmt.Sprintf("del-%03d", i), 10*time.Second))
+	}
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < addCount; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			if err := occupancyAddKeyFP(902, fmt.Sprintf("add-%03d", idx), 10*time.Second); err != nil {
+				t.Errorf("concurrent add %d failed: %v", idx, err)
+			}
+		}(i)
+	}
+	for i := 0; i < removeCount; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			if err := occupancyRemoveKeyFP(902, fmt.Sprintf("del-%03d", idx)); err != nil {
+				t.Errorf("concurrent remove %d failed: %v", idx, err)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	count, fps, err := occupancyBindingCount(902)
+	require.NoError(t, err)
+	assert.Equal(t, keepCount+addCount, count, "final members must be exactly keep+adds (removes must not swallow concurrent adds), got %v", fps)
+	for _, fp := range fps {
+		assert.NotContains(t, "del", strings.Split(fp, "-")[0], "removed members must be gone")
+	}
+}
+
 // TestLastBindRoundTrip 覆盖计划核心断言：set/get/delete 往返。
 func TestLastBindRoundTrip(t *testing.T) {
 	useExclusiveMemoryMode(t)
