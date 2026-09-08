@@ -21,14 +21,15 @@ import (
 )
 
 const (
-	ginKeyChannelAffinityCacheKey         = "channel_affinity_cache_key"
-	ginKeyChannelAffinityTTLSeconds       = "channel_affinity_ttl_seconds"
-	ginKeyChannelAffinityMeta             = "channel_affinity_meta"
-	ginKeyChannelAffinityLogInfo          = "channel_affinity_log_info"
-	ginKeyChannelAffinitySkipRetry        = "channel_affinity_skip_retry_on_failure"
-	ginKeyChannelAffinityExclusiveDegrade = "channel_affinity_exclusive_degrade"
-	ginKeyChannelAffinityBoundChannel     = "channel_affinity_bound_channel"
-	ginKeyChannelAffinityFinalFailure     = "channel_affinity_final_failure"
+	ginKeyChannelAffinityCacheKey          = "channel_affinity_cache_key"
+	ginKeyChannelAffinityTTLSeconds        = "channel_affinity_ttl_seconds"
+	ginKeyChannelAffinityMeta              = "channel_affinity_meta"
+	ginKeyChannelAffinityLogInfo           = "channel_affinity_log_info"
+	ginKeyChannelAffinitySkipRetry         = "channel_affinity_skip_retry_on_failure"
+	ginKeyChannelAffinityExclusiveDegrade  = "channel_affinity_exclusive_degrade"
+	ginKeyChannelAffinityStorageDegrade    = "channel_affinity_storage_degrade"
+	ginKeyChannelAffinityBoundChannel      = "channel_affinity_bound_channel"
+	ginKeyChannelAffinityFinalFailure      = "channel_affinity_final_failure"
 
 	channelAffinityCacheNamespace           = "new-api:channel_affinity:v1"
 	channelAffinityUsageCacheStatsNamespace = "new-api:channel_affinity_usage_cache_stats:v1"
@@ -778,6 +779,31 @@ func channelAffinityFinalFailed(c *gin.Context) bool {
 	return ok && b
 }
 
+// markChannelAffinityStorageDegrade 在独占路径因存储故障降级软亲和时置位标记：
+// 该请求将走 distributor 随机选路，RecordChannelAffinity 见此标记跳过正向写入与
+// 索引登记，避免把随机选中的渠道固化为正式绑定（TTL 整周期钉死，SSOT 5.1.5
+// 降级语义的收尾补强）。存储故障属瞬时事件，跳过登记后该键下次请求重新走完整
+// 独占决策，独占性自行恢复。
+func markChannelAffinityStorageDegrade(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(ginKeyChannelAffinityStorageDegrade, true)
+}
+
+// channelAffinityStorageDegraded 报告本请求独占路径是否因存储故障降级。
+func channelAffinityStorageDegraded(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	v, ok := c.Get(ginKeyChannelAffinityStorageDegrade)
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
 func RecordChannelAffinity(c *gin.Context, channelID int) {
 	if channelID <= 0 {
 		return
@@ -787,6 +813,11 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 		return
 	}
 	if c != nil && channelAffinityFinalFailed(c) {
+		return
+	}
+	// 独占路径因存储故障降级的请求：随机选路结果不固化为正式绑定（独占占位
+	// 三写未完成，固化会把随机渠道钉死一个 TTL 周期，SSOT 5.1.5 降级收尾）。
+	if c != nil && channelAffinityStorageDegraded(c) {
 		return
 	}
 	if setting.SwitchOnSuccess && c != nil {

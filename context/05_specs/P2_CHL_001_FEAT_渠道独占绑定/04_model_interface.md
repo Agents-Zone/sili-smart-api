@@ -150,7 +150,7 @@ type ChannelAffinityRule struct {
 | 统计 | 遍历全部条目，键数 1 计独占、大于 1 计复用 | SSOT 4.2.4 规则1 |
 | 登记/移除 | 集合成员增删，与正向绑定写入/清除同批 | SSOT 5.2.2 第1、2条 |
 
-Redis 模式下**登记**（acquire 胜者、RecordChannelAffinity 续期、迁移迁入等全部登记路径）经 Lua 脚本原子完成"读条目→增成员→写回（SET PX 续期）"（occupancyAddScript），与正向绑定的原子写入配合实现先到先得，且登记并发不再丢失其它实例的成员写入；**移除**（迁移/回滚/清空）为读条目→删成员→按剩余 TTL 写回的非原子读改写（移除操作幂等且方向为收敛，无并发正确性风险，残留随 TTL 过期）；条目值与内存模式同构（JSON 序列化的键指纹集合，经 cachex.JSONCodec 读写），保持与正向缓存同一 HybridCache 体系、三命名空间统一清空路径。内存回退模式用带分段锁的进程内 map[string]map[string]struct{} 实现（HybridCache 内存侧为条目级 SET/GET/DEL，成员进出在值内完成），单实例内串行化满足先到先得（SSOT 5.1.2 第2条末）。
+Redis 模式下**登记**（acquire 胜者、RecordChannelAffinity 续期、迁移迁入等全部登记路径）经 Lua 脚本原子完成"读条目→增成员→写回（SET PX 续期）"（occupancyAddScript），与正向绑定的原子写入配合实现先到先得，且登记并发不再丢失其它实例的成员写入；**移除**（迁移/回滚/清空）同样经 Lua 脚本原子完成"读条目→删成员→空则 DEL / 按剩余 TTL（PTTL，不续期）写回"（occupancyRemoveScript），成员不在条目内时幂等 no-op：移除的读改写若为裸 GET→SET，回写会覆盖并发登记/占位脚本刚追加的成员，成员丢失使占用被低估、独占误判空闲（v1.7 修复，生产缺陷回路验证）；条目值与内存模式同构（JSON 序列化的键指纹集合，经 cachex.JSONCodec 读写），保持与正向缓存同一 HybridCache 体系、三命名空间统一清空路径。内存回退模式用带分段锁的进程内 map[string]map[string]struct{} 实现（HybridCache 内存侧为条目级 SET/GET/DEL，成员进出在值内完成），单实例内串行化满足先到先得（SSOT 5.1.2 第2条末）。
 
 **业务规则：**
 
@@ -249,8 +249,8 @@ stateDiagram-v2
 
 | 部署形态 | 机制 | 语义保证 |
 |---------|------|---------|
-| 单实例（内存模式） | 按亲和键哈希分段锁（参考现有 channelAffinityUsageCacheStatsLocks 模式），绑定决策与占位写入临界区内串行 | 同键并发首次绑定，首个完成占位者生效，其余读胜者结果 |
-| 多实例（Redis 模式） | 正向绑定写入与反向索引登记经 Lua 脚本/SetNX 原子执行（索引移除为幂等读改写，见 4.1） | 跨实例先到先得，占位写入原子生效 |
+| 单实例（内存模式） | 按亲和键哈希分段锁（参考现有 channelAffinityUsageCacheStatsLocks 模式），绑定决策与占位写入临界区内串行；独占占位经 occupancyClaimExclusive 在渠道条目分段锁内完成读-判-写（v1.6） | 同键并发首次绑定，首个完成占位者生效，其余读胜者结果；跨键并发对同一渠道的条件占位互斥，独占模式无静默双占 |
+| 多实例（Redis 模式） | 正向绑定写入与反向索引登记经 Lua 脚本/SetNX 原子执行（索引移除同样经 occupancyRemoveScript Lua 原子执行，见 4.1）；独占占位经 occupancyClaimExclusiveScript Lua 原子判定：条目空或仅含本键指纹才登记，否则返回冲突与持有键数供决策方剔除重选（v1.6） | 跨实例先到先得，占位写入原子生效；跨实例跨键的独占条件占位同样原子，冲突方转入满载降级（带标记）；移除与登记并发不丢失成员 |
 
 ### 6.2 同批清理一致性（SSOT 5.2.4 规则2）
 
@@ -313,3 +313,5 @@ stateDiagram-v2
 | v1.3 | 2026-09-02 | 监理扫描修复（模式四）：3.1 存量字段说明订正为以 key 为主键、无 id 列与 idx_options_key（对齐 model/option.go 实际结构）；4.1/6.1 Redis 移除路径如实描述为幂等读改写（仅登记路径经 Lua）；4.2/4.3 序列化表述对齐实际实现（cachex.JSONCodec / common.MapToJsonStr） |
 | v1.4 | 2026-09-03 | 代码评审修复（第二轮）：4.1 键指纹长度由 SHA1 前 8 位订正为前 16 位 hex（实现同步加长，SSOT 偏离 D5）；4.1 登记路径 Lua 原子化范围订正（全部登记路径经 occupancyAddScript，非仅 acquire 胜者路径）；4.1 成员过期滞后窗口上界陈述订正（活跃渠道条目 TTL 按登记续期、滞留无固定上界，静默渠道最长一个 TTL） |
 | v1.5 | 2026-09-03 | 监理扫描修复（模式四第二轮）：4.3 字段说明表、4.3 标记结构示例、第 7 节 VARCHAR 长度行三处 key_fp 位数补改为 16 位 hex（v1.4 遗漏，对齐偏离 D5 与源码 affinityFingerprint）；4.1 条目值补充 Redis 模式 JSON 结构键名 key_fps 的显式定义 |
+| v1.6 | 2026-09-08 | 生产缺陷修复对齐（渠道亲和不稳定）：6.1 补记独占条件占位机制（occupancyClaimExclusive 内存锁内读-判-写 / occupancyClaimExclusiveScript Lua 原子判定，冲突返回持有键数供剔除重选），独占模式跨键并发无静默双占（SSOT v1.9 D3 修复的落地） |
+| v1.7 | 2026-09-08 | 生产缺陷修复（第二处）：4.1/6.1 补记移除路径 Lua 原子化（occupancyRemoveScript）——移除的裸 GET→SET 回写会覆盖并发登记/占位脚本刚追加的成员，成员丢失使占用被低估、独占误判空闲，与 D3 同源但发生在移除侧；修复后登记/占位/移除三条写路径在 Redis 模式下全部原子 |
