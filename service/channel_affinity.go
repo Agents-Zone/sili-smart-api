@@ -7,9 +7,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/pkg/cachex"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -30,6 +32,7 @@ const (
 	ginKeyChannelAffinityStorageDegrade    = "channel_affinity_storage_degrade"
 	ginKeyChannelAffinityBoundChannel      = "channel_affinity_bound_channel"
 	ginKeyChannelAffinityFinalFailure      = "channel_affinity_final_failure"
+	ginKeyChannelAffinitySoftPlacement     = "channel_affinity_soft_placement"
 
 	channelAffinityCacheNamespace           = "new-api:channel_affinity:v1"
 	channelAffinityUsageCacheStatsNamespace = "new-api:channel_affinity_usage_cache_stats:v1"
@@ -636,6 +639,10 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 		channelID, found, err := cache.Get(cacheKeySuffix)
 		if err != nil {
 			common.SysError(fmt.Sprintf("channel affinity cache get failed: key=%s, err=%v", cacheKeyFull, err))
+			// 读故障时本键绑定状态未知：置存储降级标记，防止 distributor 随机
+			// 选路结果被 RecordChannelAffinity 固化为正式绑定（old=0 追加占用
+			// 登记，绕过独占判定，与 acquire 降级同口径，SSOT 5.1.5）。
+			markChannelAffinityStorageDegrade(c)
 			return 0, false
 		}
 		if found {
@@ -804,6 +811,32 @@ func channelAffinityStorageDegraded(c *gin.Context) bool {
 	return ok && b
 }
 
+// MarkChannelAffinitySoftPlacement 在独占规则的请求落位到"未经独占引擎判定"的
+// 渠道时置位软落位标记：亲和绑定渠道不可用后的随机兜底（keep/清占位两分支）与
+// 亲和渠道失败后的重试切换成功。RecordChannelAffinity 见此标记跳过绑定固化，
+// 避免把随机/重试渠道钉进其它键的独占渠道（生产缺陷：渠道大量空闲时多键共享
+// 同一渠道的堆积来源）。绑定渠道的更替交给独占引擎既有机制：终态失败回滚、
+// 渠道禁用清占位、TTL 到期重绑。软亲和规则（未启用独占）不受影响。
+func MarkChannelAffinitySoftPlacement(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(ginKeyChannelAffinitySoftPlacement, true)
+}
+
+// channelAffinitySoftPlaced 报告本请求是否为软落位。
+func channelAffinitySoftPlaced(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	v, ok := c.Get(ginKeyChannelAffinitySoftPlacement)
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
 func RecordChannelAffinity(c *gin.Context, channelID int) {
 	if channelID <= 0 {
 		return
@@ -819,6 +852,37 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 	// 三写未完成，固化会把随机渠道钉死一个 TTL 周期，SSOT 5.1.5 降级收尾）。
 	if c != nil && channelAffinityStorageDegraded(c) {
 		return
+	}
+	// 独占规则的软落位请求（亲和渠道不可用后的随机兜底、失败重试切换）：
+	// 渠道选择未经独占引擎判定，固化会把随机/重试渠道钉进其它键的独占渠道
+	//（渠道大量空闲时多键共享同一渠道的堆积来源）。跳过固化，绑定维持原值；
+	// 渠道更替交给独占引擎既有机制（终态失败回滚、渠道禁用清占位、TTL 到期重绑）。
+	if c != nil {
+		meta, metaOK := getChannelAffinityMeta(c)
+		if metaOK && meta.ExclusiveBind {
+			// 重试切换检测：最终成功渠道（SwitchOnSuccess 时以 context channel_id
+			// 为准）与首次占位渠道不一致，即成功渠道未经独占判定（重试随机选定），
+			// 与软落位同口径处理。
+			successChannelID := channelID
+			if setting.SwitchOnSuccess {
+				if switched := c.GetInt("channel_id"); switched > 0 {
+					successChannelID = switched
+				}
+			}
+			boundChannelID := 0
+			if v, exists := c.Get(ginKeyChannelAffinityBoundChannel); exists {
+				if id, valid := v.(int); valid {
+					boundChannelID = id
+				}
+			}
+			if channelAffinitySoftPlaced(c) || (boundChannelID > 0 && successChannelID != boundChannelID) {
+				atomic.AddUint64(&channelAffinityDegradedReuseTotal, 1)
+				logger.LogWarn(c, fmt.Sprintf(
+					"channel affinity soft placement not pinned: rule=%s key_fp=%s channel=%d",
+					meta.RuleName, meta.KeyFingerprint, successChannelID))
+				return
+			}
+		}
 	}
 	if setting.SwitchOnSuccess && c != nil {
 		if successChannelID := c.GetInt("channel_id"); successChannelID > 0 {

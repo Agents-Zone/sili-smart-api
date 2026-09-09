@@ -716,11 +716,27 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 			winnerID, found, err := cache.Get(cacheKeySuffix)
 			if err != nil || !found || winnerID <= 0 {
 				common.SysError(fmt.Sprintf("channel affinity exclusive loser confirm failed: channel=%d key_fp=%s found=%v err=%v", decision.ChannelID, meta.KeyFingerprint, found, err))
+				// 确认失败同样置存储降级标记：败者的正向写入已被拒绝，随机选路
+				// 结果若被 RecordChannelAffinity 固化（old=0 追加登记），会绕过
+				// 独占判定把随机渠道钉一个 TTL 周期（SSOT 5.1.5 降级语义）。
+				markChannelAffinityStorageDegrade(c)
+				// 本实例在败选渠道上的 claim 占位是幽灵占用：占用高估会使后续键
+				// 误判满载进入 shared 降级，集中复用形成堆积，必须回滚。
+				occupancyRemoveKeyFP(decision.ChannelID, meta.KeyFingerprint)
 				return 0, false
 			}
 			// 同上：竞争失败记胜者渠道为首次占位渠道，供迁移移除与终态回滚使用。
 			if c != nil {
 				c.Set(ginKeyChannelAffinityBoundChannel, winnerID)
+			}
+			// 败者本实例在败选渠道（decision.ChannelID）上的 claim 占位与胜者绑定
+			// 渠道（winnerID）分属两个渠道：败选渠道上的占位是幽灵占用，占用高估
+			// 污染后续键的空闲判定（误判满载 -> shared 集中复用堆积），必须回滚。
+			// 仅 decision != winner 时移除：胜者未跨渠道漂移时其占位三写是合法状态
+			//（decision==winner 且 SetNX 失败只可能来自跨实例并发读旧值，此处读回
+			// 相同值说明胜者绑定恰为本实例选定的渠道，占位继续有效）。
+			if decision.ChannelID != winnerID {
+				occupancyRemoveKeyFP(decision.ChannelID, meta.KeyFingerprint)
 			}
 			return winnerID, true
 		}
