@@ -42,9 +42,15 @@ const softPlacementRuleName = "exclusive-header-rule"
 var softPlacementChannels = []int{921, 922, 923, 924, 925, 926}
 
 // useSoftPlacementFixture 构造 921..926 共 6 渠道（default/gpt-4）+ 独占 header 规则。
+// keepRedis=true 时保留调用方已切换的 Redis 全局（真实 Redis 集成测试用），
+// 不再强制内存模式；否则强制内存模式。
 func useSoftPlacementFixture(t *testing.T, exclusive bool) {
 	t.Helper()
-	useExclusiveMemoryMode(t)
+	if exclusive {
+		useExclusiveRedisKeepMode(t)
+	} else {
+		useExclusiveMemoryMode(t)
+	}
 	setupSoftPlacementDB(t)
 	resetAffinityCacheSingleton()
 

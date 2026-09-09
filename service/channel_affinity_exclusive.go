@@ -101,13 +101,29 @@ var (
 	occupancyMemExpireAt sync.Map
 )
 
+// occupancyEntryPttlLua 为条目写回 PX 的公共计算：取本次 TTL 与现有条目剩余寿命
+// （PTTL）的较大者，保证登记只延长条目寿命、绝不截断——短 TTL 成员后到时若把
+// 条目 PX 缩到自身 TTL，长 TTL 成员会随条目整体消失，占用丢失被新键 claim 形成
+// 静默双占。拼接进各脚本头部使用。
+const occupancyEntryPttlLua = `
+local function entryPttlMs(key, ttl_ms, now_ms)
+  local pttl = redis.call('PTTL', key)
+  if pttl > ttl_ms then
+    return pttl
+  end
+  return ttl_ms
+end
+`
+
 // occupancyAddScript 在 Redis 模式下原子完成"读条目 -> 登记成员 -> 写回"：
 // KEYS[1] 为 occupancy 条目全键；ARGV[1] 键指纹，ARGV[2] 成员与条目 TTL 毫秒，
 // ARGV[3] 当前时刻毫秒（客户端传入，避免脚本内 TIME 的不确定性），
 // ARGV[4] v1 数组格式成员的回退过期毫秒（升级兼容）。
 // 成员结构为 指纹->过期时刻 的 map：读取时惰性剔除已过期成员，登记成员写入
-// now+ttl。v1 数组格式成员按 now+回退 TTL 重写为 v2。
-var occupancyAddScript = redis.NewScript(`
+// now+ttl。v1 数组格式成员按 now+回退 TTL 重写为 v2。条目 PX 取本次 TTL 与
+// 现有条目剩余寿命的较大者（entryPttlMs）：短 TTL 成员后到时不得截断条目，
+// 否则长 TTL 成员随条目整体消失、占用丢失被新键 claim 形成静默双占。
+var occupancyAddScript = redis.NewScript(occupancyEntryPttlLua + `
 local key = KEYS[1]
 local fp = ARGV[1]
 local ttl_ms = tonumber(ARGV[2])
@@ -133,15 +149,16 @@ if raw and raw ~= '' then
   end
 end
 fps[fp] = now_ms + ttl_ms
-redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', ttl_ms)
+redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', entryPttlMs(key, ttl_ms, now_ms))
 return 1
 `)
 
 // occupancyClaimExclusiveScript 为独占条件占位的 Redis 实现（D3 竞态根治）：
 // KEYS[1] 为 occupancy 条目全键，ARGV 同 occupancyAddScript。
 // 读取时惰性剔除过期成员；条件语义：存活成员集为空（或仅本键）时登记并返回 1；
-// 已含其它存活指纹时不动条目、返回存活键数（负数约定为冲突）。
-var occupancyClaimExclusiveScript = redis.NewScript(`
+// 已含其它存活指纹时不动条目、返回存活键数（负数约定为冲突）。条目 PX 与登记
+// 脚本同口径取 max(本次 TTL, 现有条目剩余寿命)，短 TTL 重入不得截断条目。
+var occupancyClaimExclusiveScript = redis.NewScript(occupancyEntryPttlLua + `
 local key = KEYS[1]
 local fp = ARGV[1]
 local ttl_ms = tonumber(ARGV[2])
@@ -168,7 +185,7 @@ if raw and raw ~= '' then
 end
 if fps[fp] ~= nil then
   fps[fp] = now_ms + ttl_ms
-  redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', ttl_ms)
+  redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', entryPttlMs(key, ttl_ms, now_ms))
   return 1
 end
 local n = 0
@@ -177,7 +194,7 @@ if n > 0 then
   return 0 - n
 end
 fps[fp] = now_ms + ttl_ms
-redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', ttl_ms)
+redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', entryPttlMs(key, ttl_ms, now_ms))
 return 1
 `)
 
@@ -236,6 +253,84 @@ redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', pttl)
 return 1
 `)
 
+// occupancyPlaceSharedScript 为满载复用降级的服务端原子最小落位（跨实例串行）：
+// KEYS[1..N] 为全部候选渠道的 occupancy 条目全键（顺序与调用方 candidates 一致），
+// ARGV[1] 键指纹，ARGV[2] 成员与条目 TTL 毫秒，ARGV[3] 当前时刻毫秒，ARGV[4] v1
+// 成员回退过期毫秒，ARGV[5] 随机起点（同层内均衡打散）。
+// 单次脚本执行内读取全部候选的实时存活成员数（剔除本键指纹），在最少绑定数层内
+// 按随机起点选定渠道并登记（成员合并/过期剔除/v1 重写/条目 PX 只延长不截断，
+// 与登记脚本同语义）。返回 {候选下标(0基), 选定前该渠道其它键数}。
+// 决策与登记同脚本原子完成，根治"多键并发共享陈旧快照、各自在失效的最少绑定
+// 层无条件追加"的堆积（生产症状：渠道大量空闲时多键集中复用同一渠道）。
+// 选中前键数为 0 表示实际存在空闲渠道（快照误判满载），调用方按独占处理免降级。
+// 注：脚本跨多键访问，要求 standalone Redis（项目 common.RDB 为单连接客户端）。
+var occupancyPlaceSharedScript = redis.NewScript(occupancyEntryPttlLua + `
+local fp = ARGV[1]
+local ttl_ms = tonumber(ARGV[2])
+local now_ms = tonumber(ARGV[3])
+local legacy_ms = tonumber(ARGV[4])
+local start_idx = tonumber(ARGV[5])
+
+local function liveMembers(raw)
+  local fps = {}
+  if not raw or raw == '' then
+    return fps
+  end
+  local ok, obj = pcall(cjson.decode, raw)
+  if not ok or type(obj) ~= 'table' or type(obj.key_fps) ~= 'table' then
+    return fps
+  end
+  local members = obj.key_fps
+  if members[1] ~= nil then
+    for _, m in ipairs(members) do
+      fps[m] = 0
+    end
+  else
+    for m, exp in pairs(members) do
+      if exp == 0 or exp > now_ms then
+        fps[m] = exp
+      end
+    end
+  end
+  return fps
+end
+
+local counts = {}
+local min_n = -1
+for i = 1, #KEYS do
+  local fps = liveMembers(redis.call('GET', KEYS[i]))
+  local n = 0
+  for m, _ in pairs(fps) do
+    if m ~= fp then
+      n = n + 1
+    end
+  end
+  counts[i] = n
+  if min_n < 0 or n < min_n then
+    min_n = n
+  end
+end
+
+local tier = {}
+for i = 1, #KEYS do
+  if counts[i] == min_n then
+    tier[#tier + 1] = i
+  end
+end
+local pick = tier[(start_idx % #tier) + 1]
+
+local key = KEYS[pick]
+local fps = liveMembers(redis.call('GET', key))
+for m, exp in pairs(fps) do
+  if exp == 0 then
+    fps[m] = now_ms + legacy_ms
+  end
+end
+fps[fp] = now_ms + ttl_ms
+redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', entryPttlMs(key, ttl_ms, now_ms))
+return {pick - 1, min_n}
+`)
+
 // newAffinityStoreCache 为独占运行时命名空间构造 HybridCache：容量与默认 TTL
 // 取亲和设置，缺省回退 100_000 / 3600（与正向缓存 getter 的回退口径一致）。
 func newAffinityStoreCache[V any](namespace string, codec cachex.ValueCodec[V]) *cachex.HybridCache[V] {
@@ -283,10 +378,11 @@ func getChannelAffinityLastBindCache() *cachex.HybridCache[channelAffinityLastBi
 }
 
 // occupancyAddKeyFP 向渠道条目登记键指纹：登记成员按本次 TTL 写入成员级过期时刻，
-// 条目 TTL 同步按本次 TTL 写（条目整体随最近一次登记续期）。存活成员集已含其它
-// 成员时一并惰性剔除过期成员后写回。渠道条目分段锁内执行，跨键并发的读-改-写
-// 不丢失成员（Redis 模式脚本原子，锁退化为同实例收敛；内存模式锁是唯一的原子性
-// 保证）。读改写失败返回 error 由调用方降级（SSOT 5.1.5）。
+// 条目 TTL 取本次 TTL 与既有条目剩余寿命的较大者（只延长不截断，见
+// occupancyEntryPttlLua）。存活成员集已含其它成员时一并惰性剔除过期成员后写回。
+// 渠道条目分段锁内执行，跨键并发的读-改-写不丢失成员（Redis 模式脚本原子，
+// 锁退化为同实例收敛；内存模式锁是唯一的原子性保证）。读改写失败返回 error
+// 由调用方降级（SSOT 5.1.5）。
 func occupancyAddKeyFP(channelID int, keyFP string, ttl time.Duration) error {
 	cache := getChannelAffinityOccupancyCache()
 	key := strconv.Itoa(channelID)
@@ -311,10 +407,14 @@ func occupancyAddKeyFP(channelID int, keyFP string, ttl time.Duration) error {
 		}
 	}
 	next[keyFP] = nowMs + ttl.Milliseconds()
-	if err := cache.SetWithTTL(key, channelAffinityOccupancyEntry{KeyFPs: next}, ttl); err != nil {
+	entryTTL := ttl
+	if remaining := occupancyRemainingTTL(cache, key); remaining > entryTTL {
+		entryTTL = remaining
+	}
+	if err := cache.SetWithTTL(key, channelAffinityOccupancyEntry{KeyFPs: next}, entryTTL); err != nil {
 		return fmt.Errorf("channel affinity occupancy write failed: channel=%d err=%w", channelID, err)
 	}
-	occupancyMemExpireAt.Store(key, time.Now().Add(ttl))
+	occupancyMemExpireAt.Store(key, time.Now().Add(entryTTL))
 	return nil
 }
 
@@ -395,6 +495,91 @@ func occupancyBindingCount(channelID int) (int, []string, error) {
 	return len(fps), fps, nil
 }
 
+// occupancyPlacement 为满载复用降级的原子最小落位结果：ChannelID 为选定渠道，
+// HolderCount 为选中前该渠道的其它键数（0 表示服务端复核发现空闲，按独占处理）。
+type occupancyPlacement struct {
+	ChannelID   int
+	HolderCount int
+}
+
+// occupancyPlaceSharedLeast 满载降级的原子最小落位：在全部候选渠道的实时占用中
+// 选最少绑定数层（同层按调用方给定的随机起点打散），并把本键指纹登记到选定渠道，
+// 决策与登记一次完成。Redis 模式经 occupancyPlaceSharedScript 服务端原子执行
+//（跨实例串行，根治并发键共享陈旧快照集中挤入同一渠道的堆积）；内存模式在
+// placement 全局锁内重读实时占用后决策登记（进程内串行，等价语义）。
+// 随机起点由调用方传入以保持本函数可测（注入式随机，与 pickWeighted 同思路）。
+func occupancyPlaceSharedLeast(candidates []int, keyFP string, ttl time.Duration, startIdx int) (occupancyPlacement, error) {
+	if len(candidates) == 0 {
+		return occupancyPlacement{}, fmt.Errorf("channel affinity shared placement has no candidates: key_fp=%s", keyFP)
+	}
+	if common.RedisEnabled && common.RDB != nil {
+		cache := getChannelAffinityOccupancyCache()
+		keys := make([]string, 0, len(candidates))
+		for _, id := range candidates {
+			keys = append(keys, cache.FullKey(strconv.Itoa(id)))
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), exclusiveRedisOpTimeout)
+		defer cancel()
+		res, err := occupancyPlaceSharedScript.Run(ctx, common.RDB, keys,
+			keyFP, ttl.Milliseconds(), time.Now().UnixMilli(), occupancyLegacyMemberTTL().Milliseconds(), startIdx).Slice()
+		if err != nil {
+			return occupancyPlacement{}, fmt.Errorf("channel affinity shared placement failed: key_fp=%s err=%w", keyFP, err)
+		}
+		if len(res) != 2 {
+			return occupancyPlacement{}, fmt.Errorf("channel affinity shared placement unexpected reply: key_fp=%s reply=%v", keyFP, res)
+		}
+		idx, _ := res[0].(int64)
+		holderCount, _ := res[1].(int64)
+		if idx < 0 || int(idx) >= len(candidates) {
+			return occupancyPlacement{}, fmt.Errorf("channel affinity shared placement index out of range: key_fp=%s idx=%d", keyFP, idx)
+		}
+		return occupancyPlacement{ChannelID: candidates[idx], HolderCount: int(holderCount)}, nil
+	}
+
+	occupancyPlacementLock.Lock()
+	defer occupancyPlacementLock.Unlock()
+
+	cache := getChannelAffinityOccupancyCache()
+	nowMs := time.Now().UnixMilli()
+	counts := make([]int, len(candidates))
+	minCount := -1
+	for i, id := range candidates {
+		entry, found, err := cache.Get(strconv.Itoa(id))
+		if err != nil {
+			return occupancyPlacement{}, fmt.Errorf("channel affinity occupancy read failed: channel=%d err=%w", id, err)
+		}
+		n := 0
+		if found {
+			for _, fp := range occupancyEntryMembers(entry, nowMs) {
+				if fp != keyFP {
+					n++
+				}
+			}
+		}
+		counts[i] = n
+		if minCount == -1 || n < minCount {
+			minCount = n
+		}
+	}
+	tier := make([]int, 0, len(candidates))
+	for i, n := range counts {
+		if n == minCount {
+			tier = append(tier, i)
+		}
+	}
+	pick := tier[startIdx%len(tier)]
+	channelID := candidates[pick]
+	if err := occupancyAddKeyFP(channelID, keyFP, ttl); err != nil {
+		return occupancyPlacement{}, err
+	}
+	return occupancyPlacement{ChannelID: channelID, HolderCount: minCount}, nil
+}
+
+// occupancyPlacementLock 为内存模式满载落位的进程内全局串行锁：决策（重读实时
+// 占用）与登记在锁内一次完成，避免并发键基于各自陈旧快照同时挤入同一渠道。
+// Redis 模式由脚本原子性保证，锁退化为本地收敛。
+var occupancyPlacementLock sync.Mutex
+
 // occupancyRemainingTTL 返回条目剩余存活时间：Redis 模式查服务端 TTL，内存模式查
 // 登记时记录的过期时刻；均查不到时回退默认 TTL（方向保守，条目多存活一个周期内收敛）。
 func occupancyRemainingTTL(cache *cachex.HybridCache[channelAffinityOccupancyEntry], key string) time.Duration {
@@ -453,8 +638,9 @@ func lastBindDelete(cacheKeySuffix string) error {
 }
 
 // occupancyAddKeyFPAtomic 原子登记键指纹：Redis 模式经 occupancyAddScript 完成
-// "读条目 -> 登记 -> 写回"的原子执行，与正向绑定的 SetNX（T4）配合实现跨实例先到先得
-// （04 文档 §6.1）；内存模式回退 occupancyAddKeyFP，进程内由 T4 分段锁保证。
+// "读条目 -> 登记 -> 写回"的原子执行；内存模式回退 occupancyAddKeyFP（渠道条目
+// 分段锁保证）。满载降级路径已改经 occupancyPlaceSharedLeast 原子最小落位，
+// 本函数保留给迁移登记（registerBindingIndexes）与直接登记语义的场景使用。
 func occupancyAddKeyFPAtomic(channelID int, keyFP string, ttl time.Duration) error {
 	if common.RedisEnabled && common.RDB != nil {
 		cache := getChannelAffinityOccupancyCache()
@@ -512,12 +698,16 @@ func occupancyClaimExclusive(channelID int, keyFP string, ttl time.Duration) (oc
 		}
 	}
 	if _, mine := next[keyFP]; mine {
-		// 本键指纹已在条目内（重绑/续期）：仅续期本成员与条目。
+		// 本键指纹已在条目内（重绑/续期）：仅续期本成员，条目只延长不截断。
 		next[keyFP] = nowMs + ttl.Milliseconds()
-		if err := cache.SetWithTTL(key, channelAffinityOccupancyEntry{KeyFPs: next}, ttl); err != nil {
+		entryTTL := ttl
+		if remaining := occupancyRemainingTTL(cache, key); remaining > entryTTL {
+			entryTTL = remaining
+		}
+		if err := cache.SetWithTTL(key, channelAffinityOccupancyEntry{KeyFPs: next}, entryTTL); err != nil {
 			return occupancyClaimResult{}, fmt.Errorf("channel affinity occupancy renew failed: channel=%d err=%w", channelID, err)
 		}
-		occupancyMemExpireAt.Store(key, time.Now().Add(ttl))
+		occupancyMemExpireAt.Store(key, time.Now().Add(entryTTL))
 		return occupancyClaimResult{Claimed: true}, nil
 	}
 	if len(next) > 0 {
@@ -772,19 +962,26 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 
 	// 条件占位循环（原 D3 竞态根治）：独占（exclusive）决策在快照上选定渠道，
 	// 占位经 occupancyClaimExclusive 验证渠道此刻确实空闲；并发键抢先占入时收到
-	// 冲突，剔除该渠道后重选。重选可能转入满载分支（返回 shared），满载复用为
-	// 合法终态，登记改为幂等追加（occupancyAddKeyFPAtomic），不再条件判定。
-	// 空闲集判定每轮重算，循环至多遍历全部候选渠道，无死循环。
+	// 冲突，剔除该渠道后重选。重选转入满载分支时不再使用陈旧快照直接登记：
+	// 满载落位经 occupancyPlaceSharedLeast 在服务端原子重读实时占用、于最少绑定
+	// 数层内选定并登记（并发键串行分摊，根治集中挤入同一渠道的堆积）。
+	// 服务端复核发现空闲（HolderCount==0）时按独占终态处理，不计降级。
 	decision := decideExclusiveBinding(candidates, occupancyCounts, lastBindRecord.ChannelID, lastBindFound, exclusivePickRandom)
 	for decision.ChannelID > 0 {
 		if decision.Mode == affinityBindModeShared {
-			// 满载复用：空闲集已空，直接幂等登记（并发挤入的键数最终一致，
-			// shared 为认可终态）。
-			if err := occupancyAddKeyFPAtomic(decision.ChannelID, meta.KeyFingerprint, ttl); err != nil {
-				common.SysError(fmt.Sprintf("channel affinity occupancy register failed: channel=%d key_fp=%s err=%v", decision.ChannelID, meta.KeyFingerprint, err))
+			// 满载复用：原子最小落位（决策与登记服务端一次完成）。
+			placement, err := occupancyPlaceSharedLeast(candidates, meta.KeyFingerprint, ttl, exclusivePickRandom(candidates)-candidates[0])
+			if err != nil {
+				common.SysError(fmt.Sprintf("channel affinity occupancy shared placement failed: key_fp=%s err=%v", meta.KeyFingerprint, err))
 				markChannelAffinityStorageDegrade(c)
 				return 0, false
 			}
+			decision.ChannelID = placement.ChannelID
+			if placement.HolderCount == 0 {
+				// 服务端复核仍有空闲渠道：快照误判满载（并发键已释放），按独占终态。
+				decision.Mode = affinityBindModeExclusive
+			}
+			occupancyCounts[decision.ChannelID] = placement.HolderCount + 1
 			break
 		}
 		claim, err := occupancyClaimExclusive(decision.ChannelID, meta.KeyFingerprint, ttl)
@@ -884,8 +1081,12 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 
 	// 占位模式下独占判定已由条件占位闭环：Mode=exclusive 且渠道被并发键挤入的
 	// 状态在 claim 冲突重试中已消除，进入 shared 判定仅剩满载降级一种来源。
-	// 满载判定重读当前占用数（claim 循环已把最新键数写回 occupancyCounts）。
-	bindingCount := occupancyCounts[winnerID]
+	// 满载降级的 channel_binding_count 取原子落位返回的选中前其它键数
+	//（occupancyPlaceSharedLeast 的服务端实时值，claim 循环快照仅作兜底）。
+	bindingCount := occupancyCounts[winnerID] - 1
+	if bindingCount < 0 {
+		bindingCount = 0
+	}
 	if decision.Mode == affinityBindModeShared {
 		// 满载降级：计数器原子加 1，gin context 写降级标记（04 文档 §4.3 结构，
 		// 供 MarkChannelAffinityUsed 合并进 admin_info），同步输出与请求关联的

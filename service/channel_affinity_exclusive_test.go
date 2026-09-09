@@ -99,6 +99,21 @@ func useExclusiveMemoryMode(t *testing.T) {
 	})
 }
 
+// useExclusiveRedisKeepMode 保留调用方已切换的 Redis 全局（如 useRealRedisMode），
+// 仅重建存储单例并注册用例后清理。供真实 Redis 集成测试在软落位夹具内复用：
+// 强制内存模式的 useExclusiveMemoryMode 会把真实 Redis 测试静默切回内存模式。
+func useExclusiveRedisKeepMode(t *testing.T) {
+	t.Helper()
+	resetExclusiveStoreSingletons()
+	t.Cleanup(func() {
+		resetExclusiveStoreSingletons()
+		occupancyMemExpireAt.Range(func(key, _ any) bool {
+			occupancyMemExpireAt.Delete(key)
+			return true
+		})
+	})
+}
+
 // TestOccupancyAddRemoveKeyFP 覆盖计划核心断言：登记、去重、移除、空集合删除条目。
 func TestOccupancyAddRemoveKeyFP(t *testing.T) {
 	useExclusiveMemoryMode(t)
