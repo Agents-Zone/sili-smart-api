@@ -186,7 +186,7 @@ func TestOccupancyIndexKeyIsChannelIDDecimal(t *testing.T) {
 	entry, found, err := cache.Get("303")
 	require.NoError(t, err)
 	require.True(t, found)
-	assert.Equal(t, []string{"aa11bb22"}, entry.KeyFPs)
+	assert.Equal(t, []string{"aa11bb22"}, occupancyEntryMembers(entry, time.Now().UnixMilli()))
 	assert.Equal(t, channelAffinityOccupancyNamespace+":303", cache.FullKey("303"))
 }
 

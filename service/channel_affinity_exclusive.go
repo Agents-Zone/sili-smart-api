@@ -32,8 +32,55 @@ const (
 )
 
 // channelAffinityOccupancyEntry 为反向占用索引条目：渠道 -> 键指纹集合（SSOT 5.2.3）。
+// v2：成员从数组升级为 指纹 -> 成员过期时刻（Unix 毫秒）的 map，读路径惰性剔除
+// 过期成员。旧数组格式（v1，成员无独立过期）经 occupancyEntryCodec 读入，
+// 保证升级瞬间不丢占用。
 type channelAffinityOccupancyEntry struct {
-	KeyFPs []string `json:"key_fps"`
+	KeyFPs map[string]int64 `json:"key_fps"`
+}
+
+// occupancyEntryMembers 返回条目的存活成员（惰性剔除已过期成员，v1 成员视为存活）。
+func occupancyEntryMembers(entry channelAffinityOccupancyEntry, nowMs int64) []string {
+	members := make([]string, 0, len(entry.KeyFPs))
+	for fp, expireAt := range entry.KeyFPs {
+		if expireAt > 0 && expireAt <= nowMs {
+			continue
+		}
+		members = append(members, fp)
+	}
+	return members
+}
+
+// occupancyEntryCodec 为 occupancy 条目的 JSON 编解码：编码固定输出 v2 map 格式；
+// 解码兼容 v1 数组格式（成员转 map、过期时刻 0 表示存活，随下次写回重写为 v2），
+// 升级瞬间既有占用不丢、已漂移残留仍按成员过期语义收敛。
+type occupancyEntryCodec struct{}
+
+func (occupancyEntryCodec) Encode(v channelAffinityOccupancyEntry) (string, error) {
+	b, err := common.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func (occupancyEntryCodec) Decode(s string) (channelAffinityOccupancyEntry, error) {
+	var entry channelAffinityOccupancyEntry
+	if err := common.Unmarshal([]byte(s), &entry); err == nil {
+		return entry, nil
+	}
+	// v1 数组格式：key_fps 为字符串数组。
+	var legacy struct {
+		KeyFPs []string `json:"key_fps"`
+	}
+	if err := common.Unmarshal([]byte(s), &legacy); err != nil {
+		return channelAffinityOccupancyEntry{}, err
+	}
+	members := make(map[string]int64, len(legacy.KeyFPs))
+	for _, fp := range legacy.KeyFPs {
+		members[fp] = 0 // 0 = 存活（无成员级过期），首次写回时重写为 v2
+	}
+	return channelAffinityOccupancyEntry{KeyFPs: members}, nil
 }
 
 // channelAffinityLastBindRecord 为最近绑定记录值结构（SSOT 5.1.3、04 文档 §4.2）。
@@ -54,66 +101,96 @@ var (
 	occupancyMemExpireAt sync.Map
 )
 
-// occupancyAddScript 在 Redis 模式下原子完成"读条目 -> 登记成员 -> 写回/续期"（04 文档 §6.1）：
-// KEYS[1] 为 occupancy 条目全键，ARGV[1] 为键指纹，ARGV[2] 为 TTL 毫秒。
-// 集合已含该指纹时仅 PEXPIRE 续期整条目；否则追加成员并 SET PX 写回。
+// occupancyAddScript 在 Redis 模式下原子完成"读条目 -> 登记成员 -> 写回"：
+// KEYS[1] 为 occupancy 条目全键；ARGV[1] 键指纹，ARGV[2] 成员与条目 TTL 毫秒，
+// ARGV[3] 当前时刻毫秒（客户端传入，避免脚本内 TIME 的不确定性），
+// ARGV[4] v1 数组格式成员的回退过期毫秒（升级兼容）。
+// 成员结构为 指纹->过期时刻 的 map：读取时惰性剔除已过期成员，登记成员写入
+// now+ttl。v1 数组格式成员按 now+回退 TTL 重写为 v2。
 var occupancyAddScript = redis.NewScript(`
-local raw = redis.call('GET', KEYS[1])
+local key = KEYS[1]
+local fp = ARGV[1]
+local ttl_ms = tonumber(ARGV[2])
+local now_ms = tonumber(ARGV[3])
+local legacy_ms = tonumber(ARGV[4])
 local fps = {}
+local raw = redis.call('GET', key)
 if raw and raw ~= '' then
   local ok, obj = pcall(cjson.decode, raw)
   if ok and type(obj) == 'table' and type(obj.key_fps) == 'table' then
-    fps = obj.key_fps
+    local members = obj.key_fps
+    if members[1] ~= nil then
+      for _, m in ipairs(members) do
+        fps[m] = now_ms + legacy_ms
+      end
+    else
+      for m, exp in pairs(members) do
+        if exp == 0 or exp > now_ms then
+          fps[m] = exp
+        end
+      end
+    end
   end
 end
-local fp = ARGV[1]
-for _, m in ipairs(fps) do
-  if m == fp then
-    redis.call('PEXPIRE', KEYS[1], ARGV[2])
-    return 1
-  end
-end
-fps[#fps + 1] = fp
-redis.call('SET', KEYS[1], cjson.encode({key_fps = fps}), 'PX', ARGV[2])
+fps[fp] = now_ms + ttl_ms
+redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', ttl_ms)
 return 1
 `)
 
-// occupancyClaimExclusiveScript 为独占条件占位的 Redis 实现（原 SSOT 8.3 D3 竞态的
-// 根治）：KEYS[1] 为 occupancy 条目全键，ARGV[1] 为键指纹，ARGV[2] 为 TTL 毫秒。
-// 条件语义：条目为空（或不存在）时登记指纹并返回 1（占位成功）；条目已含
-// 其它指纹时不动条目、返回当前键数（负数约定为冲突）。本键指纹已在条目内
-// （重绑/续期场景）仅续期返回 1。
+// occupancyClaimExclusiveScript 为独占条件占位的 Redis 实现（D3 竞态根治）：
+// KEYS[1] 为 occupancy 条目全键，ARGV 同 occupancyAddScript。
+// 读取时惰性剔除过期成员；条件语义：存活成员集为空（或仅本键）时登记并返回 1；
+// 已含其它存活指纹时不动条目、返回存活键数（负数约定为冲突）。
 var occupancyClaimExclusiveScript = redis.NewScript(`
-local raw = redis.call('GET', KEYS[1])
+local key = KEYS[1]
+local fp = ARGV[1]
+local ttl_ms = tonumber(ARGV[2])
+local now_ms = tonumber(ARGV[3])
+local legacy_ms = tonumber(ARGV[4])
 local fps = {}
+local raw = redis.call('GET', key)
 if raw and raw ~= '' then
   local ok, obj = pcall(cjson.decode, raw)
   if ok and type(obj) == 'table' and type(obj.key_fps) == 'table' then
-    fps = obj.key_fps
+    local members = obj.key_fps
+    if members[1] ~= nil then
+      for _, m in ipairs(members) do
+        fps[m] = now_ms + legacy_ms
+      end
+    else
+      for m, exp in pairs(members) do
+        if exp == 0 or exp > now_ms then
+          fps[m] = exp
+        end
+      end
+    end
   end
 end
-local fp = ARGV[1]
-for _, m in ipairs(fps) do
-  if m == fp then
-    redis.call('PEXPIRE', KEYS[1], ARGV[2])
-    return 1
-  end
+if fps[fp] ~= nil then
+  fps[fp] = now_ms + ttl_ms
+  redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', ttl_ms)
+  return 1
 end
-if #fps > 0 then
-  return 0 - #fps
+local n = 0
+for _ in pairs(fps) do n = n + 1 end
+if n > 0 then
+  return 0 - n
 end
-fps[#fps + 1] = fp
-redis.call('SET', KEYS[1], cjson.encode({key_fps = fps}), 'PX', ARGV[2])
+fps[fp] = now_ms + ttl_ms
+redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', ttl_ms)
 return 1
 `)
 
 // occupancyRemoveScript 为移除路径的 Redis 原子实现：KEYS[1] 为 occupancy 条目全键，
-// ARGV[1] 为键指纹，ARGV[2] 为回退 TTL 毫秒（条目 PTTL 异常时使用）。
-// 读条目 -> 移除成员 -> 空则 DEL / 否则按剩余 TTL（PTTL，不续期）写回，成员
-// 不在条目内时幂等 no-op。缺这个原子性时，移除的 GET→SET 回写会覆盖并发
-// 登记/占位脚本刚追加的成员（成员丢失 -> 占用被低估 -> 独占误判空闲）。
+// ARGV[1] 为键指纹，ARGV[2] 为当前时刻毫秒，ARGV[3] 为回退 TTL 毫秒（条目 PTTL
+// 异常或 v1 成员重写时使用）。读条目 -> 惰性剔除过期成员 -> 移除目标成员 ->
+// 空则 DEL / 否则按剩余 TTL（PTTL，不续期）写回，成员不在条目内时幂等 no-op。
 var occupancyRemoveScript = redis.NewScript(`
-local raw = redis.call('GET', KEYS[1])
+local key = KEYS[1]
+local fp = ARGV[1]
+local now_ms = tonumber(ARGV[2])
+local fallback_ms = tonumber(ARGV[3])
+local raw = redis.call('GET', key)
 if not raw or raw == '' then
   return 1
 end
@@ -121,25 +198,41 @@ local ok, obj = pcall(cjson.decode, raw)
 if not ok or type(obj) ~= 'table' or type(obj.key_fps) ~= 'table' then
   return 1
 end
-local fp = ARGV[1]
-local kept = {}
-for _, m in ipairs(obj.key_fps) do
-  if m ~= fp then
-    kept[#kept + 1] = m
+local members = obj.key_fps
+local fps = {}
+local changed = false
+if members[1] ~= nil then
+  for _, m in ipairs(members) do
+    if m ~= fp then
+      fps[m] = now_ms + fallback_ms
+    end
+  end
+  changed = true
+else
+  for m, exp in pairs(members) do
+    if m == fp then
+      changed = true
+    elseif exp == 0 or exp > now_ms then
+      fps[m] = exp
+    else
+      changed = true
+    end
   end
 end
-if #kept == #obj.key_fps then
+if not changed then
   return 1
 end
-if #kept == 0 then
-  redis.call('DEL', KEYS[1])
+local n = 0
+for _ in pairs(fps) do n = n + 1 end
+if n == 0 then
+  redis.call('DEL', key)
   return 1
 end
-local pttl = redis.call('PTTL', KEYS[1])
+local pttl = redis.call('PTTL', key)
 if pttl <= 0 then
-  pttl = tonumber(ARGV[2])
+  pttl = fallback_ms
 end
-redis.call('SET', KEYS[1], cjson.encode({key_fps = kept}), 'PX', pttl)
+redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', pttl)
 return 1
 `)
 
@@ -177,7 +270,7 @@ func newAffinityStoreCache[V any](namespace string, codec cachex.ValueCodec[V]) 
 
 func getChannelAffinityOccupancyCache() *cachex.HybridCache[channelAffinityOccupancyEntry] {
 	channelAffinityOccupancyOnce.Do(func() {
-		channelAffinityOccupancyCache = newAffinityStoreCache(channelAffinityOccupancyNamespace, cachex.JSONCodec[channelAffinityOccupancyEntry]{})
+		channelAffinityOccupancyCache = newAffinityStoreCache(channelAffinityOccupancyNamespace, occupancyEntryCodec{})
 	})
 	return channelAffinityOccupancyCache
 }
@@ -189,40 +282,35 @@ func getChannelAffinityLastBindCache() *cachex.HybridCache[channelAffinityLastBi
 	return channelAffinityLastBindCache
 }
 
-// occupancyAddKeyFP 向渠道条目登记键指纹：条目缺失则新建，已含该指纹则仅续期整条目，
-// 否则追加后按本次 TTL 写回（条目整体 TTL 按最近一次登记续期，04 文档 §4.1）。
-// 渠道条目分段锁内执行，跨键并发的读-改-写不丢失成员（Redis 模式脚本原子，
-// 锁退化为同实例收敛；内存模式锁是唯一的原子性保证）。读改写失败返回 error
-// 由调用方降级（SSOT 5.1.5）。
+// occupancyAddKeyFP 向渠道条目登记键指纹：登记成员按本次 TTL 写入成员级过期时刻，
+// 条目 TTL 同步按本次 TTL 写（条目整体随最近一次登记续期）。存活成员集已含其它
+// 成员时一并惰性剔除过期成员后写回。渠道条目分段锁内执行，跨键并发的读-改-写
+// 不丢失成员（Redis 模式脚本原子，锁退化为同实例收敛；内存模式锁是唯一的原子性
+// 保证）。读改写失败返回 error 由调用方降级（SSOT 5.1.5）。
 func occupancyAddKeyFP(channelID int, keyFP string, ttl time.Duration) error {
 	cache := getChannelAffinityOccupancyCache()
 	key := strconv.Itoa(channelID)
 	lock := occupancyEntryLock(channelID)
 	lock.Lock()
 	defer lock.Unlock()
-	if redisMode := common.RedisEnabled && common.RDB != nil; redisMode {
+	if common.RedisEnabled && common.RDB != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), exclusiveRedisOpTimeout)
 		defer cancel()
-		return occupancyAddScript.Run(ctx, common.RDB, []string{cache.FullKey(key)}, keyFP, ttl.Milliseconds()).Err()
+		return occupancyAddScript.Run(ctx, common.RDB, []string{cache.FullKey(key)},
+			keyFP, ttl.Milliseconds(), time.Now().UnixMilli(), occupancyLegacyMemberTTL().Milliseconds()).Err()
 	}
 	entry, found, err := cache.Get(key)
 	if err != nil {
 		return fmt.Errorf("channel affinity occupancy read failed: channel=%d err=%w", channelID, err)
 	}
+	nowMs := time.Now().UnixMilli()
+	next := map[string]int64{}
 	if found {
-		for _, fp := range entry.KeyFPs {
-			if fp == keyFP {
-				if err := cache.SetWithTTL(key, entry, ttl); err != nil {
-					return fmt.Errorf("channel affinity occupancy renew failed: channel=%d err=%w", channelID, err)
-				}
-				occupancyMemExpireAt.Store(key, time.Now().Add(ttl))
-				return nil
-			}
+		for _, fp := range occupancyEntryMembers(entry, nowMs) {
+			next[fp] = entry.KeyFPs[fp]
 		}
 	}
-	next := make([]string, 0, len(entry.KeyFPs)+1)
-	next = append(next, entry.KeyFPs...)
-	next = append(next, keyFP)
+	next[keyFP] = nowMs + ttl.Milliseconds()
 	if err := cache.SetWithTTL(key, channelAffinityOccupancyEntry{KeyFPs: next}, ttl); err != nil {
 		return fmt.Errorf("channel affinity occupancy write failed: channel=%d err=%w", channelID, err)
 	}
@@ -230,10 +318,17 @@ func occupancyAddKeyFP(channelID int, keyFP string, ttl time.Duration) error {
 	return nil
 }
 
-// occupancyRemoveKeyFP 从渠道条目移除键指纹：集合清空则删除条目，否则按剩余 TTL 写回
-// （不续期）；成员或条目不存在时幂等 no-op。Redis 模式经 occupancyRemoveScript
-// 原子执行（与登记/占位脚本互斥，回写不覆盖并发追加的成员）；内存模式在渠道条目
-// 分段锁内读改写，与登记共用该锁，并发登记与移除对同一渠道条目互斥。
+// occupancyLegacyMemberTTL 为 v1 数组格式成员重写为 v2 时的回退成员寿命：
+// 取默认 TTL（条目级），保证升级重写不改变成员的实质占用时长量级。
+func occupancyLegacyMemberTTL() time.Duration {
+	return occupancyFallbackTTL()
+}
+
+// occupancyRemoveKeyFP 从渠道条目移除键指纹：读取时惰性剔除过期成员，集合清空则
+// 删除条目，否则按剩余 TTL 写回（不续期）；成员或条目不存在时幂等 no-op。
+// Redis 模式经 occupancyRemoveScript 原子执行（与登记/占位脚本互斥，回写不覆盖
+// 并发追加的成员）；内存模式在渠道条目分段锁内读改写，与登记共用该锁，
+// 并发登记与移除对同一渠道条目互斥。
 func occupancyRemoveKeyFP(channelID int, keyFP string) error {
 	cache := getChannelAffinityOccupancyCache()
 	key := strconv.Itoa(channelID)
@@ -241,8 +336,8 @@ func occupancyRemoveKeyFP(channelID int, keyFP string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), exclusiveRedisOpTimeout)
 		defer cancel()
 		fullKey := cache.FullKey(key)
-		fallbackTTL := occupancyFallbackTTL().Milliseconds()
-		return occupancyRemoveScript.Run(ctx, common.RDB, []string{fullKey}, keyFP, fallbackTTL).Err()
+		return occupancyRemoveScript.Run(ctx, common.RDB, []string{fullKey},
+			keyFP, time.Now().UnixMilli(), occupancyFallbackTTL().Milliseconds()).Err()
 	}
 	lock := occupancyEntryLock(channelID)
 	lock.Lock()
@@ -255,16 +350,24 @@ func occupancyRemoveKeyFP(channelID int, keyFP string) error {
 		occupancyMemExpireAt.Delete(key)
 		return nil
 	}
-	kept := make([]string, 0, len(entry.KeyFPs))
-	for _, fp := range entry.KeyFPs {
-		if fp != keyFP {
-			kept = append(kept, fp)
+	nowMs := time.Now().UnixMilli()
+	next := map[string]int64{}
+	removed := false
+	for fp, expireAt := range entry.KeyFPs {
+		if fp == keyFP {
+			removed = true
+			continue
 		}
+		if expireAt > 0 && expireAt <= nowMs {
+			removed = true // 过期成员随移除一并清理
+			continue
+		}
+		next[fp] = expireAt
 	}
-	if len(kept) == len(entry.KeyFPs) {
+	if !removed {
 		return nil
 	}
-	if len(kept) == 0 {
+	if len(next) == 0 {
 		if _, err := cache.DeleteMany([]string{key}); err != nil {
 			return fmt.Errorf("channel affinity occupancy delete failed: channel=%d err=%w", channelID, err)
 		}
@@ -272,14 +375,14 @@ func occupancyRemoveKeyFP(channelID int, keyFP string) error {
 		return nil
 	}
 	remaining := occupancyRemainingTTL(cache, key)
-	if err := cache.SetWithTTL(key, channelAffinityOccupancyEntry{KeyFPs: kept}, remaining); err != nil {
+	if err := cache.SetWithTTL(key, channelAffinityOccupancyEntry{KeyFPs: next}, remaining); err != nil {
 		return fmt.Errorf("channel affinity occupancy write failed: channel=%d err=%w", channelID, err)
 	}
 	return nil
 }
 
-// occupancyBindingCount 返回渠道条目的绑定键数与指纹列表（副本）。
-// 键数含本键时由调用方自行判定空闲（SSOT 5.1.2 第2条）。
+// occupancyBindingCount 返回渠道条目的存活成员数与指纹列表（副本，惰性剔除已
+// 过期成员）。键数含本键时由调用方自行判定空闲（SSOT 5.1.2 第2条）。
 func occupancyBindingCount(channelID int) (int, []string, error) {
 	entry, found, err := getChannelAffinityOccupancyCache().Get(strconv.Itoa(channelID))
 	if err != nil {
@@ -288,8 +391,7 @@ func occupancyBindingCount(channelID int) (int, []string, error) {
 	if !found || len(entry.KeyFPs) == 0 {
 		return 0, []string{}, nil
 	}
-	fps := make([]string, len(entry.KeyFPs))
-	copy(fps, entry.KeyFPs)
+	fps := occupancyEntryMembers(entry, time.Now().UnixMilli())
 	return len(fps), fps, nil
 }
 
@@ -359,7 +461,8 @@ func occupancyAddKeyFPAtomic(channelID int, keyFP string, ttl time.Duration) err
 		ctx, cancel := context.WithTimeout(context.Background(), exclusiveRedisOpTimeout)
 		defer cancel()
 		fullKey := cache.FullKey(strconv.Itoa(channelID))
-		return occupancyAddScript.Run(ctx, common.RDB, []string{fullKey}, keyFP, ttl.Milliseconds()).Err()
+		return occupancyAddScript.Run(ctx, common.RDB, []string{fullKey},
+			keyFP, ttl.Milliseconds(), time.Now().UnixMilli(), occupancyLegacyMemberTTL().Milliseconds()).Err()
 	}
 	return occupancyAddKeyFP(channelID, keyFP, ttl)
 }
@@ -373,16 +476,18 @@ type occupancyClaimResult struct {
 }
 
 // occupancyClaimExclusive 独占条件占位（check-then-act 竞态的原子化，原 D3 根治）：
-// 条目为空或仅含本键指纹时登记成功；已含其它指纹时不动条目并返回冲突与键数。
-// Redis 模式经 Lua 脚本原子执行（跨实例 CAS）；内存模式在渠道条目分段锁内
-// 读-判-写，跨键并发对同一渠道串行。读或写失败返回 error 由调用方降级（SSOT 5.1.5）。
+// 存活成员集为空或仅含本键指纹时登记成功（惰性剔除过期成员后判定）；已含其它存活
+// 指纹时不动条目并返回冲突与键数。Redis 模式经 Lua 脚本原子执行（跨实例 CAS）；
+// 内存模式在渠道条目分段锁内读-判-写，跨键并发对同一渠道串行。读或写失败返回
+// error 由调用方降级（SSOT 5.1.5）。
 func occupancyClaimExclusive(channelID int, keyFP string, ttl time.Duration) (occupancyClaimResult, error) {
 	cache := getChannelAffinityOccupancyCache()
 	key := strconv.Itoa(channelID)
 	if common.RedisEnabled && common.RDB != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), exclusiveRedisOpTimeout)
 		defer cancel()
-		res, err := occupancyClaimExclusiveScript.Run(ctx, common.RDB, []string{cache.FullKey(key)}, keyFP, ttl.Milliseconds()).Int()
+		res, err := occupancyClaimExclusiveScript.Run(ctx, common.RDB, []string{cache.FullKey(key)},
+			keyFP, ttl.Milliseconds(), time.Now().UnixMilli(), occupancyLegacyMemberTTL().Milliseconds()).Int()
 		if err != nil {
 			return occupancyClaimResult{}, fmt.Errorf("channel affinity occupancy claim failed: channel=%d err=%w", channelID, err)
 		}
@@ -399,22 +504,27 @@ func occupancyClaimExclusive(channelID int, keyFP string, ttl time.Duration) (oc
 	if err != nil {
 		return occupancyClaimResult{}, fmt.Errorf("channel affinity occupancy read failed: channel=%d err=%w", channelID, err)
 	}
+	nowMs := time.Now().UnixMilli()
+	next := map[string]int64{}
 	if found {
-		for _, fp := range entry.KeyFPs {
-			if fp == keyFP {
-				// 本键指纹已在条目内（重绑/续期）：仅续期。
-				if err := cache.SetWithTTL(key, entry, ttl); err != nil {
-					return occupancyClaimResult{}, fmt.Errorf("channel affinity occupancy renew failed: channel=%d err=%w", channelID, err)
-				}
-				occupancyMemExpireAt.Store(key, time.Now().Add(ttl))
-				return occupancyClaimResult{Claimed: true}, nil
-			}
-		}
-		if len(entry.KeyFPs) > 0 {
-			return occupancyClaimResult{Claimed: false, HolderCount: len(entry.KeyFPs)}, nil
+		for _, fp := range occupancyEntryMembers(entry, nowMs) {
+			next[fp] = entry.KeyFPs[fp]
 		}
 	}
-	if err := cache.SetWithTTL(key, channelAffinityOccupancyEntry{KeyFPs: []string{keyFP}}, ttl); err != nil {
+	if _, mine := next[keyFP]; mine {
+		// 本键指纹已在条目内（重绑/续期）：仅续期本成员与条目。
+		next[keyFP] = nowMs + ttl.Milliseconds()
+		if err := cache.SetWithTTL(key, channelAffinityOccupancyEntry{KeyFPs: next}, ttl); err != nil {
+			return occupancyClaimResult{}, fmt.Errorf("channel affinity occupancy renew failed: channel=%d err=%w", channelID, err)
+		}
+		occupancyMemExpireAt.Store(key, time.Now().Add(ttl))
+		return occupancyClaimResult{Claimed: true}, nil
+	}
+	if len(next) > 0 {
+		return occupancyClaimResult{Claimed: false, HolderCount: len(next)}, nil
+	}
+	next[keyFP] = nowMs + ttl.Milliseconds()
+	if err := cache.SetWithTTL(key, channelAffinityOccupancyEntry{KeyFPs: next}, ttl); err != nil {
 		return occupancyClaimResult{}, fmt.Errorf("channel affinity occupancy write failed: channel=%d err=%w", channelID, err)
 	}
 	occupancyMemExpireAt.Store(key, time.Now().Add(ttl))
@@ -489,10 +599,9 @@ func GetChannelAffinityDegradedReuseTotal() uint64 {
 }
 
 // GetChannelAffinityExclusiveStats 按反向占用索引实时统计独占/复用绑定键数
-// （SSOT 4.2.4 规则1）：遍历全部渠道条目，键数为 1 的渠道贡献 1 记独占、
-// 键数大于 1 的渠道贡献其键数记复用，不区分规则来源（渠道全局口径）。
-// 索引键遍历失败返回 (0, 0) 并记 SysError（03 文档 3.2 边界值：失败返回 0）。
-// 成员残留滞后窗口属设计内（04 文档 §4.1），不做成员级精确过期。
+// （SSOT 4.2.4 规则1）：遍历全部渠道条目（惰性剔除过期成员），键数为 1 的渠道
+// 贡献 1 记独占、键数大于 1 的渠道贡献其键数记复用，不区分规则来源（渠道全局
+// 口径）。索引键遍历失败返回 (0, 0) 并记 SysError（03 文档 3.2 边界值：失败返回 0）。
 func GetChannelAffinityExclusiveStats() (exclusive int, shared int) {
 	cache := getChannelAffinityOccupancyCache()
 	keys, err := cache.Keys()
@@ -500,12 +609,13 @@ func GetChannelAffinityExclusiveStats() (exclusive int, shared int) {
 		common.SysError(fmt.Sprintf("channel affinity occupancy list keys failed: err=%v", err))
 		return 0, 0
 	}
+	nowMs := time.Now().UnixMilli()
 	for _, k := range keys {
 		entry, found, err := cache.Get(k)
 		if err != nil || !found {
 			continue
 		}
-		n := len(entry.KeyFPs)
+		n := len(occupancyEntryMembers(entry, nowMs))
 		if n == 1 {
 			exclusive += 1
 		} else if n > 1 {

@@ -906,6 +906,9 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 	// 登记反向占用索引与最近绑定记录：所有规则（无论是否启用独占）均登记
 	// （SSOT 5.2.4 规则1）。迁移前渠道取本次请求首次占位渠道：>0 即失败切换
 	// 迁移场景，旧渠道移除、迁入豁免独占判定（SSOT 5.1.2 第4条）。
+	// boundChannel 未设置（软规则首绑/正向 TTL 过期后重绑）时回退读最近绑定
+	// 记录（两周期寿命覆盖正向过期窗口）：正向过期后随机重绑到新渠道，旧渠道
+	// 上的指纹必须迁移移除，否则占用虚高污染独占判定（残留随活跃键续期永不过期）。
 	if c != nil {
 		meta, metaOK := getChannelAffinityMeta(c)
 		if metaOK && meta.KeyFingerprint != "" {
@@ -916,6 +919,11 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 				}
 			}
 			cacheKeySuffix := strings.TrimPrefix(meta.CacheKey, channelAffinityCacheNamespace+":")
+			if oldChannelID <= 0 {
+				if record, lbFound, lbErr := lastBindGet(cacheKeySuffix); lbErr == nil && lbFound && record.ChannelID > 0 {
+					oldChannelID = record.ChannelID
+				}
+			}
 			registerBindingIndexes(cacheKeySuffix, meta.KeyFingerprint, oldChannelID, channelID, time.Duration(ttlSeconds)*time.Second)
 		}
 	}
