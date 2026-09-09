@@ -651,6 +651,12 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 			if c != nil {
 				c.Set(ginKeyChannelAffinityBoundChannel, channelID)
 			}
+			// 独占命中续期时的满载残留收敛：本键与其它键共享渠道（满载降级
+			// 或渠道禁用扰动的遗产）而候选集已有空闲渠道时，原子 hop 到空闲
+			// 渠道，把堆积的消解从"整 TTL 到期"提前到本键的下一请求。
+			if rule.ExclusiveBind {
+				channelID = rebalanceExclusiveBinding(c, channelID, usingGroup, modelName)
+			}
 			return channelID, true
 		}
 		if rule.ExclusiveBind {

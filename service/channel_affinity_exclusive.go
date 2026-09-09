@@ -1446,6 +1446,300 @@ func HandleChannelAffinityRulesUpdate(oldRulesJSON string, newRulesJSON string) 
 	}
 }
 
+// occupancyHopScript 为独占命中续期时满载残留收敛的原子 hop：单次脚本执行内
+// 复核迁移前提并完成迁移写，消除 check-then-act 窗口。
+// KEYS[1] 旧渠道 occupancy 条目，KEYS[2..N] 候选渠道 occupancy 条目（与调用方
+// candidates 顺序一致，含旧渠道），ARGV[1] 键指纹，ARGV[2] 绑定 TTL 毫秒，
+// ARGV[3] 当前时刻毫秒，ARGV[4] v1 成员回退过期毫秒。
+// 前提复核（服务端实时值）：旧渠道存活成员（剔除本键）>0（本键仍在共享），
+// 且最少绑定数候选的键数 < 旧渠道其它键数（hop 后本键所在渠道绑定数下降，
+// 分布的最大堆严格减小）。仅当目标为完全空闲（0 键）或差距 >=2 时迁移：
+// 差距 1 时迁移只交换两渠道的绑定数（本键从 n+1 渠道到 n 渠道，最大堆不变），
+// 属无意义的迁移扰动。前提不成立时只读不写返回 {0,0}（绑定维持原值）；
+// 成立时在最少绑定层按 ARGV[5] 随机起点选定目标，从旧渠道移除本键（空则
+// DEL，否则 KEEPTTL 写回），向目标登记本键（成员合并/过期剔除/v1 重写/条目
+// PX 只延长不截断，与登记脚本同语义），返回 {目标候选下标(0基), 旧渠道其它键数}。
+// 注：脚本跨多键访问，要求 standalone Redis（项目 common.RDB 为单连接客户端）。
+var occupancyHopScript = redis.NewScript(occupancyEntryPttlLua + `
+local fp = ARGV[1]
+local ttl_ms = tonumber(ARGV[2])
+local now_ms = tonumber(ARGV[3])
+local legacy_ms = tonumber(ARGV[4])
+local start_idx = tonumber(ARGV[5])
+
+local function liveMembers(raw)
+  local fps = {}
+  if not raw or raw == '' then
+    return fps
+  end
+  local ok, obj = pcall(cjson.decode, raw)
+  if not ok or type(obj) ~= 'table' or type(obj.key_fps) ~= 'table' then
+    return fps
+  end
+  local members = obj.key_fps
+  if members[1] ~= nil then
+    for _, m in ipairs(members) do
+      fps[m] = 0
+    end
+  else
+    for m, exp in pairs(members) do
+      if exp == 0 or exp > now_ms then
+        fps[m] = exp
+      end
+    end
+  end
+  return fps
+end
+
+local function rewriteV1(fps)
+  for m, exp in pairs(fps) do
+    if exp == 0 then
+      fps[m] = now_ms + legacy_ms
+    end
+  end
+end
+
+local oldFps = liveMembers(redis.call('GET', KEYS[1]))
+local others = 0
+for m, _ in pairs(oldFps) do
+  if m ~= fp then
+    others = others + 1
+  end
+end
+if others == 0 then
+  return {0 - 1, 0}
+end
+
+-- 候选实时其它键数，最少绑定层与其键数。
+local counts = {}
+local min_n = -1
+for i = 2, #KEYS do
+  local fps = liveMembers(redis.call('GET', KEYS[i]))
+  local n = 0
+  for m, _ in pairs(fps) do
+    if m ~= fp then
+      n = n + 1
+    end
+  end
+  counts[i] = n
+  if min_n < 0 or n < min_n then
+    min_n = n
+  end
+end
+-- 迁移有效性：目标层键数与旧渠道其它键数差距不足 2（且非完全空闲）时，
+-- hop 无法减小分布的最大堆，维持原绑定（避免交换式扰动与迁移风暴）。
+if min_n > 0 and others - min_n < 2 then
+  return {0 - 1, others}
+end
+local tier = {}
+for i = 2, #KEYS do
+  if counts[i] == min_n then
+    tier[#tier + 1] = i
+  end
+end
+local pick = tier[(start_idx % #tier) + 1]
+
+-- 旧渠道移除本键：剩余成员重写 v1 过期为 v2 后 KEEPTTL 写回（条目寿命不变），
+-- 清空则 DEL。
+oldFps[fp] = nil
+local remain = 0
+for _ in pairs(oldFps) do remain = remain + 1 end
+if remain == 0 then
+  redis.call('DEL', KEYS[1])
+else
+  rewriteV1(oldFps)
+  redis.call('SET', KEYS[1], cjson.encode({key_fps = oldFps}), 'KEEPTTL')
+end
+
+-- 目标渠道登记本键：重读实时条目，v1 成员重写后并入本键，条目 PX 与登记
+-- 脚本同口径只延长不截断。
+local targetFps = liveMembers(redis.call('GET', KEYS[pick]))
+rewriteV1(targetFps)
+targetFps[fp] = now_ms + ttl_ms
+redis.call('SET', KEYS[pick], cjson.encode({key_fps = targetFps}), 'PX', entryPttlMs(KEYS[pick], ttl_ms, now_ms))
+return {pick - 1, others}
+`)
+
+// rebalanceExclusiveBinding 独占命中续期时的满载残留收敛：本键与其它键共享
+// 渠道（满载降级或禁用扰动的遗产）而候选集已出现空闲渠道时，原子迁移到空闲
+// 渠道并改写正向绑定与最近绑定记录。
+// 残留来源（生产症状：渠道大量空闲时多键集中共享同一渠道）：渠道禁用把键挤到
+// 少数渠道（合法满载降级），渠道恢复后存活键走亲和命中续期，绑定钉在原渠道，
+// 堆积只能等整 TTL 到期重绑才消解（默认 3600s）。收敛提前到本键的下一请求：
+// 命中续期发现共享 + 空闲即 hop，堆积在一个请求周期内自然排空。
+// 决策与迁移写经 occupancyHopScript 服务端原子复核（快照过期时 no-op 维持原值），
+// 内存模式在占位全局锁内重读实时占用后同语义执行。失败记 SysError 并维持原
+// 绑定（收敛属尽力而为，残留随 TTL 收敛，与 SSOT 5.1.5 降级语义同口径）。
+// 返回本请求应使用的渠道（hop 成功为新渠道，否则原渠道）。
+func rebalanceExclusiveBinding(c *gin.Context, currentChannelID int, usingGroup string, modelName string) int {
+	meta, ok := getChannelAffinityMeta(c)
+	if !ok || meta.KeyFingerprint == "" {
+		return currentChannelID
+	}
+	candidates := exclusiveCandidateChannels(c, meta, usingGroup, modelName)
+	if len(candidates) == 0 {
+		return currentChannelID
+	}
+	// 候选集不含当前绑定渠道（渠道被移出分组等）：亲和命中后的 distributor
+	// 可用性复核会走清占位重绑，此处无须收敛。
+	hasCurrent := false
+	for _, id := range candidates {
+		if id == currentChannelID {
+			hasCurrent = true
+			break
+		}
+	}
+	if !hasCurrent {
+		return currentChannelID
+	}
+
+	ttl := exclusiveAffinityTTL(meta)
+	cacheKeySuffix := strings.TrimPrefix(meta.CacheKey, channelAffinityCacheNamespace+":")
+
+	placement, err := occupancyHopLeast(candidates, currentChannelID, meta.KeyFingerprint, ttl, exclusivePickRandom(candidates)-candidates[0])
+	if err != nil {
+		common.SysError(fmt.Sprintf("channel affinity occupancy hop failed: channel=%d key_fp=%s err=%v", currentChannelID, meta.KeyFingerprint, err))
+		return currentChannelID
+	}
+	if placement.ChannelID == 0 {
+		return currentChannelID // 无共享或无空闲：绑定维持原值
+	}
+
+	// 正向绑定与最近绑定记录改写为 hop 结果（占用索引迁移已由脚本完成）。
+	// 写失败时回滚占用索引恢复原渠道，维持原绑定（与 acquire 的回滚口径一致）。
+	cache := getChannelAffinityCache()
+	if err := cache.SetWithTTL(cacheKeySuffix, placement.ChannelID, ttl); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity hop forward write failed: channel=%d key_fp=%s err=%v", placement.ChannelID, meta.KeyFingerprint, err))
+		occupancyRemoveKeyFP(placement.ChannelID, meta.KeyFingerprint)
+		_ = occupancyAddKeyFP(currentChannelID, meta.KeyFingerprint, ttl)
+		return currentChannelID
+	}
+	if err := lastBindSet(cacheKeySuffix, placement.ChannelID, 2*ttl); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity hop last bind write failed: channel=%d key_fp=%s err=%v", placement.ChannelID, meta.KeyFingerprint, err))
+	}
+	// 迁移后首占渠道更新为 hop 目标：终态失败回滚与后续迁移据此定位。
+	if c != nil {
+		c.Set(ginKeyChannelAffinityBoundChannel, placement.ChannelID)
+	}
+	common.SysLog(fmt.Sprintf(
+		"channel affinity exclusive rebalance hop: rule=%s key_fp=%s from_channel=%d to_channel=%d freed_holders=%d",
+		meta.RuleName, meta.KeyFingerprint, currentChannelID, placement.ChannelID, placement.HolderCount))
+	return placement.ChannelID
+}
+
+// occupancyHopLeast 原子 hop 的存储层执行：Redis 模式经 occupancyHopScript
+// 服务端原子完成复核与迁移；内存模式在占位全局锁内重读实时占用后同语义执行
+//（进程内串行，等价语义）。返回 ChannelID=0 表示前提不成立（无共享或无空闲）。
+func occupancyHopLeast(candidates []int, oldChannelID int, keyFP string, ttl time.Duration, startIdx int) (occupancyPlacement, error) {
+	if common.RedisEnabled && common.RDB != nil {
+		cache := getChannelAffinityOccupancyCache()
+		keys := make([]string, 0, len(candidates)+1)
+		keys = append(keys, cache.FullKey(strconv.Itoa(oldChannelID)))
+		for _, id := range candidates {
+			keys = append(keys, cache.FullKey(strconv.Itoa(id)))
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), exclusiveRedisOpTimeout)
+		defer cancel()
+		res, err := occupancyHopScript.Run(ctx, common.RDB, keys,
+			keyFP, ttl.Milliseconds(), time.Now().UnixMilli(), occupancyLegacyMemberTTL().Milliseconds(), startIdx).Slice()
+		if err != nil {
+			return occupancyPlacement{}, fmt.Errorf("channel affinity hop script failed: key_fp=%s err=%w", keyFP, err)
+		}
+		if len(res) != 2 {
+			return occupancyPlacement{}, fmt.Errorf("channel affinity hop unexpected reply: key_fp=%s reply=%v", keyFP, res)
+		}
+		idx, _ := res[0].(int64)
+		holderCount, _ := res[1].(int64)
+		if idx < 0 {
+			return occupancyPlacement{ChannelID: 0, HolderCount: int(holderCount)}, nil
+		}
+		// 脚本 KEYS 布局为 [旧渠道, candidates[0], candidates[1], ...]，返回的
+		// pick 是该数组 1 基下标：换算回 candidates 0 基下标须再减 1。
+		candIdx := idx - 1
+		if candIdx < 0 || int(candIdx) >= len(candidates) {
+			return occupancyPlacement{}, fmt.Errorf("channel affinity hop index out of range: key_fp=%s idx=%d", keyFP, idx)
+		}
+		return occupancyPlacement{ChannelID: candidates[candIdx], HolderCount: int(holderCount)}, nil
+	}
+
+	occupancyPlacementLock.Lock()
+	defer occupancyPlacementLock.Unlock()
+
+	cache := getChannelAffinityOccupancyCache()
+	nowMs := time.Now().UnixMilli()
+	oldEntry, oldFound, err := cache.Get(strconv.Itoa(oldChannelID))
+	if err != nil {
+		return occupancyPlacement{}, fmt.Errorf("channel affinity occupancy read failed: channel=%d err=%w", oldChannelID, err)
+	}
+	others := 0
+	if oldFound {
+		for _, fp := range occupancyEntryMembers(oldEntry, nowMs) {
+			if fp != keyFP {
+				others++
+			}
+		}
+	}
+	if others == 0 {
+		return occupancyPlacement{ChannelID: 0}, nil
+	}
+
+	free := make([]int, 0, len(candidates))
+	minCount := -1
+	for _, id := range candidates {
+		entry, found, err := cache.Get(strconv.Itoa(id))
+		if err != nil {
+			return occupancyPlacement{}, fmt.Errorf("channel affinity occupancy read failed: channel=%d err=%w", id, err)
+		}
+		n := 0
+		if found {
+			for _, fp := range occupancyEntryMembers(entry, nowMs) {
+				if fp != keyFP {
+					n++
+				}
+			}
+		}
+		if minCount == -1 || n < minCount {
+			minCount = n
+		}
+		if n == 0 {
+			free = append(free, id)
+		}
+	}
+	// 与脚本同口径的迁移有效性：目标层非空闲且差距不足 2 时维持原绑定。
+	if minCount > 0 && others-minCount < 2 {
+		return occupancyPlacement{ChannelID: 0, HolderCount: others}, nil
+	}
+	if len(free) == 0 {
+		free = make([]int, 0, len(candidates))
+		for _, id := range candidates {
+			entry, found, err := cache.Get(strconv.Itoa(id))
+			if err != nil {
+				return occupancyPlacement{}, fmt.Errorf("channel affinity occupancy read failed: channel=%d err=%w", id, err)
+			}
+			n := 0
+			if found {
+				for _, fp := range occupancyEntryMembers(entry, nowMs) {
+					if fp != keyFP {
+						n++
+					}
+				}
+			}
+			if n == minCount {
+				free = append(free, id)
+			}
+		}
+	}
+	pick := free[startIdx%len(free)]
+
+	if err := occupancyRemoveKeyFP(oldChannelID, keyFP); err != nil {
+		return occupancyPlacement{}, err
+	}
+	if err := occupancyAddKeyFP(pick, keyFP, ttl); err != nil {
+		return occupancyPlacement{}, err
+	}
+	return occupancyPlacement{ChannelID: pick, HolderCount: others}, nil
+}
+
 func init() {
 	operation_setting.OnRulesExclusiveBindChanged = HandleChannelAffinityRulesUpdate
 }

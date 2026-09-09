@@ -56,17 +56,25 @@ func TestRealRedisEntryTTLNotTruncatedByShorterMember(t *testing.T) {
 // TestRealRedisMixedTTLSilentDoubleBind 生产形态复现：长 TTL 独占键绑渠道 A 后，
 // 短 TTL 键（另一规则）短暂共享 A，短键过期后 A 的占用必须仍属于长键；
 // 若占用被条目截断丢失，第三键 claim A 成功即形成静默双占。
+// 注意：长键续期命中时若检测到共享（短键注入）且有空闲渠道，独占收敛 hop 会
+// 把长键迁往空闲渠道（正当行为）。为聚焦本测试的条目 TTL 语义，注入短键前先
+// 把其余候选渠道占满（各放 1 个假指纹），使 hop 前提不成立、长键留驻 A。
 func TestRealRedisMixedTTLSilentDoubleBind(t *testing.T) {
 	useRealRedisMode(t)
 	useSoftPlacementFixture(t, true)
 
-	// 长键独占 921（规则 ttl=60s，与夹具规则一致）。
+	// 长键独占绑定（规则 ttl=60s，与夹具规则一致）。
 	ctxLong := realRedisRequestCtx("long-key")
 	chLong, found := GetPreferredChannelByAffinity(ctxLong, "gpt-4", "default")
 	require.True(t, found)
 	require.Contains(t, softPlacementChannels, chLong)
-	// 记录长键选择渠道号（后续断言用）。release 编译器抱怨。
-	_ = ctxLong
+
+	// 占满其余候选渠道（各 1 个假指纹）：hop 无更优落点，长键稳定留驻。
+	for _, id := range softPlacementChannels {
+		if id != chLong {
+			require.NoError(t, occupancyAddKeyFP(id, fmt.Sprintf("mixed-fill-%d", id), 30*time.Second))
+		}
+	}
 
 	// 短 TTL 成员直接注入到同一渠道（模拟另一规则 ttl=1s 的键满载/随机落位）。
 	fpLong := affinityFingerprint("long-key")
@@ -76,6 +84,7 @@ func TestRealRedisMixedTTLSilentDoubleBind(t *testing.T) {
 	ctxRenew := realRedisRequestCtx("long-key")
 	_, found = GetPreferredChannelByAffinity(ctxRenew, "gpt-4", "default")
 	require.True(t, found)
+	require.Equal(t, chLong, forwardBindingOfKey(t, "long-key"), "full candidate set must keep long-key in place (no hop target)")
 	ctxRenew.Set("channel_id", chLong)
 	RecordChannelAffinity(ctxRenew, chLong)
 
@@ -88,10 +97,26 @@ func TestRealRedisMixedTTLSilentDoubleBind(t *testing.T) {
 	assert.Contains(t, fps, fpLong)
 
 	// 第三键首发独占：不得把长键的渠道视为空闲（静默双占即生产堆积来源）。
+	// 其余渠道已被占满（各 1 假指纹），第三键必然降级 shared，落点任意。
 	ctxThird := realRedisRequestCtx("third-key")
 	chThird, found := GetPreferredChannelByAffinity(ctxThird, "gpt-4", "default")
 	require.True(t, found)
-	assert.NotEqual(t, chLong, chThird, "new key must not claim the channel still occupied by long-key")
+	_ = chThird
+	// 核心断言收敛于占用索引：长键渠道条目必须仍含长键指纹（未被截断丢失）。
+	count, fps, err = occupancyBindingCount(chLong)
+	require.NoError(t, err)
+	assert.Contains(t, fps, fpLong, "long-key occupancy must never be lost to entry TTL truncation")
+}
+
+// forwardBindingOfKey 读长键正向绑定渠道（0 为无绑定）。
+func forwardBindingOfKey(t *testing.T, key string) int {
+	t.Helper()
+	v, found, err := getChannelAffinityCache().Get(affinityKeySuffix(key))
+	require.NoError(t, err)
+	if !found {
+		return 0
+	}
+	return v
 }
 
 // TestRealRedisConcurrentExclusiveBatch20 真实 Redis 下 20 键 6 渠道并发首发独占：
