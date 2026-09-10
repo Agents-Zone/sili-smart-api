@@ -1451,14 +1451,16 @@ func HandleChannelAffinityRulesUpdate(oldRulesJSON string, newRulesJSON string) 
 // KEYS[1] 旧渠道 occupancy 条目，KEYS[2..N] 候选渠道 occupancy 条目（与调用方
 // candidates 顺序一致，含旧渠道），ARGV[1] 键指纹，ARGV[2] 绑定 TTL 毫秒，
 // ARGV[3] 当前时刻毫秒，ARGV[4] v1 成员回退过期毫秒。
-// 前提复核（服务端实时值）：旧渠道存活成员（剔除本键）>0（本键仍在共享），
-// 且最少绑定数候选的键数 < 旧渠道其它键数（hop 后本键所在渠道绑定数下降，
-// 分布的最大堆严格减小）。仅当目标为完全空闲（0 键）或差距 >=2 时迁移：
-// 差距 1 时迁移只交换两渠道的绑定数（本键从 n+1 渠道到 n 渠道，最大堆不变），
-// 属无意义的迁移扰动。前提不成立时只读不写返回 {0,0}（绑定维持原值）；
-// 成立时在最少绑定层按 ARGV[5] 随机起点选定目标，从旧渠道移除本键（空则
-// DEL，否则 KEEPTTL 写回），向目标登记本键（成员合并/过期剔除/v1 重写/条目
-// PX 只延长不截断，与登记脚本同语义），返回 {目标候选下标(0基), 旧渠道其它键数}。
+// 前提复核（服务端实时值）：本键指纹仍在旧渠道存活（并发 hop 已迁走时 no-op，
+// 防止后到者以过期旧值再迁移造成指纹双渠道登记）、旧渠道存活成员（剔除本键）
+// >0（本键仍在共享），且最少绑定数候选的键数 < 旧渠道其它键数（hop 后本键
+// 所在渠道绑定数下降，分布的最大堆严格减小）。仅当目标为完全空闲（0 键）或
+// 差距 >=2 时迁移：差距 1 时迁移只交换两渠道的绑定数（本键从 n+1 渠道到 n
+// 渠道，最大堆不变），属无意义的迁移扰动。前提不成立时只读不写返回 {0,0}
+//（绑定维持原值）；成立时在最少绑定层按 ARGV[5] 随机起点选定目标，从旧渠道
+// 移除本键（空则 DEL，否则 KEEPTTL 写回），向目标登记本键（成员合并/过期
+// 剔除/v1 重写/条目 PX 只延长不截断，与登记脚本同语义），返回
+// {目标候选下标(0基), 旧渠道其它键数}。
 // 注：脚本跨多键访问，要求 standalone Redis（项目 common.RDB 为单连接客户端）。
 var occupancyHopScript = redis.NewScript(occupancyEntryPttlLua + `
 local fp = ARGV[1]
@@ -1500,6 +1502,11 @@ local function rewriteV1(fps)
 end
 
 local oldFps = liveMembers(redis.call('GET', KEYS[1]))
+if oldFps[fp] == nil then
+  -- 本键指纹已不在旧渠道（并发 hop 已迁移/回滚已清占位）：以旧值为据的本次
+  -- hop 必须放弃，否则指纹被二次登记到另一渠道，双渠道幽灵占用污染空闲判定。
+  return {0 - 1, 0}
+end
 local others = 0
 for m, _ in pairs(oldFps) do
   if m ~= fp then
@@ -1671,15 +1678,20 @@ func occupancyHopLeast(candidates []int, oldChannelID int, keyFP string, ttl tim
 	if err != nil {
 		return occupancyPlacement{}, fmt.Errorf("channel affinity occupancy read failed: channel=%d err=%w", oldChannelID, err)
 	}
+	// 与脚本同口径：本键指纹已不在旧渠道（并发 hop 已迁移）时 no-op，
+	// 防止后到者以过期旧值再迁移造成指纹双渠道登记。
+	selfHeld := false
 	others := 0
 	if oldFound {
 		for _, fp := range occupancyEntryMembers(oldEntry, nowMs) {
-			if fp != keyFP {
+			if fp == keyFP {
+				selfHeld = true
+			} else {
 				others++
 			}
 		}
 	}
-	if others == 0 {
+	if !selfHeld || others == 0 {
 		return occupancyPlacement{ChannelID: 0}, nil
 	}
 

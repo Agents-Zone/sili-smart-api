@@ -906,6 +906,18 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 		ttlSeconds = 3600
 	}
 	cache := getChannelAffinityCache()
+	// 独占规则命中续期的在途回写防护：请求在途期间（流式可达数秒），并发请求的
+	// hop/重绑可能已把正向绑定改向新渠道。本请求携带的渠道是选中瞬间的旧值，
+	// 无条件覆盖会复活旧绑定并无条件重登记占用（旧渠道幽灵占用，污染空闲判定
+	// 形成堆积）。回写前比对正向缓存当前值：已被改向（现值与本请求渠道不一致
+	// 且非首次绑定）时跳过固化与登记，绑定维持胜者结果。软规则不受影响。
+	if c != nil {
+		if meta, metaOK := getChannelAffinityMeta(c); metaOK && meta.ExclusiveBind {
+			if current, found, err := cache.Get(cacheKey); err == nil && found && current > 0 && current != channelID {
+				return
+			}
+		}
+	}
 	if err := cache.SetWithTTL(cacheKey, channelID, time.Duration(ttlSeconds)*time.Second); err != nil {
 		common.SysError(fmt.Sprintf("channel affinity cache set failed: key=%s, err=%v", cacheKey, err))
 	}
