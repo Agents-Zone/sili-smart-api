@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -925,6 +926,131 @@ func DeleteChannelBatch(c *gin.Context) {
 		"data":    deletedCount,
 	})
 	return
+}
+
+// ChannelBatchUpdateRequest 批量编辑请求体。字段全部为指针：省略或 null 即跳过，
+// 出现即生效（03 文档 1.2 空即跳过语义）。D 区排除字段不在结构体中声明，
+// 未知/排除字段经白名单 DTO 天然不解析（03 文档 2.2.9）。
+type ChannelBatchUpdateRequest struct {
+	Ids          []int   `json:"ids"`
+	Group        *string `json:"group"`
+	Tag          *string `json:"tag"`
+	Remark       *string `json:"remark"`
+	Models       *string `json:"models"`
+	ModelMapping *string `json:"model_mapping"`
+	Weight       *int    `json:"weight"`
+	Priority     *int64  `json:"priority"`
+	TestModel    *string `json:"test_model"`
+	AutoBan      *int    `json:"auto_ban"`
+}
+
+// optionalTrimmedString 归一化可选文本字段：nil 或 trim 后为空均视为未填写（返回 nil 跳过），
+// 超出 maxLen 返回对应错误（03 文档 4.2.4 规则1 空即跳过）。
+func optionalTrimmedString(v *string, maxLen int, tooLong string) (*string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(*v)
+	if trimmed == "" {
+		return nil, nil
+	}
+	if len(trimmed) > maxLen {
+		return nil, errors.New(tooLong)
+	}
+	return common.GetPointer(trimmed), nil
+}
+
+// buildBatchUpdateFields 校验并归一化请求：返回列更新字段；err 为具体失败原因。
+// 校验顺序：ids 边界 → 逐字段值域 → 生效字段数（03 文档 2.2）。
+func (r *ChannelBatchUpdateRequest) buildBatchUpdateFields() (model.ChannelBatchEditFields, error) {
+	var fields model.ChannelBatchEditFields
+	if len(r.Ids) == 0 {
+		return fields, errors.New("参数错误")
+	}
+	if len(r.Ids) > 200 {
+		return fields, errors.New("单次批量编辑上限 200 条，请分批操作")
+	}
+
+	group, err := optionalTrimmedString(r.Group, 64, "分组长度不能超过 64 字符")
+	if err != nil {
+		return fields, err
+	}
+	if group != nil {
+		for _, segment := range strings.Split(*group, ",") {
+			if strings.TrimSpace(segment) == "" {
+				return fields, errors.New("分组格式错误")
+			}
+		}
+		fields.Group = group
+	}
+
+	fields.Tag, err = optionalTrimmedString(r.Tag, 191, "标签长度不能超过 191 字符")
+	if err != nil {
+		return fields, err
+	}
+
+	fields.Remark, err = optionalTrimmedString(r.Remark, 255, "备注长度不能超过 255 字符")
+	if err != nil {
+		return fields, err
+	}
+
+	if r.Models != nil {
+		models := strings.TrimSpace(*r.Models)
+		if models != "" {
+			for _, segment := range strings.Split(models, ",") {
+				name := strings.TrimSpace(segment)
+				if name == "" {
+					return fields, errors.New("模型列表格式错误")
+				}
+				if len(name) > 255 {
+					return fields, fmt.Errorf("模型名称过长: %s", name)
+				}
+			}
+			fields.Models = common.GetPointer(models)
+		}
+	}
+
+	if r.ModelMapping != nil {
+		mapping := strings.TrimSpace(*r.ModelMapping)
+		if mapping == "" {
+			return fields, errors.New("模型重定向不能为空（如需清空请在单个编辑中操作）")
+		}
+		var parsed map[string]any
+		if err := common.UnmarshalJsonStr(mapping, &parsed); err != nil || parsed == nil {
+			return fields, errors.New("模型重定向必须是合法的 JSON 对象")
+		}
+		fields.ModelMapping = common.GetPointer(mapping)
+	}
+
+	if r.Weight != nil {
+		if *r.Weight < 0 || int64(*r.Weight) > 4294967295 {
+			return fields, errors.New("权重必须在 0-4294967295 之间")
+		}
+		fields.Weight = common.GetPointer(uint(*r.Weight))
+	}
+
+	if r.Priority != nil {
+		fields.Priority = common.GetPointer(*r.Priority)
+	}
+
+	fields.TestModel, err = optionalTrimmedString(r.TestModel, 255, "测试模型长度不能超过 255 字符")
+	if err != nil {
+		return fields, err
+	}
+
+	if r.AutoBan != nil {
+		if *r.AutoBan != 0 && *r.AutoBan != 1 {
+			return fields, errors.New("自动封禁取值错误")
+		}
+		fields.AutoBan = common.GetPointer(*r.AutoBan)
+	}
+
+	if fields.Group == nil && fields.Tag == nil && fields.Remark == nil && fields.Models == nil &&
+		fields.ModelMapping == nil && fields.Weight == nil && fields.Priority == nil &&
+		fields.TestModel == nil && fields.AutoBan == nil {
+		return fields, errors.New("批量编辑至少需要填写一个字段")
+	}
+	return fields, nil
 }
 
 type PatchChannel struct {
