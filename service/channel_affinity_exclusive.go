@@ -1383,6 +1383,69 @@ func clearExclusiveRuntimeByRuleNamePrefix(ruleName string) (int, error) {
 	return deleted, nil
 }
 
+// ClearChannelAffinityRuntimeByChannelIDs 按渠道同批清除三套运行时数据（三批同清，
+// SSOT 5.2.2 第7条、5.2.4 规则2）：该渠道仍持有的正向绑定、该渠道的反向占用索引
+// 条目与对应键的最近绑定记录。供下游渠道配置变更（渠道批量编辑）在路由相关字段
+// 生效后调用。返回清除的正向绑定条数（口径同 ClearChannelAffinityCacheAll()）。
+// 目标集合为 channelIDs 中 id > 0 的去重集合，为空时零副作用直接返回 0。
+//
+// 键绑定渠道必须在删除正向之前读出（删除后无法再定位该键占用的渠道）；
+// DeleteMany 失败重试一次（SSOT 5.2.5），仍失败仅记 SysError 并继续回放反向数据
+// （正向残留随 TTL 收敛，方向为多清不少清）；回放复用
+// clearExclusiveRuntimeByForwardKeys，按键后缀推导指纹做 occupancy 成员级移除
+// 并批删对应 lastBind。
+func ClearChannelAffinityRuntimeByChannelIDs(channelIDs []int) int {
+	targets := make(map[int]struct{}, len(channelIDs))
+	for _, id := range channelIDs {
+		if id > 0 {
+			targets[id] = struct{}{}
+		}
+	}
+	if len(targets) == 0 {
+		return 0
+	}
+
+	forward := getChannelAffinityCache()
+	keys, err := forward.Keys()
+	if err != nil {
+		common.SysError(fmt.Sprintf("channel affinity cache list keys failed: err=%v", err))
+		keys = nil
+	}
+	matched := make([]string, 0, len(keys))
+	boundChannels := make(map[string]int, len(keys))
+	for _, k := range keys {
+		suffix, ok := strings.CutPrefix(k, channelAffinityCacheNamespace+":")
+		if !ok || suffix == "" {
+			continue
+		}
+		channelID, found, err := forward.Get(k)
+		if err != nil {
+			common.SysError(fmt.Sprintf("channel affinity forward read failed on clear by channels: key=%s err=%v", k, err))
+			continue
+		}
+		if !found || channelID <= 0 {
+			continue
+		}
+		if _, hit := targets[channelID]; !hit {
+			continue
+		}
+		matched = append(matched, k)
+		boundChannels[suffix] = channelID
+	}
+	if len(matched) == 0 {
+		return 0
+	}
+
+	if err := retryOnce(func() error {
+		_, err := forward.DeleteMany(matched)
+		return err
+	}); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity forward clear by channels failed: err=%v", err))
+	}
+	clearExclusiveRuntimeByForwardKeys(matched, boundChannels)
+	return len(matched)
+}
+
 // HandleChannelAffinityRulesUpdate 规则数组保存后的开关联动清空入口
 // （SSOT 4.1.4 规则1、5.2.2 第4条）：解析两侧规则数组（失败静默返回，保存主流程
 // 不受影响），按 name 对齐逐规则比对 ExclusiveBind，对发生变化的规则清空其三命名

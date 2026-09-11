@@ -349,6 +349,128 @@ func TestClearAllReturnsForwardCountOnly(t *testing.T) {
 	assert.Equal(t, 0, ClearChannelAffinityCacheAll())
 }
 
+// ===== T1（P2_CHL_002）：按渠道三批同清 =====
+// 覆盖 P2_CHL_001 SSOT 5.2.2 第7条（渠道路由配置变更后清该渠道三批）、
+// 5.2.4 规则2（三批同批执行）、5.2.5（失败重试一次、残留随 TTL 收敛）。
+
+// TestClearChannelAffinityRuntimeByChannelIDsClearsThreeBatches 计划核心断言：
+// 渠道 301 与 302 各持一键（正向 + occupancy + lastBind）造数后按渠道 [301] 清理，
+// 返回 301 的正向条数 1，301 三处全清，302 三处全部保留。
+func TestClearChannelAffinityRuntimeByChannelIDsClearsThreeBatches(t *testing.T) {
+	useClearAffinityTest(t)
+	ttl := 10 * time.Second
+	forward := getChannelAffinityCache()
+
+	require.NoError(t, forward.SetWithTTL("ruleA:default:key-a", 301, ttl))
+	require.NoError(t, forward.SetWithTTL("ruleA:default:key-b", 302, ttl))
+	require.NoError(t, occupancyAddKeyFP(301, affinityFingerprint("key-a"), ttl))
+	require.NoError(t, occupancyAddKeyFP(302, affinityFingerprint("key-b"), ttl))
+	require.NoError(t, lastBindSet("ruleA:default:key-a", 301, 2*ttl))
+	require.NoError(t, lastBindSet("ruleA:default:key-b", 302, 2*ttl))
+
+	deleted := ClearChannelAffinityRuntimeByChannelIDs([]int{301})
+	assert.Equal(t, 1, deleted, "返回值语义沿用现状：正向删除条数")
+
+	// 渠道 301 三处全清。
+	count, fps, err := occupancyBindingCount(301)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "channel 301 occupancy should be cleared")
+	assert.Empty(t, fps)
+	_, found, err := forward.Get("ruleA:default:key-a")
+	require.NoError(t, err)
+	assert.False(t, found, "forward ruleA:default:key-a should be cleared")
+	_, found, err = lastBindGet("ruleA:default:key-a")
+	require.NoError(t, err)
+	assert.False(t, found, "last bind ruleA:default:key-a should be cleared")
+
+	// 渠道 302 三处全部保留。
+	count, fps, err = occupancyBindingCount(302)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "channel 302 occupancy must survive")
+	assert.ElementsMatch(t, []string{affinityFingerprint("key-b")}, fps)
+	_, found, err = forward.Get("ruleA:default:key-b")
+	require.NoError(t, err)
+	assert.True(t, found, "channel 302 forward entry must survive")
+	_, found, err = lastBindGet("ruleA:default:key-b")
+	require.NoError(t, err)
+	assert.True(t, found, "channel 302 last bind must survive")
+}
+
+// TestClearChannelAffinityRuntimeByChannelIDsEmptyInput 计划核心断言：nil、空切片与
+// 全非正 id 列表（[0, -1]）均返回 0，且不改变三套缓存的既有条目（零副作用）。
+func TestClearChannelAffinityRuntimeByChannelIDsEmptyInput(t *testing.T) {
+	useClearAffinityTest(t)
+	ttl := 10 * time.Second
+	forward := getChannelAffinityCache()
+
+	require.NoError(t, forward.SetWithTTL("ruleA:default:keep", 301, ttl))
+	require.NoError(t, occupancyAddKeyFP(301, affinityFingerprint("keep"), ttl))
+	require.NoError(t, lastBindSet("ruleA:default:keep", 301, 2*ttl))
+
+	for _, ids := range [][]int{nil, {}, {0, -1}} {
+		assert.Equal(t, 0, ClearChannelAffinityRuntimeByChannelIDs(ids), "ids=%v", ids)
+	}
+
+	_, found, err := forward.Get("ruleA:default:keep")
+	require.NoError(t, err)
+	assert.True(t, found, "forward entry must survive empty-target clear")
+	_, found, err = lastBindGet("ruleA:default:keep")
+	require.NoError(t, err)
+	assert.True(t, found, "last bind entry must survive empty-target clear")
+	count, fps, err := occupancyBindingCount(301)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	assert.ElementsMatch(t, []string{affinityFingerprint("keep")}, fps)
+}
+
+// TestClearChannelAffinityRuntimeByChannelIDsDedupAndUnboundTarget 边界：重复 id 去重、
+// 同渠道多键按正向条数累计、目标集合内无绑定的渠道不产生副作用（其它渠道数据不动）。
+func TestClearChannelAffinityRuntimeByChannelIDsDedupAndUnboundTarget(t *testing.T) {
+	useClearAffinityTest(t)
+	ttl := 10 * time.Second
+	forward := getChannelAffinityCache()
+
+	// 渠道 301 两键（跨 ruleA/ruleB 两规则前缀），渠道 302 一键。
+	require.NoError(t, forward.SetWithTTL("ruleA:default:multi-1", 301, ttl))
+	require.NoError(t, forward.SetWithTTL("ruleB:default:multi-2", 301, ttl))
+	require.NoError(t, forward.SetWithTTL("ruleA:default:other", 302, ttl))
+	require.NoError(t, occupancyAddKeyFP(301, affinityFingerprint("multi-1"), ttl))
+	require.NoError(t, occupancyAddKeyFP(301, affinityFingerprint("multi-2"), ttl))
+	require.NoError(t, occupancyAddKeyFP(302, affinityFingerprint("other"), ttl))
+	require.NoError(t, lastBindSet("ruleA:default:multi-1", 301, 2*ttl))
+	require.NoError(t, lastBindSet("ruleB:default:multi-2", 301, 2*ttl))
+	require.NoError(t, lastBindSet("ruleA:default:other", 302, 2*ttl))
+
+	// 目标集合去重后为 {301, 999}：999 无任何绑定，重复与非法 id 不影响结果。
+	deleted := ClearChannelAffinityRuntimeByChannelIDs([]int{301, 301, 0, 999, -7})
+	assert.Equal(t, 2, deleted, "同渠道多键按正向条数累计")
+
+	count, fps, err := occupancyBindingCount(301)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+	assert.Empty(t, fps)
+	for _, suffix := range []string{"ruleA:default:multi-1", "ruleB:default:multi-2"} {
+		_, found, getErr := forward.Get(suffix)
+		require.NoError(t, getErr)
+		assert.False(t, found, "forward %s should be cleared", suffix)
+		_, found, getErr = lastBindGet(suffix)
+		require.NoError(t, getErr)
+		assert.False(t, found, "last bind %s should be cleared", suffix)
+	}
+
+	// 渠道 302 不在目标集合内：三处保留。
+	count, fps, err = occupancyBindingCount(302)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	assert.ElementsMatch(t, []string{affinityFingerprint("other")}, fps)
+	_, found, err := forward.Get("ruleA:default:other")
+	require.NoError(t, err)
+	assert.True(t, found)
+	_, found, err = lastBindGet("ruleA:default:other")
+	require.NoError(t, err)
+	assert.True(t, found)
+}
+
 // useRulesUpdateTest 在 useClearAffinityTest 基础上注入开关清空测试规则 r1
 // （include_rule_name=true，键前缀 r1:），并对 r1 三命名空间各造一条数据
 // （正向键 "r1:fp1"、occupancy 渠道 311、lastBind 同 suffix）。
