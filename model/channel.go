@@ -1087,6 +1087,116 @@ func BatchSetChannelTag(ids []int, tag *string) error {
 	return tx.Commit().Error
 }
 
+// ChannelBatchEditFields 批量编辑的生效字段，nil 表示未填写（保持各渠道原值）。
+type ChannelBatchEditFields struct {
+	Group        *string
+	Tag          *string
+	Remark       *string
+	Models       *string
+	ModelMapping *string
+	Weight       *uint
+	Priority     *int64
+	TestModel    *string
+	AutoBan      *int
+}
+
+// AffectsAbilities 报告生效字段是否涉及路由相关列（models/group/weight/priority/tag）。
+// tag 参与 abilities 行冗余，变更同样触发重建。
+func (f ChannelBatchEditFields) AffectsAbilities() bool {
+	return f.Group != nil || f.Tag != nil || f.Models != nil || f.Weight != nil || f.Priority != nil
+}
+
+// applyTo 返回列白名单 SET（列名→值，仅含非 nil 字段），并把生效值写回 channel 内存对象。
+// 回写是必需的：UpdateAbilities 取自对象字段而非 DB 读，否则会用旧值重建索引。
+func (f ChannelBatchEditFields) applyTo(channel *Channel) map[string]any {
+	updates := make(map[string]any, 9)
+	if f.Group != nil {
+		updates["group"] = *f.Group
+		channel.Group = *f.Group
+	}
+	if f.Tag != nil {
+		updates["tag"] = *f.Tag
+		channel.Tag = f.Tag
+	}
+	if f.Remark != nil {
+		updates["remark"] = *f.Remark
+		channel.Remark = f.Remark
+	}
+	if f.Models != nil {
+		updates["models"] = *f.Models
+		channel.Models = *f.Models
+	}
+	if f.ModelMapping != nil {
+		updates["model_mapping"] = *f.ModelMapping
+		channel.ModelMapping = f.ModelMapping
+	}
+	if f.Weight != nil {
+		updates["weight"] = *f.Weight
+		channel.Weight = f.Weight
+	}
+	if f.Priority != nil {
+		updates["priority"] = *f.Priority
+		channel.Priority = f.Priority
+	}
+	if f.TestModel != nil {
+		updates["test_model"] = *f.TestModel
+		channel.TestModel = f.TestModel
+	}
+	if f.AutoBan != nil {
+		updates["auto_ban"] = *f.AutoBan
+		channel.AutoBan = f.AutoBan
+	}
+	return updates
+}
+
+// ChannelBatchUpdateFailure 触发事务回滚的失败渠道。
+type ChannelBatchUpdateFailure struct {
+	Id     int    `json:"id"`
+	Reason string `json:"reason"`
+}
+
+// BatchUpdateChannels 在单个事务内逐渠道更新生效列并按需重建 abilities，全成全败。
+// 返回实际更新的渠道数、触发回滚的失败渠道（成功为 nil）、错误。
+func BatchUpdateChannels(ids []int, fields ChannelBatchEditFields) (int, *ChannelBatchUpdateFailure, error) {
+	if len(ids) == 0 {
+		return 0, nil, nil
+	}
+
+	tx := DB.Begin()
+	if tx.Error != nil {
+		return 0, nil, tx.Error
+	}
+
+	// 事务内读目标渠道，ids 中已不存在的 id 自然跳过
+	var channels []*Channel
+	if err := tx.Where("id in (?)", ids).Find(&channels).Error; err != nil {
+		tx.Rollback()
+		return 0, nil, err
+	}
+
+	rebuildAbilities := fields.AffectsAbilities()
+	for _, channel := range channels {
+		// 必须用 map 形式：weight/priority/auto_ban 的合法生效值含 0，struct 形式会被丢弃
+		if updates := fields.applyTo(channel); len(updates) > 0 {
+			if err := tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(updates).Error; err != nil {
+				tx.Rollback()
+				return 0, &ChannelBatchUpdateFailure{Id: channel.Id, Reason: err.Error()}, err
+			}
+		}
+		if rebuildAbilities {
+			if err := channel.UpdateAbilities(tx); err != nil {
+				tx.Rollback()
+				return 0, &ChannelBatchUpdateFailure{Id: channel.Id, Reason: fmt.Sprintf("更新 abilities 失败: %v", err)}, err
+			}
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return 0, nil, err
+	}
+	return len(channels), nil, nil
+}
+
 // CountAllChannels returns total channels in DB
 func CountAllChannels() (int64, error) {
 	var total int64
