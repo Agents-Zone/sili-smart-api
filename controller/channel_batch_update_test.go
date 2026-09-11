@@ -1,12 +1,18 @@
 package controller
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func ptr[T any](v T) *T {
@@ -258,4 +264,167 @@ func TestChannelBatchUpdateRequestParsesIntegersExactly(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, uint(3), *fields.Weight)
 	})
+}
+
+// setupBatchUpdateHandlerTestDB 建立批量编辑 handler 用例的库：渠道/abilities 夹具库
+// 额外迁移审计日志表（handler 成功后写 channel.update_batch）。
+func setupBatchUpdateHandlerTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	return db
+}
+
+// seedBatchUpdateChannel 插入一条启用渠道，weight/models 决定后续 abilities 重建路径。
+func seedBatchUpdateChannel(t *testing.T, db *gorm.DB, weight uint, models string) *model.Channel {
+	t.Helper()
+	w := weight
+	channel := &model.Channel{
+		Name:   "batch-target",
+		Key:    "sk-test",
+		Status: common.ChannelStatusEnabled,
+		Models: models,
+		Group:  "default",
+		Weight: &w,
+	}
+	require.NoError(t, db.Create(channel).Error)
+	return channel
+}
+
+func callBatchUpdateChannels(t *testing.T, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/batch/update", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	BatchUpdateChannels(ctx)
+	return recorder
+}
+
+type batchUpdateResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Data    struct {
+		Count  int                               `json:"count"`
+		Failed []model.ChannelBatchUpdateFailure `json:"failed"`
+	} `json:"data"`
+}
+
+func TestBatchUpdateChannelsHandlerRejectsEmptyFields(t *testing.T) {
+	t.Run("无生效字段", func(t *testing.T) {
+		setupBatchUpdateHandlerTestDB(t)
+
+		recorder := callBatchUpdateChannels(t, `{"ids":[1,2]}`)
+
+		assert.Equal(t, http.StatusOK, recorder.Code)
+		assert.JSONEq(t, `{"success":false,"message":"批量编辑至少需要填写一个字段"}`, recorder.Body.String())
+	})
+
+	t.Run("请求体非法 JSON", func(t *testing.T) {
+		setupBatchUpdateHandlerTestDB(t)
+
+		recorder := callBatchUpdateChannels(t, `{"ids":[1,2]`)
+
+		assert.Equal(t, http.StatusOK, recorder.Code)
+		assert.JSONEq(t, `{"success":false,"message":"参数错误"}`, recorder.Body.String())
+	})
+}
+
+func TestBatchUpdateChannelsHandlerUpdatesAndReportsCount(t *testing.T) {
+	db := setupBatchUpdateHandlerTestDB(t)
+	first := seedBatchUpdateChannel(t, db, 5, "gpt-4o")
+	second := seedBatchUpdateChannel(t, db, 5, "gpt-4o")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d],"weight":7,"remark":"batch"}`, first.Id, second.Id)
+	recorder := callBatchUpdateChannels(t, body)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response batchUpdateResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.True(t, response.Success)
+	assert.Empty(t, response.Message)
+	assert.Equal(t, 2, response.Data.Count)
+
+	for _, id := range []int{first.Id, second.Id} {
+		var stored model.Channel
+		require.NoError(t, db.First(&stored, id).Error)
+		require.NotNil(t, stored.Remark)
+		assert.Equal(t, "batch", *stored.Remark)
+		assert.Equal(t, 7, stored.GetWeight())
+	}
+}
+
+func TestBatchUpdateChannelsHandlerAuditsFieldsAndValues(t *testing.T) {
+	db := setupBatchUpdateHandlerTestDB(t)
+	first := seedBatchUpdateChannel(t, db, 5, "gpt-4o")
+	second := seedBatchUpdateChannel(t, db, 5, "gpt-4o")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d],"weight":7,"remark":"batch"}`, first.Id, second.Id)
+	callBatchUpdateChannels(t, body)
+
+	var auditLog model.Log
+	require.NoError(t, db.Order("id desc").First(&auditLog).Error)
+	var other struct {
+		Op struct {
+			Action string         `json:"action"`
+			Params map[string]any `json:"params"`
+		} `json:"op"`
+	}
+	require.NoError(t, common.UnmarshalJsonStr(auditLog.Other, &other))
+	assert.Equal(t, "channel.update_batch", other.Op.Action)
+	assert.Equal(t, float64(2), other.Op.Params["count"])
+	assert.Contains(t, auditLog.Content, "Batch updated 2 channels")
+
+	var channelIDs []int
+	raw, err := common.Marshal(other.Op.Params["channel_ids"])
+	require.NoError(t, err)
+	require.NoError(t, common.Unmarshal(raw, &channelIDs))
+	assert.ElementsMatch(t, []int{first.Id, second.Id}, channelIDs)
+
+	var updatedFields []string
+	raw, err = common.Marshal(other.Op.Params["updated_fields"])
+	require.NoError(t, err)
+	require.NoError(t, common.Unmarshal(raw, &updatedFields))
+	assert.ElementsMatch(t, []string{"weight", "remark"}, updatedFields)
+
+	var values map[string]any
+	raw, err = common.Marshal(other.Op.Params["values"])
+	require.NoError(t, err)
+	require.NoError(t, common.Unmarshal(raw, &values))
+	assert.Equal(t, float64(7), values["weight"])
+	assert.Equal(t, "batch", values["remark"])
+}
+
+// TestBatchUpdateChannelsHandlerReportsFailureAndRollsBack 守护事务全成全败分支：
+// 任一渠道失败即整体回滚，响应携带失败渠道明细（4.2.4 规则3）。
+func TestBatchUpdateChannelsHandlerReportsFailureAndRollsBack(t *testing.T) {
+	db := setupBatchUpdateHandlerTestDB(t)
+	first := seedBatchUpdateChannel(t, db, 5, "gpt-4o")
+	second := seedBatchUpdateChannel(t, db, 5, "gpt-4o")
+	// 移除 abilities 表，令事务内的路由索引重建失败；weight 生效即走重建路径。
+	require.NoError(t, db.Migrator().DropTable(&model.Ability{}))
+
+	body := fmt.Sprintf(`{"ids":[%d,%d],"weight":7}`, first.Id, second.Id)
+	recorder := callBatchUpdateChannels(t, body)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response batchUpdateResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.False(t, response.Success)
+	assert.Equal(t, "批量编辑失败，已全部回滚", response.Message)
+	require.Len(t, response.Data.Failed, 1)
+	assert.Contains(t, response.Data.Failed[0].Reason, "abilities")
+
+	for _, id := range []int{first.Id, second.Id} {
+		var stored model.Channel
+		require.NoError(t, db.First(&stored, id).Error)
+		assert.Equal(t, 5, stored.GetWeight())
+	}
+}
+
+func TestAuditContentENRendersBatchUpdate(t *testing.T) {
+	assert.Equal(t,
+		"Batch updated 3 channels (fields: weight, tag)",
+		auditContentEN("channel.update_batch", map[string]interface{}{"count": 3, "updated_fields": "weight, tag"}),
+	)
 }

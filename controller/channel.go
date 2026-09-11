@@ -1481,6 +1481,99 @@ func BatchSetChannelTag(c *gin.Context) {
 	return
 }
 
+// BatchUpdateChannels 批量统一编辑勾选渠道的可编辑字段（空即跳过，事务全成全败）。
+func BatchUpdateChannels(c *gin.Context) {
+	var req ChannelBatchUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "参数错误",
+		})
+		return
+	}
+	fields, err := req.buildBatchUpdateFields()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	count, failure, err := model.BatchUpdateChannels(req.Ids, fields)
+	if err != nil {
+		// 事务失败明细需额外携带 data.failed，common.ApiError 不产出 data，直接构造（03 文档 2.3）
+		if failure != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "批量编辑失败，已全部回滚",
+				"data": gin.H{
+					"failed": []model.ChannelBatchUpdateFailure{*failure},
+				},
+			})
+			return
+		}
+		common.ApiError(c, err)
+		return
+	}
+	model.InitChannelCache()
+	if fields.AffectsAbilities() {
+		// 清理返回值无错误语义：零条数在渠道无绑定时为常态，失败已由该函数内部重试与
+		// SysError 承担，不阻断批量编辑结果（03 文档 2.1 处理流程 5）
+		service.ClearChannelAffinityRuntimeByChannelIDs(req.Ids)
+	}
+
+	// 生效字段名列表与所填值原文同源派生，避免两处各写一份字段判断（03 文档 2.1 处理流程 6）
+	updatedFields := make([]string, 0, 9)
+	values := make(map[string]interface{}, 9)
+	if fields.Group != nil {
+		updatedFields = append(updatedFields, "group")
+		values["group"] = *fields.Group
+	}
+	if fields.Tag != nil {
+		updatedFields = append(updatedFields, "tag")
+		values["tag"] = *fields.Tag
+	}
+	if fields.Remark != nil {
+		updatedFields = append(updatedFields, "remark")
+		values["remark"] = *fields.Remark
+	}
+	if fields.Models != nil {
+		updatedFields = append(updatedFields, "models")
+		values["models"] = *fields.Models
+	}
+	if fields.ModelMapping != nil {
+		updatedFields = append(updatedFields, "model_mapping")
+		values["model_mapping"] = *fields.ModelMapping
+	}
+	if fields.Weight != nil {
+		updatedFields = append(updatedFields, "weight")
+		values["weight"] = *fields.Weight
+	}
+	if fields.Priority != nil {
+		updatedFields = append(updatedFields, "priority")
+		values["priority"] = *fields.Priority
+	}
+	if fields.TestModel != nil {
+		updatedFields = append(updatedFields, "test_model")
+		values["test_model"] = *fields.TestModel
+	}
+	if fields.AutoBan != nil {
+		updatedFields = append(updatedFields, "auto_ban")
+		values["auto_ban"] = *fields.AutoBan
+	}
+	// values 记录所填值全量原文，不截断（4.2.4 规则5）
+	recordManageAudit(c, "channel.update_batch", map[string]interface{}{
+		"count":          count,
+		"channel_ids":    req.Ids,
+		"updated_fields": updatedFields,
+		"values":         values,
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data": gin.H{
+			"count": count,
+		},
+	})
+}
+
 func GetTagModels(c *gin.Context) {
 	tag := c.Query("tag")
 	if tag == "" {
