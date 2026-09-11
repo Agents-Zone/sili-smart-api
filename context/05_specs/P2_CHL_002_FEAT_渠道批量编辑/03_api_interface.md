@@ -7,7 +7,7 @@
 | Feature ID | P2_CHL_002_FEAT_渠道批量编辑 |
 | 接口协议 | HTTP（Gin，管理接口） |
 | Base URL | `/api`（管理接口前缀） |
-| 版本 | v1.5 |
+| 版本 | v1.6 |
 | 创建日期 | 2026-09-10 |
 | 设计依据 | 01_功能需求规格说明书.md（SSOT）、AGENTS_DATABASE_API_RULE.md、context/03_architecture/architecture.md |
 
@@ -102,7 +102,8 @@
 3. 任一渠道失败 → 整体回滚，返回失败明细（见错误响应）
 4. 全部成功 → 提交事务
 5. 事务提交后：刷新渠道缓存（`model.InitChannelCache()`）；调用 P2_CHL_001 的按渠道清理能力，对受影响渠道（指本次有路由相关字段 models/group/weight/priority/tag 生效的渠道；全部路由字段均未生效时跳过清理）同批清除反向占用索引条目、最近绑定记录与该渠道仍持有的正向绑定（三批同清，对齐 P2_CHL_001 的 5.2.2 第7条与 5.2.4 规则2），清理失败重试一次，仍失败记服务端错误日志、残留条目随 TTL 收敛，不阻断结果（4.2.4 规则4）
-   - **依赖状态**：该能力由 P2_CHL_001 经 service 层导出函数提供，函数名与签名待其落地后回填；P2_CHL_001 当前 `dev_exec` 为 in_progress，service 层尚无按渠道清理的导出函数。本 Feature 的 dev_plan 须将该项列为阻塞前置6. 记录管理员审计日志（4.2.4 规则5）：
+   - **归属说明**：该能力的行为契约定义在 P2_CHL_001 specs 5.2.2 第7条与 5.2.4 规则2（三批同清），实现由本 Feature dev_plan 的 service 导出函数 `ClearChannelAffinityRuntimeByChannelIDs` 承担（P2_CHL_001 开发计划无该函数任务）；同文件并行改动风险由开发计划 T1 协作提示约束
+6. 记录管理员审计日志（4.2.4 规则5）：
    - action：`channel.update_batch`
    - params：`{count, channel_ids, updated_fields, values}`，values 记录各生效字段所填值**全量原文**（不做截断）
    - 兜底模板（auditContentTemplates）：`"Batch updated ${count} channels (fields: ${updated_fields})"`
@@ -157,7 +158,7 @@
 
 ### 2.2 参数校验规则
 
-校验顺序：结构解析 → ids 边界 → 生效字段数 → 逐字段校验。任一步失败即返回，不触达数据库。
+校验顺序：结构解析 → ids 边界 → 逐字段校验 → 生效字段数。任一步失败即返回，不触达数据库（逐字段先行：model_mapping 空串等非法值在计入生效字段数之前即被拒绝）。
 
 #### 2.2.1 ids
 
@@ -284,7 +285,6 @@ DTO 以 `*int` / `*int64` 精确解析，禁止经 float64 中转：priority 声
 
 ---
 
-**文档版本：** v1.5
+**文档版本：** v1.6
 **创建日期：** 2026-09-10
 **作者：** lixuetao
-**变更记录：** v1.1 监理修复：tag 长度上限 (0,255] 改为 (0,191] 对齐 channels.tag 列现状；模型名 255 校验依据引述修正（validateChannel 添加路径口径，防护 abilities.model 列长）。v1.2 监理修复：1.1 "新增 1 个变更接口"改为"新增 1 个接口"；2.2.5 明确 DTO 用 *int/*int64 精确解析、禁止 float64 中转；2.3 补充事务失败响应需 handler 直接构造 JSON 的说明。v1.3 监理修复（模式二）：处理流程 5 与 2.4 的独占索引清理改为调用 P2_CHL_001 按渠道清理能力、三批同清（对齐 P2_CHL_001 5.2.2 第7条与 5.2.4 规则2）；1.2 排除字段清单补 other_info、channel_info；2.1 与 2.3 的 403 文案改为经 i18n.MsgAuthInsufficientPrivilege 本地化；2.3 明确 Updates 用 map 形式保证 0 值写入；文档信息表版本号与文末对齐。v1.4 监理修复（模式二第二轮）：2.4 删除"与既有 EditChannelByTag 同模式"的错误参照（该函数 abilities 重建在事务外且失败仅记日志，与本文档全成全败语义相反）；2.1 失败明细收敛为"触发回滚的失败渠道"（串行执行遇首个失败即回滚，原契约不可实现）；处理流程 5 补充"受影响渠道"范围定义，并标注 P2_CHL_001 按渠道清理能力尚未具名与落地、须在 dev_plan 中列为阻塞前置。v1.5 监理修复（模式二第三轮）：处理流程 5 与 2.4 的清理失败处理补"重试一次"（对齐 P2_CHL_001 5.2.5 异常处理语义）

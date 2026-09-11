@@ -7,7 +7,7 @@
 | Feature ID | P2_CHL_002_FEAT_渠道批量编辑 |
 | 数据库 | 主库（SQLite / MySQL >= 5.7.8 / PostgreSQL >= 9.6，按 `SQL_DSN` 选择） |
 | ORM | GORM v2 |
-| 版本 | v1.5 |
+| 版本 | v1.6 |
 | 创建日期 | 2026-09-10 |
 | 设计依据 | 01_功能需求规格说明书.md（SSOT）、AGENTS_DATABASE_API_RULE.md、context/03_architecture/architecture.md |
 
@@ -206,7 +206,7 @@ BEGIN
   └─ recordManageAudit("channel.update_batch")    -- 审计日志
 ```
 
-> **依赖状态（独占运行时数据清理）**：该能力由 P2_CHL_001 经 service 层导出函数提供，函数名与签名待其落地后回填；P2_CHL_001 当前 `dev_exec` 为 in_progress，service 层尚无按渠道清理的导出函数。本 Feature 的 dev_plan 须将该项列为阻塞前置。
+> **归属说明（独占运行时数据清理）**：该能力的行为契约定义在 P2_CHL_001 specs 5.2.2 第7条与 5.2.4 规则2（三批同清），实现由本 Feature dev_plan 的 service 导出函数 `ClearChannelAffinityRuntimeByChannelIDs` 承担（P2_CHL_001 开发计划无该函数任务）。
 
 单次上限 200 条渠道（specs 4.2.4 规则3），事务规模受控（200 × (1 UPDATE + abilities delete/insert 分片)），现有 `BatchDeleteChannels`/`BatchSetChannelTag` 已验证同规模事务在三库可行。
 
@@ -262,7 +262,6 @@ BEGIN
 
 ---
 
-**文档版本：** v1.5
+**文档版本：** v1.6
 **创建日期：** 2026-09-10
 **作者：** lixuetao
-**变更记录：** v1.1 监理修复：tag 行长度来源更新为规格说明书 (0,191]（应用层校验与列长对齐，消除校验 255 放行超列长值导致写库失败的风险）。v1.2 监理修复：3.1 DDL 块头注释澄清本块为 AutoMigrate 等价产出而非手工建表 DDL（消除与规则文件 §1.2 禁 AUTO_INCREMENT 的表面对撞）；3.1 时间戳注释补充 created_time 为存量列的命名规范豁免说明。v1.3 监理修复（模式二）：3.1 业务规则补充 Updates 必须用 map 形式（weight/priority/auto_ban 的 0 值为合法生效值，struct 形式会被 GORM 静默丢弃）；4.2 事务流程图与 5 一致性表的独占索引清理改为按渠道三批同清（对齐 P2_CHL_001 5.2.2 第7条与 5.2.4 规则2）；文档信息表版本号与文末对齐（原 v1.0 与文末 v1.2 不一致）。v1.4 监理修复（模式二第二轮）：3.1 字段说明表与 DDL 块的 test_model 类型订正为 LONGTEXT（原标 TEXT）、weight 订正为 BIGINT UNSIGNED（原标 BIGINT），对齐 GORM 实际生成；4.2 事务流程图失败分支收敛为"返回触发回滚的失败渠道"（串行执行遇首个失败即回滚，原"全部失败明细"不可实现），并补充"受影响渠道"范围定义与 P2_CHL_001 依赖未具名的阻塞标注。v1.5 监理修复（模式二第三轮）：3.3 logs 涉及列清单订正（Log 表无 action/param 列，action 与 params 经 op 结构内嵌 other 列）；3.1/3.2 DDL 块与字段说明表的 NOT NULL/必填标注按 GORM 实际生成行为订正（仅 key 列与联合主键有 NOT NULL，其余可空列靠应用层保证）；字段长度区间口径统一为闭区间 (0,191]/(0,255]；4.2/5 清理失败处理补"重试一次"（对齐 P2_CHL_001 5.2.5）
