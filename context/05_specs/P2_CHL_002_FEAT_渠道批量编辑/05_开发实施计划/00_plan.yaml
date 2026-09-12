@@ -12,7 +12,7 @@ sub_plans:
   - id: "02"
     name: "批量编辑交互"
     file: "02_批量编辑交互.md"
-    status: "pending"
+    status: "completed"
 
 execution_order:
   - "01"
