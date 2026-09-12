@@ -36,6 +36,16 @@ func TestBuildBatchUpdateFieldsRejectsInvalidInput(t *testing.T) {
 			wantErr: "参数错误",
 		},
 		{
+			name:    "ids 含 0",
+			req:     ChannelBatchUpdateRequest{Ids: []int{1, 0}, Weight: ptr(1)},
+			wantErr: "参数错误",
+		},
+		{
+			name:    "ids 含负数",
+			req:     ChannelBatchUpdateRequest{Ids: []int{-5}, Weight: ptr(1)},
+			wantErr: "参数错误",
+		},
+		{
 			name:    "ids 超过 200 条",
 			req:     ChannelBatchUpdateRequest{Ids: make([]int, 201), Weight: ptr(1)},
 			wantErr: "单次批量编辑上限 200 条，请分批操作",
@@ -236,7 +246,11 @@ func TestBuildBatchUpdateFieldsAcceptsValidInput(t *testing.T) {
 	})
 
 	t.Run("ids 恰好 200 条被接受", func(t *testing.T) {
-		req := ChannelBatchUpdateRequest{Ids: make([]int, 200), Weight: ptr(1)}
+		ids := make([]int, 200)
+		for i := range ids {
+			ids[i] = i + 1
+		}
+		req := ChannelBatchUpdateRequest{Ids: ids, Weight: ptr(1)}
 		_, err := req.buildBatchUpdateFields()
 		require.NoError(t, err)
 	})
@@ -328,6 +342,20 @@ func TestBatchUpdateChannelsHandlerRejectsEmptyFields(t *testing.T) {
 		assert.Equal(t, http.StatusOK, recorder.Code)
 		assert.JSONEq(t, `{"success":false,"message":"参数错误"}`, recorder.Body.String())
 	})
+
+	// ids 元素须为正整数，非法元素在校验阶段即拒绝，不落审计日志（03 文档 2.2.1）
+	t.Run("ids 含非正整数", func(t *testing.T) {
+		db := setupBatchUpdateHandlerTestDB(t)
+
+		recorder := callBatchUpdateChannels(t, `{"ids":[0,-5],"weight":3}`)
+
+		assert.Equal(t, http.StatusOK, recorder.Code)
+		assert.JSONEq(t, `{"success":false,"message":"参数错误"}`, recorder.Body.String())
+
+		var auditCount int64
+		require.NoError(t, db.Model(&model.Log{}).Where("content LIKE ?", "%Batch updated%").Count(&auditCount).Error)
+		assert.Zero(t, auditCount)
+	})
 }
 
 func TestBatchUpdateChannelsHandlerUpdatesAndReportsCount(t *testing.T) {
@@ -373,7 +401,9 @@ func TestBatchUpdateChannelsHandlerAuditsFieldsAndValues(t *testing.T) {
 	require.NoError(t, common.UnmarshalJsonStr(auditLog.Other, &other))
 	assert.Equal(t, "channel.update_batch", other.Op.Action)
 	assert.Equal(t, float64(2), other.Op.Params["count"])
-	assert.Contains(t, auditLog.Content, "Batch updated 2 channels")
+	// content 由 handler 实参形态渲染而来，守护模板 ${updated_fields} 的逗号连接形态（03 文档 2.1 处理流程 6）
+	// 字段名按 03 文档 2.2 声明顺序生成：remark 早于 weight
+	assert.Equal(t, "Batch updated 2 channels (fields: remark, weight)", auditLog.Content)
 
 	var channelIDs []int
 	raw, err := common.Marshal(other.Op.Params["channel_ids"])
@@ -381,11 +411,7 @@ func TestBatchUpdateChannelsHandlerAuditsFieldsAndValues(t *testing.T) {
 	require.NoError(t, common.Unmarshal(raw, &channelIDs))
 	assert.ElementsMatch(t, []int{first.Id, second.Id}, channelIDs)
 
-	var updatedFields []string
-	raw, err = common.Marshal(other.Op.Params["updated_fields"])
-	require.NoError(t, err)
-	require.NoError(t, common.Unmarshal(raw, &updatedFields))
-	assert.ElementsMatch(t, []string{"weight", "remark"}, updatedFields)
+	assert.Equal(t, "remark, weight", other.Op.Params["updated_fields"])
 
 	var values map[string]any
 	raw, err = common.Marshal(other.Op.Params["values"])
@@ -422,9 +448,9 @@ func TestBatchUpdateChannelsHandlerReportsFailureAndRollsBack(t *testing.T) {
 	}
 }
 
+// 计划 T4 核心断言：审计模板按 action 渲染英文兜底文本，${updated_fields} 取逗号连接形态
 func TestAuditContentENRendersBatchUpdate(t *testing.T) {
 	assert.Equal(t,
 		"Batch updated 3 channels (fields: weight, tag)",
-		auditContentEN("channel.update_batch", map[string]interface{}{"count": 3, "updated_fields": "weight, tag"}),
-	)
+		auditContentEN("channel.update_batch", map[string]interface{}{"count": 3, "updated_fields": "weight, tag"}))
 }

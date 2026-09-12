@@ -970,6 +970,12 @@ func (r *ChannelBatchUpdateRequest) buildBatchUpdateFields() (model.ChannelBatch
 	if len(r.Ids) > 200 {
 		return fields, errors.New("单次批量编辑上限 200 条，请分批操作")
 	}
+	// ids 元素须为正整数（03 文档 2.2.1），0 与负数均为非法渠道 ID
+	for _, id := range r.Ids {
+		if id <= 0 {
+			return fields, errors.New("参数错误")
+		}
+	}
 
 	group, err := optionalTrimmedString(r.Group, 64, "分组长度不能超过 64 字符")
 	if err != nil {
@@ -1558,11 +1564,12 @@ func BatchUpdateChannels(c *gin.Context) {
 		updatedFields = append(updatedFields, "auto_ban")
 		values["auto_ban"] = *fields.AutoBan
 	}
-	// values 记录所填值全量原文，不截断（4.2.4 规则5）
+	// values 记录所填值全量原文，不截断（4.2.4 规则5）；
+	// updated_fields 以逗号连接串入审计，与模板 ${updated_fields} 的渲染形态一致（03 文档 2.1 处理流程 6）
 	recordManageAudit(c, "channel.update_batch", map[string]interface{}{
 		"count":          count,
 		"channel_ids":    req.Ids,
-		"updated_fields": updatedFields,
+		"updated_fields": strings.Join(updatedFields, ", "),
 		"values":         values,
 	})
 	c.JSON(http.StatusOK, gin.H{
