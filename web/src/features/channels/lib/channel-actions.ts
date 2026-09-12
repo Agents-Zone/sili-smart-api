@@ -29,6 +29,7 @@ import {
   updateChannel,
   updateChannelStatus,
   batchUpdateChannelStatus,
+  batchUpdateChannels,
   batchDeleteChannels,
   batchSetChannelTag,
   enableTagChannels,
@@ -41,7 +42,12 @@ import {
   updateChannelBalance,
 } from '../api'
 import { CHANNEL_STATUS, ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
-import type { ChannelTestResponse, CopyChannelParams } from '../types'
+import type {
+  BatchUpdateFailure,
+  BatchUpdateParams,
+  ChannelTestResponse,
+  CopyChannelParams,
+} from '../types'
 
 // ============================================================================
 // Query Keys
@@ -400,6 +406,47 @@ export async function handleUpdateChannelBalance(
 // ============================================================================
 // Batch Actions
 // ============================================================================
+
+/** Result of a batch edit submission, consumed by the drawer to render failures. */
+export interface BatchUpdateOutcome {
+  ok: boolean
+  count: number
+  failed: BatchUpdateFailure[]
+  message?: string
+}
+
+/**
+ * Submit a batch edit: on success report how many channels were updated and
+ * invalidate the channel list cache; on failure report the error and return the
+ * failure details for the drawer to render (specs 4.2.4 rules 3/6).
+ */
+export async function handleBatchUpdate(
+  payload: BatchUpdateParams,
+  queryClient?: QueryClient,
+  onSuccess?: (count: number) => void
+): Promise<BatchUpdateOutcome> {
+  try {
+    const response = await batchUpdateChannels(payload)
+    if (response.success) {
+      const count = response.data?.count ?? payload.ids.length
+      toast.success(i18next.t('{{count}} channel(s) updated', { count }))
+      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      onSuccess?.(count)
+      return { ok: true, count, failed: [] }
+    }
+
+    toast.error(response.message || i18next.t('Failed to update channels'))
+    return {
+      ok: false,
+      count: 0,
+      failed: response.data?.failed ?? [],
+      message: response.message,
+    }
+  } catch {
+    toast.error(i18next.t('Failed to update channels'))
+    return { ok: false, count: 0, failed: [] }
+  }
+}
 
 /**
  * Batch delete channels
