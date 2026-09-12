@@ -1,28 +1,31 @@
 import assert from 'node:assert/strict'
-import { beforeEach, describe, test } from 'node:test'
-import { mock } from 'bun:test'
+import { afterEach, beforeEach, describe, test } from 'node:test'
 
+import { api } from '@/lib/api'
+
+import { batchUpdateChannels } from '../api'
 import type { BatchUpdateParams, BatchUpdateResult } from '../types'
 
-// bun:test 提供模块桩能力，node:test 在 bun 1.3.8 下未导出 mock.module
+const originalPost = api.post
 const postCalls: unknown[][] = []
 let postResult: BatchUpdateResult = { success: true, data: { count: 2 } }
 
-mock.module('@/lib/api', () => ({
-  api: {
-    post: async (...args: unknown[]) => {
-      postCalls.push(args)
-      return { data: postResult }
-    },
-  },
-}))
-
-const { batchUpdateChannels } = await import('../api')
+function installPostSpy() {
+  api.post = (async (...args: unknown[]) => {
+    postCalls.push(args)
+    return { data: postResult }
+  }) as unknown as typeof api.post
+}
 
 describe('batchUpdateChannels', () => {
   beforeEach(() => {
     postCalls.length = 0
     postResult = { success: true, data: { count: 2 } }
+    installPostSpy()
+  })
+
+  afterEach(() => {
+    api.post = originalPost
   })
 
   test('batchUpdateChannels posts to the batch update endpoint', async () => {
