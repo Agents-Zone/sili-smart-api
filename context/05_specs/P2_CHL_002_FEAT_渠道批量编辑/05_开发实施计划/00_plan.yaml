@@ -7,7 +7,7 @@ sub_plans:
   - id: "01"
     name: "批量更新接口"
     file: "01_批量更新接口.md"
-    status: "pending"
+    status: "completed"
 
   - id: "02"
     name: "批量编辑交互"
