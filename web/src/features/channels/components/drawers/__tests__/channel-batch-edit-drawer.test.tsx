@@ -45,8 +45,20 @@ const { I18nextProvider, initReactI18next } = await import('react-i18next')
 const { QueryClient, QueryClientProvider } =
   await import('@tanstack/react-query')
 const { api } = await import('@/lib/api')
+const { toast } = await import('sonner')
 const { handleBatchUpdate } = await import('../../../lib/channel-actions')
 const { ChannelBatchEditDrawer } = await import('../channel-batch-edit-drawer')
+
+const toastErrorCalls: unknown[][] = []
+const originalToastError = toast.error
+
+/** Replace toast.error with a spy so tests can assert the user-visible error path. */
+function spyOnToastError() {
+  toastErrorCalls.length = 0
+  toast.error = ((...args: unknown[]) => {
+    toastErrorCalls.push(args)
+  }) as typeof toast.error
+}
 
 const i18n = createInstance()
 await i18n.use(initReactI18next).init({
@@ -184,6 +196,8 @@ async function renderDrawer(
 afterEach(async () => {
   apiClient.get = originalGet
   apiClient.post = originalPost
+  toast.error = originalToastError
+  toastErrorCalls.length = 0
   if (renderedDrawer) {
     await act(async () => renderedDrawer?.root.unmount())
     renderedDrawer.queryClient.clear()
@@ -341,6 +355,28 @@ describe('handleBatchUpdate', () => {
       failed: [{ id: 2, reason: 'boom' }],
       message: '批量编辑失败，已全部回滚',
     })
+  })
+
+  test('renders no toast when failures carry per-channel details', async () => {
+    spyOnToastError()
+    installBatchUpdateResponse({
+      success: false,
+      message: '批量编辑失败，已全部回滚',
+      data: { failed: [{ id: 2, reason: 'boom' }] },
+    })
+
+    await handleBatchUpdate({ ids: [2, 3], tag: 'vip' })
+
+    assert.equal(toastErrorCalls.length, 0)
+  })
+
+  test('toasts the response message when failures carry no details', async () => {
+    spyOnToastError()
+    installBatchUpdateResponse({ success: false, message: '参数错误' })
+
+    await handleBatchUpdate({ ids: [2, 3], tag: 'vip' })
+
+    assert.deepEqual(toastErrorCalls, [['参数错误']])
   })
 
   test('refreshes the channel list and reports the updated count on success', async () => {

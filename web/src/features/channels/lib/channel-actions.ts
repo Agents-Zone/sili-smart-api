@@ -417,8 +417,10 @@ export interface BatchUpdateOutcome {
 
 /**
  * Submit a batch edit: on success report how many channels were updated and
- * invalidate the channel list cache; on failure report the error and return the
- * failure details for the drawer to render (specs 4.2.4 rules 3/6).
+ * invalidate the channel list cache; on failure return the failure details for
+ * the drawer to render (specs 4.2.4 rules 3/6). The toast is a fallback for
+ * failures without per-channel details; with details the drawer's alert block
+ * carries the message.
  */
 export async function handleBatchUpdate(
   payload: BatchUpdateParams,
@@ -435,11 +437,14 @@ export async function handleBatchUpdate(
       return { ok: true, count, failed: [] }
     }
 
-    toast.error(response.message || i18next.t('Failed to update channels'))
+    const failed = response.data?.failed ?? []
+    if (failed.length === 0) {
+      toast.error(response.message || i18next.t('Failed to update channels'))
+    }
     return {
       ok: false,
       count: 0,
-      failed: response.data?.failed ?? [],
+      failed,
       message: response.message,
     }
   } catch {

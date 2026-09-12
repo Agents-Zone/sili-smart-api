@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -945,7 +946,8 @@ type ChannelBatchUpdateRequest struct {
 }
 
 // optionalTrimmedString 归一化可选文本字段：nil 或 trim 后为空均视为未填写（返回 nil 跳过），
-// 超出 maxLen 返回对应错误（03 文档 4.2.4 规则1 空即跳过）。
+// 超出 maxLen 返回对应错误（03 文档 4.2.4 规则1 空即跳过）。长度按 Unicode 码点计，
+// 与 specs「字符」语义、前端 .length 及 DB varchar 列宽对齐。
 func optionalTrimmedString(v *string, maxLen int, tooLong string) (*string, error) {
 	if v == nil {
 		return nil, nil
@@ -954,7 +956,7 @@ func optionalTrimmedString(v *string, maxLen int, tooLong string) (*string, erro
 	if trimmed == "" {
 		return nil, nil
 	}
-	if len(trimmed) > maxLen {
+	if utf8.RuneCountInString(trimmed) > maxLen {
 		return nil, errors.New(tooLong)
 	}
 	return common.GetPointer(trimmed), nil

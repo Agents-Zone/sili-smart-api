@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -63,6 +64,11 @@ func TestBuildBatchUpdateFieldsRejectsInvalidInput(t *testing.T) {
 		{
 			name:    "group 超过 64 字符",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Group: ptr(strings.Repeat("a", 65))},
+			wantErr: "分组长度不能超过 64 字符",
+		},
+		{
+			name:    "group 超过 64 个汉字",
+			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Group: ptr(strings.Repeat("中", 65))},
 			wantErr: "分组长度不能超过 64 字符",
 		},
 		{
@@ -228,6 +234,27 @@ func TestBuildBatchUpdateFieldsAcceptsValidInput(t *testing.T) {
 		assert.Equal(t, `{"gpt-4o":"gpt-4o-mini"}`, *fields.ModelMapping)
 		require.NotNil(t, fields.Weight)
 		assert.Equal(t, uint(4294967295), *fields.Weight)
+	})
+
+	t.Run("多字节字符按码点计数：上限内汉字放行", func(t *testing.T) {
+		req := ChannelBatchUpdateRequest{
+			Ids:       []int{1},
+			Group:     ptr(strings.Repeat("中", 64)),
+			Tag:       ptr(strings.Repeat("中", 191)),
+			Remark:    ptr(strings.Repeat("中", 255)),
+			TestModel: ptr(strings.Repeat("中", 255)),
+		}
+		fields, err := req.buildBatchUpdateFields()
+		require.NoError(t, err)
+
+		require.NotNil(t, fields.Group)
+		assert.Equal(t, 64, utf8.RuneCountInString(*fields.Group))
+		require.NotNil(t, fields.Tag)
+		assert.Equal(t, 191, utf8.RuneCountInString(*fields.Tag))
+		require.NotNil(t, fields.Remark)
+		assert.Equal(t, 255, utf8.RuneCountInString(*fields.Remark))
+		require.NotNil(t, fields.TestModel)
+		assert.Equal(t, 255, utf8.RuneCountInString(*fields.TestModel))
 	})
 
 	t.Run("priority 保留 int64 全域精度", func(t *testing.T) {
