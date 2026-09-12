@@ -47,6 +47,7 @@ import {
   handleBatchSetTag,
 } from '../lib'
 import type { Channel } from '../types'
+import { ChannelBatchEditDrawer } from './drawers/channel-batch-edit-drawer'
 
 interface DataTableBulkActionsProps<TData> {
   table: Table<TData>
@@ -328,6 +329,13 @@ export function DataTableBulkActions<TData>({
       >
         {' '}
       </Dialog>
+
+      {/* Batch Edit Drawer */}
+      <ChannelBatchEditDrawer
+        open={showBatchEdit}
+        onOpenChange={setShowBatchEdit}
+        selectedIds={selectedIds}
+      />
     </>
   )
 }
