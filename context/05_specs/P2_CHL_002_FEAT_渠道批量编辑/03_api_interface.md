@@ -7,7 +7,7 @@
 | Feature ID | P2_CHL_002_FEAT_渠道批量编辑 |
 | 接口协议 | HTTP（Gin，管理接口） |
 | Base URL | `/api`（管理接口前缀） |
-| 版本 | v1.6 |
+| 版本 | v1.8 |
 | 创建日期 | 2026-09-10 |
 | 设计依据 | 01_功能需求规格说明书.md（SSOT）、AGENTS_DATABASE_API_RULE.md、context/03_architecture/architecture.md |
 
@@ -96,16 +96,18 @@
 **处理流程：**
 
 1. 参数校验（见 2.2）：ids 非空且 ≤200、生效字段数 ≥1、各字段值域与长度校验、model_mapping 为合法 JSON 对象
-2. 开启事务，按 ids 查出全部渠道（事务内），逐渠道：
+2. 开启事务，按 ids 查出全部渠道（事务内，按 id 排序），逐渠道：
    - 将生效字段写入该渠道（其余字段保持原值）
    - 该渠道涉及路由相关字段（models/group/weight/priority/tag）时重建 abilities（事务内，失败整体回滚）
-3. 任一渠道失败 → 整体回滚，返回失败明细（见错误响应）
+3. 任一渠道失败 → 整体回滚，返回失败明细（见错误响应），`id` 为该渠道 ID
 4. 全部成功 → 提交事务
 5. 事务提交后：刷新渠道缓存（`model.InitChannelCache()`）；调用 P2_CHL_001 的按渠道清理能力，对受影响渠道（指本次有路由相关字段 models/group/weight/priority/tag 生效的渠道；全部路由字段均未生效时跳过清理）同批清除反向占用索引条目、最近绑定记录与该渠道仍持有的正向绑定（三批同清，对齐 P2_CHL_001 的 5.2.2 第7条与 5.2.4 规则2），清理失败重试一次，仍失败记服务端错误日志、残留条目随 TTL 收敛，不阻断结果（4.2.4 规则4）
    - **归属说明**：该能力的行为契约定义在 P2_CHL_001 specs 5.2.2 第7条与 5.2.4 规则2（三批同清），实现由本 Feature dev_plan 的 service 导出函数 `ClearChannelAffinityRuntimeByChannelIDs` 承担（P2_CHL_001 开发计划无该函数任务）；同文件并行改动风险由开发计划 T1 协作提示约束
 6. 记录管理员审计日志（4.2.4 规则5）：
    - action：`channel.update_batch`
-   - params：`{count, channel_ids, updated_fields, values}`，values 记录各生效字段所填值**全量原文**（不做截断）
+   - params：`{count, channel_ids, updated_fields, values}`
+   - `values` 记录各生效字段的生效值（校验层已做 trim 与逗号段归一化，与实际落库值一致；不截断）
+   - `channel_ids` 记录实际更新的渠道 ID，与 `count` 同口径（ids 中已不存在的渠道不计入）
    - 兜底模板（auditContentTemplates）：`"Batch updated ${count} channels (fields: ${updated_fields})"`
 
 **成功响应（HTTP 200）：**
@@ -143,7 +145,7 @@
   "message": "批量编辑失败，已全部回滚",
   "data": {
     "failed": [
-      { "id": 2, "reason": "更新 abilities 失败: ..." }
+      { "id": 2, "reason": "更新渠道记录失败" }
     ]
   }
 }
@@ -151,10 +153,10 @@
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| data.failed[].id | integer | 触发回滚的失败渠道 ID |
-| data.failed[].reason | string | 该渠道失败原因 |
+| data.failed[].id | integer | 触发回滚的失败渠道 ID（按 id 升序串行执行，失败即停在首个失败渠道） |
+| data.failed[].reason | string | 失败环节的本地化文案（按请求语言返回），不含数据库驱动层原始错误 |
 
-失败响应携带 `data.failed`（串行执行遇首个失败即回滚，数组恒为单元素，保留数组形态便于后续扩展），前端在抽屉内展示（4.2.4 规则3），已填内容与勾选状态由前端保留。
+失败响应携带 `data.failed`（串行执行遇首个失败即回滚，数组恒为单元素，保留数组形态便于后续扩展），前端在抽屉内展示（4.2.4 规则3），已填内容与勾选状态由前端保留。驱动层原始错误只写服务端日志（`common.SysError`），不外发给客户端。
 
 ### 2.2 参数校验规则
 
@@ -205,11 +207,14 @@
 
 DTO 以 `*int` / `*int64` 精确解析，禁止经 float64 中转：priority 声明的 int64 全域在 2^53 以上无法被 float64 精确表示，经浮点中转会静默改变取值。非整数输入（如 `10.5`）在解析阶段即被拒绝；weight 拒绝负数。
 
+前端口径说明：前端表单对 priority 的校验为 JS 安全整数域（±9007199254740991，即 ±2^53-1），严于后端 int64 全域，属 JS Number 精度的工程取舍，方向安全（后端接受的值前端可能拦截，前端放行的值后端必接受）。
+
 #### 2.2.6 model_mapping
 
 | 规则 | 错误消息 | 依据 |
 |------|---------|------|
 | 已填写时须为合法 JSON **对象**（`common.Unmarshal` 到 map，顶层非对象/数组/数组字面量均拒绝） | 模型重定向必须是合法的 JSON 对象 | 4.2.2 B 区 |
+| 对象的**值必须全为字符串**（relay 侧按 map[string]string 反序列化，非字符串值会导致该渠道请求全部失败，校验层前置拒绝） | 模型重定向的值必须都是字符串 | 4.2.2 B 区（沿用单个编辑同口径，前端 model-mapping-validation 同规则） |
 | 去除首尾空白后为空串 → 拒绝（清空不属于批量编辑语义，走单个编辑） | 模型重定向不能为空（如需清空请在单个编辑中操作） | 4.2.4 规则1（无清空语义） |
 
 #### 2.2.7 auto_ban
@@ -237,6 +242,7 @@ DTO 以 `*int` / `*int64` 精确解析，禁止经 float64 中转：priority 声
 | 认证失败 | 401 | `{"success":false,"code":"AUTH_*","message":"..."}` | AdminAuth 会话/JWT 校验 |
 | 权限不足 | 403 | `{"success":false,"message":"<本地化文案>"}` | RequirePermission(ChannelWrite)，message 经 i18n.MsgAuthInsufficientPrivilege |
 | 参数校验失败 | 200 | `{"success":false,"message":"<具体原因>"}` | 2.2 各规则 |
+| ids 中渠道全部不存在 | 200 | `{"success":false,"message":"<渠道不存在>"}` | `len(updatedIds)==0` 时返回失败（i18n.MsgChannelNotExists），避免用户误以为编辑成功；部分不存在仍跳过并成功（见 2.4） |
 | 事务失败（已回滚） | 200 | `{"success":false,"message":"...","data":{"failed":[...]}}` | 全成全败，携带失败明细 |
 | 服务端异常 | 200 | `{"success":false,"message":"<错误信息>"}` | 兜底 |
 
@@ -251,7 +257,7 @@ DTO 以 `*int` / `*int64` 精确解析，禁止经 float64 中转：priority 声
 | 防重复提交 | 前端保存按钮 loading 至响应返回（4.2.3）；后端无幂等键，重复提交等同两次批量编辑，操作本身幂等（同一份表单重复提交结果一致） |
 | 与单个编辑并发 | 渠道行更新走 GORM `Updates(map[string]any)`（按 id 定位，map 形式不做零值过滤，保证 weight/priority/auto_ban 的 0 值写入，见数据库模型设计 3.1），abilities 重建在事务内 delete+insert；事务保证单次批量内部一致 |
 | 与独占绑定并发 | 事务提交后按渠道清理反向占用索引、最近绑定记录与该渠道仍持有的正向绑定（三批同清），失败重试一次后仍失败走 TTL 收敛，与 P2_CHL_001 的 5.2.2 第7条、5.2.4 规则2 语义一致 |
-| 渠道不存在 | ids 中不存在的渠道跳过（`Updates` 零行影响不报错）；`count` 为实际更新数，与现有 `channel.delete_batch` 返回实际删除数的口径一致 |
+| 渠道不存在 | ids 中不存在的渠道跳过（`Updates` 零行影响不报错）；`count` 为实际更新数，与现有 `channel.delete_batch` 返回实际删除数的口径一致；**全部**不存在（实际更新数为 0）时返回失败（渠道不存在，见 2.3），提示用户勾选已失效 |
 
 ---
 
@@ -285,6 +291,13 @@ DTO 以 `*int` / `*int64` 精确解析，禁止经 float64 中转：priority 声
 
 ---
 
-**文档版本：** v1.6
-**创建日期：** 2026-09-10
+**文档版本：** v1.8
+**更新日期：** 2026-09-13
 **作者：** lixuetao
+
+### 修订记录
+
+| 版本 | 日期 | 变更内容 | 变更人 |
+|------|------|----------|--------|
+| v1.7 | 2026-09-10 | 终审整改：错误消息 i18n 化；长度校验按码点计数；失败提示去重 | lixuetao |
+| v1.8 | 2026-09-13 | 监理模式四修复：2.2.6 补 model_mapping 值全字符串校验；2.2.5 补前端 priority 安全整数口径说明；2.3/2.4 补 ids 全部不存在返回失败的边界定义 | 监理扫描 |

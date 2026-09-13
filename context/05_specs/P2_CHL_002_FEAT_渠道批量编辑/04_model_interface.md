@@ -65,7 +65,7 @@ CREATE TABLE `channels` (
   `test_model`   LONGTEXT      NULL,                          -- 无显式长度 tag，列不设长；(0,255] 为应用层校验
   `tag`          VARCHAR(191)  NULL,                          -- 无长度 tag 但有 index → varchar(191)
   `remark`       VARCHAR(255)  NULL,
-  `created_time` BIGINT        NULL DEFAULT 0,                -- Unix 秒级时间戳
+  `created_time` BIGINT        NULL,                          -- Unix 秒级时间戳（struct 无 default tag，实际库无 DEFAULT 子句）
   -- ... 其余列（key/status_code_mapping/setting/settings/param_override/header_override/
   --     channel_info/openai_organization/base_url/other/other_info/balance 等）与本功能无关
   PRIMARY KEY (`id`),
@@ -90,7 +90,7 @@ CREATE TABLE `channels` (
 | priority | BIGINT | BIGINT | INTEGER | 否 | 0 | 优先级，int64 值域 |
 | test_model | LONGTEXT / TEXT | TEXT | TEXT | 否 | NULL | 渠道测试模型；(0,255] 为应用层校验边界，列本身不限长 [长度来源：需求规格说明书 (0,255]] |
 | auto_ban | BIGINT | BIGINT | INTEGER | 否 | 1 | 自动封禁开关：1=启用 0=停用 [枚举：auto_ban（1/0）] |
-| created_time | BIGINT | BIGINT | INTEGER | 否 | 0 | 创建时间，Unix 秒级时间戳（现状，不改动） |
+| created_time | BIGINT | BIGINT | INTEGER | 否 | - | 创建时间，Unix 秒级时间戳（现状，不改动；struct 无 default tag，AutoMigrate 不产出 DEFAULT 子句，零值由写入方填充） |
 
 > 必填口径说明：数据库层仅 key 列有 NOT NULL 约束（GORM 仅对显式 `not null` tag 生成），group/models 的必填为应用层校验保证（生效值 trim 后非空才写入）。
 
@@ -194,7 +194,7 @@ CREATE TABLE `abilities` (
 
 ```
 BEGIN
-  ├─ SELECT channels WHERE id IN (ids)            -- 事务内读目标渠道
+  ├─ SELECT channels WHERE id IN (ids) FOR UPDATE -- 事务内行锁读目标渠道（lockForUpdate，按 id 排序防死锁）
   ├─ for each channel:
   │    ├─ UPDATE channels SET <生效列>  WHERE id = ?   -- 列白名单，仅生效列
   │    └─ if 路由列生效: UpdateAbilities(tx)            -- delete by channel_id + insert
@@ -215,7 +215,7 @@ BEGIN
 | 检查项 | 结论 |
 |--------|------|
 | 新增表 | 无 |
-| channels 新增/修改列 | 无（10 个请求字段全部映射到既有列） |
+| channels 新增/修改列 | 无（10 个请求字段中 9 个可编辑字段全部映射到既有列，ids 仅用于定位行） |
 | abilities 新增/修改列或索引 | 无（重建复用既有结构） |
 | 字典表 INSERT | 无（auto_ban 为 0/1 代码常量枚举，规则文件 §1.8 不生成字典语句） |
 | AutoMigrate 影响 | 无（模型 struct 无改动） |
@@ -228,7 +228,7 @@ BEGIN
 | 关注点 | 设计 |
 |--------|------|
 | 事务原子性 | 单事务覆盖 channels 更新与 abilities 重建，全成全败（GORM `DB.Begin/Commit/Rollback`，与 BatchSetChannelTag 同模式） |
-| 行锁 | 批量更新按主键 id 逐行 UPDATE，依赖行级写锁自然串行化；无需显式 `lockForUpdate`（不做读-改-写竞争读，生效值来自请求而非读值回写） |
+| 行锁 | 事务内 SELECT 使用 `lockForUpdate(tx)` 并按 id 排序读取目标渠道：abilities 重建取自事务内读到的渠道对象（models/group 等），无锁快照可能覆盖并发提交的路由变更，行锁保证重建基于当前已提交状态；逐行 UPDATE 依赖行级写锁自然串行化 |
 | 与单个编辑并发 | 两个路径均为按 id 的列更新，最后提交者胜出；abilities 重建各自事务内自洽，无跨表半状态 |
 | 渠道缓存 | 事务提交后统一 `InitChannelCache()` 一次（200 条一次全量刷新，与现有批量接口一致），避免事务内多次刷新 |
 | 独占绑定索引（P2_CHL_001） | 事务提交后按渠道三批同清（反向索引条目、最近绑定记录、该渠道正向绑定）；清理失败重试一次，仍失败记 SysError，残留随 TTL 自然过期收敛，不影响批量编辑结果（specs 4.2.4 规则4） |
