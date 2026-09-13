@@ -182,6 +182,24 @@ const (
 	MsgChannelNoValidUpstream    = "channel.no_valid_upstream"
 	MsgChannelUpstreamSaturated  = "channel.upstream_saturated"
 	MsgChannelGetAvailableFailed = "channel.get_available_failed"
+
+	// Batch edit (channel.batch_edit.*) messages
+	MsgChannelBatchLimit          = "channel.batch_edit.limit"
+	MsgChannelBatchGroupTooLong   = "channel.batch_edit.group_too_long"
+	MsgChannelBatchGroupInvalid   = "channel.batch_edit.group_invalid"
+	MsgChannelBatchTagTooLong     = "channel.batch_edit.tag_too_long"
+	MsgChannelBatchRemarkTooLong  = "channel.batch_edit.remark_too_long"
+	MsgChannelBatchModelsInvalid  = "channel.batch_edit.models_invalid"
+	MsgChannelBatchModelTooLong   = "channel.batch_edit.model_too_long"
+	MsgChannelBatchMappingEmpty   = "channel.batch_edit.mapping_empty"
+	MsgChannelBatchMappingInvalid = "channel.batch_edit.mapping_invalid"
+	MsgChannelBatchMappingValues  = "channel.batch_edit.mapping_values_not_string"
+	MsgChannelBatchWeightRange    = "channel.batch_edit.weight_range"
+	MsgChannelBatchPriorityRange  = "channel.batch_edit.priority_range"
+	MsgChannelBatchTestModelLong  = "channel.batch_edit.test_model_too_long"
+	MsgChannelBatchAutoBanInvalid = "channel.batch_edit.auto_ban_invalid"
+	MsgChannelBatchNoFields       = "channel.batch_edit.no_fields"
+	MsgChannelBatchFailed         = "channel.batch_edit.failed"
 )
 
 // Model related messages

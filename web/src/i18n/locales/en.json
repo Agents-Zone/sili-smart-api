@@ -603,6 +603,7 @@
     "Batch Operations": "Batch Operations",
     "Batch processing failed": "Batch processing failed",
     "Batch set tag for {{count}} channels": "Batch set tag for {{count}} channels",
+    "Batch updated {{count}} channels (fields: {{updated_fields}})": "Batch updated {{count}} channels (fields: {{updated_fields}})",
     "Batch test completed: {{count}} succeeded": "Batch test completed: {{count}} succeeded",
     "Batch test completed: {{success}} succeeded, {{failed}} failed": "Batch test completed: {{success}} succeeded, {{failed}} failed",
     "Batch test stopped: {{completed}}/{{total}} completed, {{success}} succeeded, {{failed}} failed": "Batch test stopped: {{completed}}/{{total}} completed, {{success}} succeeded, {{failed}} failed",

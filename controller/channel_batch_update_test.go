@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -21,6 +22,7 @@ func ptr[T any](v T) *T {
 }
 
 func TestBuildBatchUpdateFieldsRejectsInvalidInput(t *testing.T) {
+	require.NoError(t, i18n.Init())
 	cases := []struct {
 		name    string
 		req     ChannelBatchUpdateRequest
@@ -29,132 +31,152 @@ func TestBuildBatchUpdateFieldsRejectsInvalidInput(t *testing.T) {
 		{
 			name:    "ids 为空数组",
 			req:     ChannelBatchUpdateRequest{Ids: []int{}, Weight: ptr(1)},
-			wantErr: "参数错误",
+			wantErr: i18n.MsgInvalidParams,
 		},
 		{
 			name:    "ids 为 nil",
 			req:     ChannelBatchUpdateRequest{Weight: ptr(1)},
-			wantErr: "参数错误",
+			wantErr: i18n.MsgInvalidParams,
 		},
 		{
 			name:    "ids 含 0",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1, 0}, Weight: ptr(1)},
-			wantErr: "参数错误",
+			wantErr: i18n.MsgInvalidParams,
 		},
 		{
 			name:    "ids 含负数",
 			req:     ChannelBatchUpdateRequest{Ids: []int{-5}, Weight: ptr(1)},
-			wantErr: "参数错误",
+			wantErr: i18n.MsgInvalidParams,
 		},
 		{
 			name:    "ids 超过 200 条",
 			req:     ChannelBatchUpdateRequest{Ids: make([]int, 201), Weight: ptr(1)},
-			wantErr: "单次批量编辑上限 200 条，请分批操作",
+			wantErr: i18n.MsgChannelBatchLimit,
 		},
 		{
 			name:    "全部字段跳过",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}},
-			wantErr: "批量编辑至少需要填写一个字段",
+			wantErr: i18n.MsgChannelBatchNoFields,
 		},
 		{
 			name:    "空白字符串视为未填写",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Tag: ptr("  ")},
-			wantErr: "批量编辑至少需要填写一个字段",
+			wantErr: i18n.MsgChannelBatchNoFields,
 		},
 		{
 			name:    "group 超过 64 字符",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Group: ptr(strings.Repeat("a", 65))},
-			wantErr: "分组长度不能超过 64 字符",
+			wantErr: i18n.MsgChannelBatchGroupTooLong,
 		},
 		{
 			name:    "group 超过 64 个汉字",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Group: ptr(strings.Repeat("中", 65))},
-			wantErr: "分组长度不能超过 64 字符",
+			wantErr: i18n.MsgChannelBatchGroupTooLong,
 		},
 		{
 			name:    "group 存在空白段",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Group: ptr("default,,vip")},
-			wantErr: "分组格式错误",
+			wantErr: i18n.MsgChannelBatchGroupInvalid,
 		},
 		{
 			name:    "group 尾随逗号产生空白段",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Group: ptr("default,")},
-			wantErr: "分组格式错误",
+			wantErr: i18n.MsgChannelBatchGroupInvalid,
 		},
 		{
 			name:    "tag 超过 191 字符",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Tag: ptr(strings.Repeat("t", 192))},
-			wantErr: "标签长度不能超过 191 字符",
+			wantErr: i18n.MsgChannelBatchTagTooLong,
 		},
 		{
 			name:    "remark 超过 255 字符",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Remark: ptr(strings.Repeat("r", 256))},
-			wantErr: "备注长度不能超过 255 字符",
+			wantErr: i18n.MsgChannelBatchRemarkTooLong,
 		},
 		{
 			name:    "test_model 超过 255 字符",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, TestModel: ptr(strings.Repeat("m", 256))},
-			wantErr: "测试模型长度不能超过 255 字符",
+			wantErr: i18n.MsgChannelBatchTestModelLong,
 		},
 		{
 			name:    "models 存在空白段",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Models: ptr("a,,b")},
-			wantErr: "模型列表格式错误",
+			wantErr: i18n.MsgChannelBatchModelsInvalid,
 		},
 		{
 			name:    "models 单个模型名超过 255 字符",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Models: ptr(strings.Repeat("m", 256))},
-			wantErr: "模型名称过长: " + strings.Repeat("m", 256),
+			wantErr: i18n.MsgChannelBatchModelTooLong,
 		},
 		{
 			name:    "model_mapping 为 JSON 数组",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, ModelMapping: ptr("[1,2]")},
-			wantErr: "模型重定向必须是合法的 JSON 对象",
+			wantErr: i18n.MsgChannelBatchMappingInvalid,
 		},
 		{
 			name:    "model_mapping 为 JSON 标量",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, ModelMapping: ptr("123")},
-			wantErr: "模型重定向必须是合法的 JSON 对象",
+			wantErr: i18n.MsgChannelBatchMappingInvalid,
 		},
 		{
 			name:    "model_mapping 非法 JSON",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, ModelMapping: ptr("{oops")},
-			wantErr: "模型重定向必须是合法的 JSON 对象",
+			wantErr: i18n.MsgChannelBatchMappingInvalid,
 		},
 		{
 			name:    "model_mapping 为 null",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, ModelMapping: ptr("null")},
-			wantErr: "模型重定向必须是合法的 JSON 对象",
+			wantErr: i18n.MsgChannelBatchMappingInvalid,
+		},
+		{
+			name:    "model_mapping 值非字符串",
+			req:     ChannelBatchUpdateRequest{Ids: []int{1}, ModelMapping: ptr(`{"gpt-4o":123}`)},
+			wantErr: i18n.MsgChannelBatchMappingValues,
+		},
+		{
+			name:    "model_mapping 值为嵌套对象",
+			req:     ChannelBatchUpdateRequest{Ids: []int{1}, ModelMapping: ptr(`{"gpt-4o":{"a":"b"}}`)},
+			wantErr: i18n.MsgChannelBatchMappingValues,
 		},
 		{
 			name:    "model_mapping 空串",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, ModelMapping: ptr("")},
-			wantErr: "模型重定向不能为空（如需清空请在单个编辑中操作）",
+			wantErr: i18n.MsgChannelBatchMappingEmpty,
 		},
 		{
 			name:    "model_mapping 空白串",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, ModelMapping: ptr("  ")},
-			wantErr: "模型重定向不能为空（如需清空请在单个编辑中操作）",
+			wantErr: i18n.MsgChannelBatchMappingEmpty,
 		},
 		{
 			name:    "weight 为负",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Weight: ptr(-1)},
-			wantErr: "权重必须在 0-4294967295 之间",
+			wantErr: i18n.MsgChannelBatchWeightRange,
 		},
 		{
 			name:    "weight 超过 uint32 上限",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Weight: ptr(4294967296)},
-			wantErr: "权重必须在 0-4294967295 之间",
+			wantErr: i18n.MsgChannelBatchWeightRange,
+		},
+		{
+			name:    "priority 超过 JS 安全整数上限",
+			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Priority: ptr(int64(9007199254740992))},
+			wantErr: i18n.MsgChannelBatchPriorityRange,
+		},
+		{
+			name:    "priority 低于 JS 安全整数下限",
+			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Priority: ptr(int64(-9007199254740992))},
+			wantErr: i18n.MsgChannelBatchPriorityRange,
 		},
 		{
 			name:    "auto_ban 取值非 0/1",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, AutoBan: ptr(2)},
-			wantErr: "自动封禁取值错误",
+			wantErr: i18n.MsgChannelBatchAutoBanInvalid,
 		},
 		{
 			name:    "auto_ban 为负",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, AutoBan: ptr(-1)},
-			wantErr: "自动封禁取值错误",
+			wantErr: i18n.MsgChannelBatchAutoBanInvalid,
 		},
 	}
 
@@ -171,7 +193,7 @@ func TestBuildBatchUpdateFieldsAcceptsValidInput(t *testing.T) {
 	t.Run("归一化生效值并保留零值", func(t *testing.T) {
 		req := ChannelBatchUpdateRequest{
 			Ids:     []int{1},
-			Group:   ptr(" default,vip "),
+			Group:   ptr(" default , vip "),
 			Weight:  ptr(0),
 			AutoBan: ptr(0),
 		}
@@ -206,6 +228,21 @@ func TestBuildBatchUpdateFieldsAcceptsValidInput(t *testing.T) {
 		assert.Equal(t, "t", *fields.TestModel)
 	})
 
+	t.Run("逗号列表段级归一化，段内空格不落库", func(t *testing.T) {
+		req := ChannelBatchUpdateRequest{
+			Ids:    []int{1},
+			Group:  ptr(" vip , default "),
+			Models: ptr(" gpt-4o , claude "),
+		}
+		fields, err := req.buildBatchUpdateFields()
+		require.NoError(t, err)
+
+		require.NotNil(t, fields.Group)
+		assert.Equal(t, "vip,default", *fields.Group)
+		require.NotNil(t, fields.Models)
+		assert.Equal(t, "gpt-4o,claude", *fields.Models)
+	})
+
 	t.Run("边界值被接受", func(t *testing.T) {
 		req := ChannelBatchUpdateRequest{
 			Ids:          []int{1},
@@ -229,7 +266,8 @@ func TestBuildBatchUpdateFieldsAcceptsValidInput(t *testing.T) {
 		require.NotNil(t, fields.TestModel)
 		assert.Len(t, *fields.TestModel, 255)
 		require.NotNil(t, fields.Models)
-		assert.Equal(t, "gpt-4o, claude-3-5-sonnet", *fields.Models)
+		// 段内空格经归一化去除：段级 trim 后逗号紧邻
+		assert.Equal(t, "gpt-4o,claude-3-5-sonnet", *fields.Models)
 		require.NotNil(t, fields.ModelMapping)
 		assert.Equal(t, `{"gpt-4o":"gpt-4o-mini"}`, *fields.ModelMapping)
 		require.NotNil(t, fields.Weight)
@@ -243,6 +281,7 @@ func TestBuildBatchUpdateFieldsAcceptsValidInput(t *testing.T) {
 			Tag:       ptr(strings.Repeat("中", 191)),
 			Remark:    ptr(strings.Repeat("中", 255)),
 			TestModel: ptr(strings.Repeat("中", 255)),
+			Models:    ptr(strings.Repeat("中", 255)),
 		}
 		fields, err := req.buildBatchUpdateFields()
 		require.NoError(t, err)
@@ -255,21 +294,24 @@ func TestBuildBatchUpdateFieldsAcceptsValidInput(t *testing.T) {
 		assert.Equal(t, 255, utf8.RuneCountInString(*fields.Remark))
 		require.NotNil(t, fields.TestModel)
 		assert.Equal(t, 255, utf8.RuneCountInString(*fields.TestModel))
+		// 模型名与其余文本字段同口径：255 个汉字（765 字节）按码点计数放行
+		require.NotNil(t, fields.Models)
+		assert.Equal(t, 255, utf8.RuneCountInString(*fields.Models))
 	})
 
-	t.Run("priority 保留 int64 全域精度", func(t *testing.T) {
-		const exact = int64(9007199254740993) // 2^53 + 1，经 float64 中转会变成 9007199254740992
+	t.Run("priority 在 JS 安全整数域内保留精度", func(t *testing.T) {
+		const exact = int64(9007199254740991) // 2^53 - 1，前端 Number.isSafeInteger 上限
 		req := ChannelBatchUpdateRequest{Ids: []int{1}, Priority: ptr(exact)}
 		fields, err := req.buildBatchUpdateFields()
 		require.NoError(t, err)
 		require.NotNil(t, fields.Priority)
 		assert.Equal(t, exact, *fields.Priority)
 
-		req = ChannelBatchUpdateRequest{Ids: []int{1}, Priority: ptr(int64(-9223372036854775808))}
+		req = ChannelBatchUpdateRequest{Ids: []int{1}, Priority: ptr(-exact)}
 		fields, err = req.buildBatchUpdateFields()
 		require.NoError(t, err)
 		require.NotNil(t, fields.Priority)
-		assert.Equal(t, int64(-9223372036854775808), *fields.Priority)
+		assert.Equal(t, -exact, *fields.Priority)
 	})
 
 	t.Run("ids 恰好 200 条被接受", func(t *testing.T) {
@@ -286,9 +328,12 @@ func TestBuildBatchUpdateFieldsAcceptsValidInput(t *testing.T) {
 func TestChannelBatchUpdateRequestParsesIntegersExactly(t *testing.T) {
 	t.Run("priority 大整数不经 float64 中转", func(t *testing.T) {
 		var req ChannelBatchUpdateRequest
-		require.NoError(t, common.UnmarshalJsonStr(`{"priority":9007199254740993}`, &req))
+		require.NoError(t, common.UnmarshalJsonStr(`{"ids":[1],"priority":9007199254740993}`, &req))
 		require.NotNil(t, req.Priority)
-		assert.Equal(t, int64(9007199254740993), *req.Priority)
+		// 解析层保留 int64 全精度；值域校验由 buildBatchUpdateFields 拒绝
+		_, err := req.buildBatchUpdateFields()
+		require.Error(t, err)
+		assert.Equal(t, i18n.MsgChannelBatchPriorityRange, err.Error())
 	})
 
 	t.Run("非整数输入被解析阶段拒绝", func(t *testing.T) {
@@ -334,6 +379,7 @@ func seedBatchUpdateChannel(t *testing.T, db *gorm.DB, weight uint, models strin
 
 func callBatchUpdateChannels(t *testing.T, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	require.NoError(t, i18n.Init())
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/batch/update", strings.NewReader(body))
@@ -358,7 +404,7 @@ func TestBatchUpdateChannelsHandlerRejectsEmptyFields(t *testing.T) {
 		recorder := callBatchUpdateChannels(t, `{"ids":[1,2]}`)
 
 		assert.Equal(t, http.StatusOK, recorder.Code)
-		assert.JSONEq(t, `{"success":false,"message":"批量编辑至少需要填写一个字段"}`, recorder.Body.String())
+		assert.JSONEq(t, `{"success":false,"message":"Batch edit requires at least one field"}`, recorder.Body.String())
 	})
 
 	t.Run("请求体非法 JSON", func(t *testing.T) {
@@ -367,7 +413,7 @@ func TestBatchUpdateChannelsHandlerRejectsEmptyFields(t *testing.T) {
 		recorder := callBatchUpdateChannels(t, `{"ids":[1,2]`)
 
 		assert.Equal(t, http.StatusOK, recorder.Code)
-		assert.JSONEq(t, `{"success":false,"message":"参数错误"}`, recorder.Body.String())
+		assert.JSONEq(t, `{"success":false,"message":"Invalid parameters"}`, recorder.Body.String())
 	})
 
 	// ids 元素须为正整数，非法元素在校验阶段即拒绝，不落审计日志（03 文档 2.2.1）
@@ -377,12 +423,22 @@ func TestBatchUpdateChannelsHandlerRejectsEmptyFields(t *testing.T) {
 		recorder := callBatchUpdateChannels(t, `{"ids":[0,-5],"weight":3}`)
 
 		assert.Equal(t, http.StatusOK, recorder.Code)
-		assert.JSONEq(t, `{"success":false,"message":"参数错误"}`, recorder.Body.String())
+		assert.JSONEq(t, `{"success":false,"message":"Invalid parameters"}`, recorder.Body.String())
 
 		var auditCount int64
 		require.NoError(t, db.Model(&model.Log{}).Where("content LIKE ?", "%Batch updated%").Count(&auditCount).Error)
 		assert.Zero(t, auditCount)
 	})
+}
+
+// TestBatchUpdateChannelsHandlerMissingTargets ids 全部不存在时返回明确失败而非「0 条成功」。
+func TestBatchUpdateChannelsHandlerMissingTargets(t *testing.T) {
+	setupBatchUpdateHandlerTestDB(t)
+
+	recorder := callBatchUpdateChannels(t, `{"ids":[404],"weight":3}`)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.JSONEq(t, `{"success":false,"message":"Channel does not exist"}`, recorder.Body.String())
 }
 
 func TestBatchUpdateChannelsHandlerUpdatesAndReportsCount(t *testing.T) {
@@ -464,7 +520,7 @@ func TestBatchUpdateChannelsHandlerReportsFailureAndRollsBack(t *testing.T) {
 	var response batchUpdateResponse
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	assert.False(t, response.Success)
-	assert.Equal(t, "批量编辑失败，已全部回滚", response.Message)
+	assert.Equal(t, "Batch edit failed, all changes were rolled back", response.Message)
 	require.Len(t, response.Data.Failed, 1)
 	assert.Contains(t, response.Data.Failed[0].Reason, "abilities")
 

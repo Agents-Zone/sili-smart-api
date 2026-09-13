@@ -43,7 +43,7 @@ describe('buildBatchEditPayload', () => {
 
     assert.equal(result.payload, null)
     assert.equal(result.error, 'You must fill in at least one field')
-    assert.deepEqual(result.fieldLabels, [])
+    assert.deepEqual(result.fields, [])
   })
 
   test('keeps zero values', () => {
@@ -59,7 +59,7 @@ describe('buildBatchEditPayload', () => {
       priority: 0,
       auto_ban: 0,
     })
-    assert.equal(result.fieldLabels.length, 3)
+    assert.equal(result.fields.length, 3)
     assert.equal(result.error, null)
   })
 
@@ -118,6 +118,25 @@ describe('buildBatchEditPayload', () => {
     }
   })
 
+  test('rejects model mappings with non-string values', () => {
+    // The relay path unmarshals the mapping into map[string]string; a numeric
+    // value would break every request through the affected channels.
+    const result = buildBatchEditPayload([1], {
+      model_mapping: '{"gpt-4o":123}',
+    })
+
+    assert.equal(result.payload, null)
+    assert.equal(result.error, 'Model mapping must be a valid JSON object')
+  })
+
+  test('rejects priorities beyond the safe integer range', () => {
+    for (const priority of ['9007199254740992', '-9007199254740992']) {
+      const result = buildBatchEditPayload([1], { priority })
+
+      assert.equal(result.error, 'Priority is out of range', priority)
+    }
+  })
+
   test('rejects over-limit selection', () => {
     const ids = Array.from({ length: 201 }, (_, i) => i + 1)
 
@@ -146,24 +165,24 @@ describe('buildBatchEditPayload boundaries', () => {
 
     assert.equal(result.error, null)
     assert.deepEqual(result.payload, { ids, weight: 1 })
-    assert.deepEqual(result.fieldLabels, ['Weight'])
+    assert.deepEqual(result.fields, [{ key: 'weight', label: 'Weight' }])
   })
 
-  test('builds every filled field and labels them', () => {
+  test('builds every filled field with key and label', () => {
     const result = buildBatchEditPayload([7], filledForm)
 
     assert.equal(result.error, null)
     assert.deepEqual(result.payload, expectedFullPayload)
-    assert.deepEqual(result.fieldLabels, [
-      'Group',
-      'Tag',
-      'Remark',
-      'Models',
-      'Model Mapping',
-      'Weight',
-      'Priority',
-      'Test Model',
-      'Auto Ban',
+    assert.deepEqual(result.fields, [
+      { key: 'group', label: 'Group' },
+      { key: 'tag', label: 'Tag' },
+      { key: 'remark', label: 'Remark' },
+      { key: 'models', label: 'Models' },
+      { key: 'model_mapping', label: 'Model Mapping' },
+      { key: 'weight', label: 'Weight' },
+      { key: 'priority', label: 'Priority' },
+      { key: 'test_model', label: 'Test Model' },
+      { key: 'auto_ban', label: 'Auto Ban' },
     ])
   })
 
@@ -192,7 +211,7 @@ describe('buildBatchEditPayload boundaries', () => {
     }
   })
 
-  test('trims surrounding whitespace before submitting', () => {
+  test('normalizes comma list segments before submitting', () => {
     const result = buildBatchEditPayload([1], {
       group: ' default , vip ',
       tag: '  prod  ',
@@ -203,9 +222,9 @@ describe('buildBatchEditPayload boundaries', () => {
     assert.equal(result.error, null)
     assert.deepEqual(result.payload, {
       ids: [1],
-      group: 'default , vip',
+      group: 'default,vip',
       tag: 'prod',
-      models: 'gpt-4o , claude',
+      models: 'gpt-4o,claude',
       weight: 7,
     })
   })
@@ -223,11 +242,11 @@ describe('buildBatchEditPayload boundaries', () => {
     })
 
     assert.equal(result.error, null)
-    assert.equal(result.fieldLabels.length, 8)
+    assert.equal(result.fields.length, 8)
   })
 
   test('rejects priorities that are not safe integers', () => {
-    for (const priority of ['1.5', 'abc', '9007199254740992', '']) {
+    for (const priority of ['1.5', 'abc', '']) {
       const result = buildBatchEditPayload([1], {
         priority,
         tag: 'prod',

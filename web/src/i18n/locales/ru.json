@@ -603,6 +603,7 @@
     "Batch Operations": "Пакетные операции",
     "Batch processing failed": "Пакетная обработка не удалась",
     "Batch set tag for {{count}} channels": "Тег пакетно задан для {{count}} каналов",
+    "Batch updated {{count}} channels (fields: {{updated_fields}})": "Пакетно обновлено каналов: {{count}} (поля: {{updated_fields}})",
     "Batch test completed: {{count}} succeeded": "Пакетный тест завершен: {{count}} успешно",
     "Batch test completed: {{success}} succeeded, {{failed}} failed": "Пакетный тест завершен: {{success}} успешно, {{failed}} с ошибкой",
     "Batch test stopped: {{completed}}/{{total}} completed, {{success}} succeeded, {{failed}} failed": "Пакетный тест остановлен: {{completed}}/{{total}} завершено, {{success}} успешно, {{failed}} с ошибкой",

@@ -210,6 +210,16 @@ func ApiErrorMsg(c *gin.Context, msg string) {
 	})
 }
 
+// ApiErrorMsgAndData emits an error envelope that still carries structured
+// data (e.g. per-item failure details) for the client to render.
+func ApiErrorMsgAndData(c *gin.Context, msg string, data any) {
+	c.JSON(http.StatusOK, gin.H{
+		"success": false,
+		"message": msg,
+		"data":    data,
+	})
+}
+
 func ApiSuccess(c *gin.Context, data any) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

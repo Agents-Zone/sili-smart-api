@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -118,7 +119,8 @@ func TestBatchUpdateChannelsSkipsMissingIds(t *testing.T) {
 	assert.Equal(t, 7, ch2.GetWeight())
 }
 
-// TestBatchUpdateChannelsRollsBackOnFailure 第 2 个渠道更新失败时整体回滚。
+// TestBatchUpdateChannelsRollsBackOnFailure 事务中任一写库语句失败即整体回滚：
+// channels 更新成功后 abilities 同步失败（第 2 个 UPDATE 回调注入错误）。
 func TestBatchUpdateChannelsRollsBackOnFailure(t *testing.T) {
 	resetChannelBatchTables(t)
 	seedChannel(t, 1, "a", "default", 5)
@@ -137,12 +139,13 @@ func TestBatchUpdateChannelsRollsBackOnFailure(t *testing.T) {
 	_, failure, err := BatchUpdateChannels([]int{1, 2}, ChannelBatchEditFields{Weight: ptrUint(0)})
 	require.Error(t, err)
 	require.NotNil(t, failure)
-	assert.Equal(t, 2, failure.Id)
 	assert.Contains(t, failure.Reason, "boom")
 
-	var ch1 Channel
-	require.NoError(t, DB.First(&ch1, 1).Error)
-	assert.Equal(t, 5, ch1.GetWeight())
+	for _, id := range []int{1, 2} {
+		var ch Channel
+		require.NoError(t, DB.First(&ch, id).Error)
+		assert.Equal(t, 5, ch.GetWeight())
+	}
 }
 
 // TestBatchUpdateChannelsEmptyIds 空 ids 直接返回且不改动任何渠道。
@@ -259,4 +262,66 @@ func TestChannelBatchEditFieldsApplyToSkipsNil(t *testing.T) {
 
 	got = ChannelBatchEditFields{Group: ptrString("vip")}.applyTo(&Channel{})
 	assert.Equal(t, map[string]any{"group": "vip"}, got)
+}
+
+// TestBatchUpdateChannelsKeepsAbilitySegmentsClean 段值原样落库时 abilities 行
+// 与 UpdateAbilities 的裸 split 语义对齐（归一化在 controller 校验层完成）。
+func TestBatchUpdateChannelsKeepsAbilitySegmentsClean(t *testing.T) {
+	resetChannelBatchTables(t)
+	seedChannel(t, 1, "a", "default", 5)
+
+	_, failure, err := BatchUpdateChannels([]int{1}, ChannelBatchEditFields{
+		Models: ptrString("b,c"),
+		Group:  ptrString("vip,default"),
+	})
+	require.NoError(t, err)
+	assert.Nil(t, failure)
+
+	var ch Channel
+	require.NoError(t, DB.First(&ch, 1).Error)
+	assert.Equal(t, "b,c", ch.Models)
+	assert.Equal(t, "vip,default", ch.Group)
+
+	var abilities []Ability
+	require.NoError(t, DB.Where("channel_id = ?", 1).Find(&abilities).Error)
+	// 2 模型 × 2 分组的笛卡尔积
+	require.Len(t, abilities, 4)
+	for _, ability := range abilities {
+		assert.Equal(t, strings.TrimSpace(ability.Model), ability.Model)
+		assert.Equal(t, strings.TrimSpace(ability.Group), ability.Group)
+	}
+}
+
+// TestBatchUpdateChannelsInlineAbilityColumns 仅改行内列（weight/priority/tag）时
+// abilities 行集不变、行内列同步更新：模型集合保持原样，weight 落到 ability 行。
+func TestBatchUpdateChannelsInlineAbilityColumns(t *testing.T) {
+	resetChannelBatchTables(t)
+	seedChannel(t, 1, "a,b", "default", 5)
+	seedChannel(t, 2, "a,b", "default", 5)
+
+	_, failure, err := BatchUpdateChannels([]int{1, 2}, ChannelBatchEditFields{Weight: ptrUint(9)})
+	require.NoError(t, err)
+	assert.Nil(t, failure)
+
+	// (group,model) 行集不变：每渠道仍是 default×{a,b}
+	assert.ElementsMatch(t, []string{"a", "b"}, abilityModels(t, 1))
+
+	var abilities []Ability
+	require.NoError(t, DB.Where("channel_id = ?", 1).Find(&abilities).Error)
+	require.Len(t, abilities, 2)
+	for _, ability := range abilities {
+		assert.Equal(t, uint(9), ability.Weight)
+	}
+}
+
+// TestChannelBatchEditFieldsDerivedFromSingleSource 审计派生方法与 applyTo 的
+// SET 白名单同源：列集合一致，值经解引用。
+func TestChannelBatchEditFieldsDerivedFromSingleSource(t *testing.T) {
+	fields := ChannelBatchEditFields{
+		Remark: ptrString("r1"),
+		Weight: ptrUint(0),
+	}
+	assert.Equal(t, []string{"remark", "weight"}, fields.EffectiveColumns())
+	assert.Equal(t, map[string]any{"remark": "r1", "weight": uint(0)}, fields.ColumnValues())
+	assert.Equal(t, map[string]any{"remark": "r1", "weight": uint(0)}, fields.applyTo(&Channel{}))
 }

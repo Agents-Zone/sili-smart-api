@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -947,7 +948,8 @@ type ChannelBatchUpdateRequest struct {
 
 // optionalTrimmedString 归一化可选文本字段：nil 或 trim 后为空均视为未填写（返回 nil 跳过），
 // 超出 maxLen 返回对应错误（03 文档 4.2.4 规则1 空即跳过）。长度按 Unicode 码点计，
-// 与 specs「字符」语义、前端 .length 及 DB varchar 列宽对齐。
+// 与 specs「字符」语义及 DB varchar 列宽对齐（前端按 UTF-16 码元计数，增补平面
+// 字符处前端更严，方向安全）。
 func optionalTrimmedString(v *string, maxLen int, tooLong string) (*string, error) {
 	if v == nil {
 		return nil, nil
@@ -962,42 +964,70 @@ func optionalTrimmedString(v *string, maxLen int, tooLong string) (*string, erro
 	return common.GetPointer(trimmed), nil
 }
 
-// buildBatchUpdateFields 校验并归一化请求：返回列更新字段；err 为具体失败原因。
-// 校验顺序：ids 边界 → 逐字段值域 → 生效字段数（03 文档 2.2）。
+// normalizeCommaList 把逗号分隔列表归一化为「段级 trim、逗号紧邻」形态，
+// 与 UpdateAbilities 的裸 split 语义对齐，避免带空格的段写进 abilities 行。
+func normalizeCommaList(v string) string {
+	segments := strings.Split(v, ",")
+	for i, segment := range segments {
+		segments[i] = strings.TrimSpace(segment)
+	}
+	return strings.Join(segments, ",")
+}
+
+// validateBatchModelMapping 校验 model_mapping：须为 JSON 对象且值全为字符串。
+// 值类型与中转侧 map[string]string 反序列化（relay/helper/model_mapped.go）对齐，
+// 非字符串值会让该渠道所有请求失败。
+func validateBatchModelMapping(mapping string) error {
+	var parsed map[string]any
+	if err := common.UnmarshalJsonStr(mapping, &parsed); err != nil || parsed == nil {
+		return errors.New(i18n.MsgChannelBatchMappingInvalid)
+	}
+	for _, value := range parsed {
+		if _, ok := value.(string); !ok {
+			return errors.New(i18n.MsgChannelBatchMappingValues)
+		}
+	}
+	return nil
+}
+
+// buildBatchUpdateFields 校验并归一化请求：返回列更新字段；err 为 i18n 键标记的
+// 具体失败原因（带参错误用 i18nError 包装）。校验顺序：ids 边界 → 逐字段值域 →
+// 生效字段数（03 文档 2.2）。
 func (r *ChannelBatchUpdateRequest) buildBatchUpdateFields() (model.ChannelBatchEditFields, error) {
 	var fields model.ChannelBatchEditFields
 	if len(r.Ids) == 0 {
-		return fields, errors.New("参数错误")
+		return fields, errors.New(i18n.MsgInvalidParams)
 	}
-	if len(r.Ids) > 200 {
-		return fields, errors.New("单次批量编辑上限 200 条，请分批操作")
+	if len(r.Ids) > MaxBatchEditChannels {
+		return fields, errors.New(i18n.MsgChannelBatchLimit)
 	}
 	// ids 元素须为正整数（03 文档 2.2.1），0 与负数均为非法渠道 ID
 	for _, id := range r.Ids {
 		if id <= 0 {
-			return fields, errors.New("参数错误")
+			return fields, errors.New(i18n.MsgInvalidParams)
 		}
 	}
 
-	group, err := optionalTrimmedString(r.Group, 64, "分组长度不能超过 64 字符")
+	group, err := optionalTrimmedString(r.Group, MaxBatchEditGroupLength, i18n.MsgChannelBatchGroupTooLong)
 	if err != nil {
 		return fields, err
 	}
 	if group != nil {
 		for _, segment := range strings.Split(*group, ",") {
 			if strings.TrimSpace(segment) == "" {
-				return fields, errors.New("分组格式错误")
+				return fields, errors.New(i18n.MsgChannelBatchGroupInvalid)
 			}
 		}
-		fields.Group = group
+		// 段归一化，杜绝带空格分组进入 abilities
+		fields.Group = common.GetPointer(normalizeCommaList(*group))
 	}
 
-	fields.Tag, err = optionalTrimmedString(r.Tag, 191, "标签长度不能超过 191 字符")
+	fields.Tag, err = optionalTrimmedString(r.Tag, MaxBatchEditTagLength, i18n.MsgChannelBatchTagTooLong)
 	if err != nil {
 		return fields, err
 	}
 
-	fields.Remark, err = optionalTrimmedString(r.Remark, 255, "备注长度不能超过 255 字符")
+	fields.Remark, err = optionalTrimmedString(r.Remark, MaxBatchEditTextLength, i18n.MsgChannelBatchRemarkTooLong)
 	if err != nil {
 		return fields, err
 	}
@@ -1008,57 +1038,87 @@ func (r *ChannelBatchUpdateRequest) buildBatchUpdateFields() (model.ChannelBatch
 			for _, segment := range strings.Split(models, ",") {
 				name := strings.TrimSpace(segment)
 				if name == "" {
-					return fields, errors.New("模型列表格式错误")
+					return fields, errors.New(i18n.MsgChannelBatchModelsInvalid)
 				}
-				if len(name) > 255 {
-					return fields, fmt.Errorf("模型名称过长: %s", name)
+				// 按码点计数，与其余文本字段一致（03 文档 4.2.4）
+				if utf8.RuneCountInString(name) > MaxBatchEditTextLength {
+					return fields, &i18nParamError{key: i18n.MsgChannelBatchModelTooLong, args: map[string]any{"Name": name}}
 				}
 			}
-			fields.Models = common.GetPointer(models)
+			// 段归一化，杜绝带空格模型名进入 abilities
+			fields.Models = common.GetPointer(normalizeCommaList(models))
 		}
 	}
 
 	if r.ModelMapping != nil {
 		mapping := strings.TrimSpace(*r.ModelMapping)
 		if mapping == "" {
-			return fields, errors.New("模型重定向不能为空（如需清空请在单个编辑中操作）")
+			return fields, errors.New(i18n.MsgChannelBatchMappingEmpty)
 		}
-		var parsed map[string]any
-		if err := common.UnmarshalJsonStr(mapping, &parsed); err != nil || parsed == nil {
-			return fields, errors.New("模型重定向必须是合法的 JSON 对象")
+		if err := validateBatchModelMapping(mapping); err != nil {
+			return fields, err
 		}
 		fields.ModelMapping = common.GetPointer(mapping)
 	}
 
 	if r.Weight != nil {
-		if *r.Weight < 0 || int64(*r.Weight) > 4294967295 {
-			return fields, errors.New("权重必须在 0-4294967295 之间")
+		if *r.Weight < 0 || int64(*r.Weight) > math.MaxUint32 {
+			return fields, errors.New(i18n.MsgChannelBatchWeightRange)
 		}
 		fields.Weight = common.GetPointer(uint(*r.Weight))
 	}
 
 	if r.Priority != nil {
+		// 与前端 Number.isSafeInteger 对齐，超出 JS 安全整数域的值会在前端读写时精度漂移
+		if *r.Priority < -maxSafeJsInteger || *r.Priority > maxSafeJsInteger {
+			return fields, errors.New(i18n.MsgChannelBatchPriorityRange)
+		}
 		fields.Priority = common.GetPointer(*r.Priority)
 	}
 
-	fields.TestModel, err = optionalTrimmedString(r.TestModel, 255, "测试模型长度不能超过 255 字符")
+	fields.TestModel, err = optionalTrimmedString(r.TestModel, MaxBatchEditTextLength, i18n.MsgChannelBatchTestModelLong)
 	if err != nil {
 		return fields, err
 	}
 
 	if r.AutoBan != nil {
 		if *r.AutoBan != 0 && *r.AutoBan != 1 {
-			return fields, errors.New("自动封禁取值错误")
+			return fields, errors.New(i18n.MsgChannelBatchAutoBanInvalid)
 		}
 		fields.AutoBan = common.GetPointer(*r.AutoBan)
 	}
 
-	if fields.Group == nil && fields.Tag == nil && fields.Remark == nil && fields.Models == nil &&
-		fields.ModelMapping == nil && fields.Weight == nil && fields.Priority == nil &&
-		fields.TestModel == nil && fields.AutoBan == nil {
-		return fields, errors.New("批量编辑至少需要填写一个字段")
+	if !fields.AnySet() {
+		return fields, errors.New(i18n.MsgChannelBatchNoFields)
 	}
 	return fields, nil
+}
+
+// Batch edit field limits shared by validation and audit (frontend mirrors them
+// in web/src/features/channels/lib/channel-batch-edit.ts).
+const (
+	MaxBatchEditChannels     = 200
+	MaxBatchEditGroupLength  = 64
+	MaxBatchEditTagLength    = 191
+	MaxBatchEditTextLength   = 255
+	maxSafeJsInteger   int64 = 9007199254740991 // ±(2^53-1), aligned with frontend Number.isSafeInteger
+)
+
+// i18nParamError 携带模板参数的 i18n 错误，由 respondBatchUpdateError 统一翻译。
+type i18nParamError struct {
+	key  string
+	args map[string]any
+}
+
+func (e *i18nParamError) Error() string { return e.key }
+
+// respondBatchUpdateError 以请求语言翻译校验错误（err 为 i18n 键）。
+func respondBatchUpdateError(c *gin.Context, err error) {
+	if paramErr, ok := err.(*i18nParamError); ok {
+		common.ApiErrorI18n(c, paramErr.key, paramErr.args)
+		return
+	}
+	common.ApiErrorI18n(c, err.Error())
 }
 
 type PatchChannel struct {
@@ -1495,29 +1555,30 @@ func BatchUpdateChannels(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": "参数错误",
+			"message": i18n.T(c, i18n.MsgInvalidParams),
 		})
 		return
 	}
 	fields, err := req.buildBatchUpdateFields()
 	if err != nil {
-		common.ApiError(c, err)
+		respondBatchUpdateError(c, err)
 		return
 	}
 	count, failure, err := model.BatchUpdateChannels(req.Ids, fields)
 	if err != nil {
-		// 事务失败明细需额外携带 data.failed，common.ApiError 不产出 data，直接构造（03 文档 2.3）
+		// 事务失败明细需额外携带 data.failed（03 文档 2.3）
 		if failure != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "批量编辑失败，已全部回滚",
-				"data": gin.H{
-					"failed": []model.ChannelBatchUpdateFailure{*failure},
-				},
+			common.ApiErrorMsgAndData(c, i18n.T(c, i18n.MsgChannelBatchFailed), gin.H{
+				"failed": []model.ChannelBatchUpdateFailure{*failure},
 			})
 			return
 		}
 		common.ApiError(c, err)
+		return
+	}
+	// ids 全部已不存在时数据库无变化，视作无目标而非成功（03 文档 2.2.1）
+	if count == 0 {
+		common.ApiErrorI18n(c, i18n.MsgChannelNotExists)
 		return
 	}
 	model.InitChannelCache()
@@ -1527,47 +1588,11 @@ func BatchUpdateChannels(c *gin.Context) {
 		service.ClearChannelAffinityRuntimeByChannelIDs(req.Ids)
 	}
 
-	// 生效字段名列表与所填值原文同源派生，避免两处各写一份字段判断（03 文档 2.1 处理流程 6）
-	updatedFields := make([]string, 0, 9)
-	values := make(map[string]interface{}, 9)
-	if fields.Group != nil {
-		updatedFields = append(updatedFields, "group")
-		values["group"] = *fields.Group
-	}
-	if fields.Tag != nil {
-		updatedFields = append(updatedFields, "tag")
-		values["tag"] = *fields.Tag
-	}
-	if fields.Remark != nil {
-		updatedFields = append(updatedFields, "remark")
-		values["remark"] = *fields.Remark
-	}
-	if fields.Models != nil {
-		updatedFields = append(updatedFields, "models")
-		values["models"] = *fields.Models
-	}
-	if fields.ModelMapping != nil {
-		updatedFields = append(updatedFields, "model_mapping")
-		values["model_mapping"] = *fields.ModelMapping
-	}
-	if fields.Weight != nil {
-		updatedFields = append(updatedFields, "weight")
-		values["weight"] = *fields.Weight
-	}
-	if fields.Priority != nil {
-		updatedFields = append(updatedFields, "priority")
-		values["priority"] = *fields.Priority
-	}
-	if fields.TestModel != nil {
-		updatedFields = append(updatedFields, "test_model")
-		values["test_model"] = *fields.TestModel
-	}
-	if fields.AutoBan != nil {
-		updatedFields = append(updatedFields, "auto_ban")
-		values["auto_ban"] = *fields.AutoBan
-	}
+	// 审计的 updated_fields/values 由字段元数据表单源派生（03 文档 2.1 处理流程 6）
+	updatedFields := fields.EffectiveColumns()
+	values := fields.ColumnValues()
 	// values 记录所填值全量原文，不截断（4.2.4 规则5）；
-	// updated_fields 以逗号连接串入审计，与模板 ${updated_fields} 的渲染形态一致（03 文档 2.1 处理流程 6）
+	// updated_fields 以逗号连接串入审计，与模板 ${updated_fields} 的渲染形态一致
 	recordManageAudit(c, "channel.update_batch", map[string]interface{}{
 		"count":          count,
 		"channel_ids":    req.Ids,

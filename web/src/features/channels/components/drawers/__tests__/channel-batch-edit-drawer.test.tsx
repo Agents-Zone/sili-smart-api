@@ -304,7 +304,7 @@ describe('ChannelBatchEditDrawer', () => {
       (candidate) => candidate.getAttribute('title') === longRemark
     )
     assert.ok(item)
-    assert.equal(item.textContent, `Remark: ${'r'.repeat(50)}…`)
+    assert.equal(item.textContent, `Remark: ${'r'.repeat(50)}...`)
   })
 
   test('closes the drawer after a successful submit', async () => {

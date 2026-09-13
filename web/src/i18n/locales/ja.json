@@ -603,6 +603,7 @@
     "Batch Operations": "一括操作",
     "Batch processing failed": "一括処理に失敗しました",
     "Batch set tag for {{count}} channels": "{{count}} 件のチャネルにタグを一括設定しました",
+    "Batch updated {{count}} channels (fields: {{updated_fields}})": "{{count}} 件のチャネルを一括更新しました（フィールド: {{updated_fields}}）",
     "Batch test completed: {{count}} succeeded": "バッチテストが完了しました: {{count}} 件成功",
     "Batch test completed: {{success}} succeeded, {{failed}} failed": "バッチテストが完了しました: {{success}} 件成功、{{failed}} 件失敗",
     "Batch test stopped: {{completed}}/{{total}} completed, {{success}} succeeded, {{failed}} failed": "バッチテストを停止しました: {{completed}}/{{total}} 完了、{{success}} 件成功、{{failed}} 件失敗",

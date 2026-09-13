@@ -17,12 +17,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { BatchUpdateParams } from '../types'
+import { validateModelMappingJson } from './model-mapping-validation'
 
 /** Single batch edit upper bound (spec 4.2.4 rule 3). */
 export const MAX_BATCH_EDIT_CHANNELS = 200
 
 /** Weight upper bound, aligned with the channels.weight column (uint32). */
 const MAX_WEIGHT = 4294967295
+
+/** Priority bounds, aligned with Number.isSafeInteger (±(2^53-1)). */
+const MAX_SAFE_PRIORITY = 9007199254740991
 
 /** Group length limit (spec 4.2.2 section A). */
 const MAX_GROUP_LENGTH = 64
@@ -46,34 +50,33 @@ export interface ChannelBatchEditForm {
   auto_ban?: 'unchanged' | 'enabled' | 'disabled'
 }
 
+/** An effective field of a built payload: payload key plus display label. */
+export interface BatchEditField {
+  key: keyof BatchUpdateParams
+  label: string
+}
+
 export interface BatchEditBuildResult {
   /** Submittable payload when validation passes, otherwise null */
   payload: BatchUpdateParams | null
-  /** Display names of the effective fields (English source text) for the confirm dialog and audit */
-  fieldLabels: string[]
+  /** Effective fields (payload key + English label) for the confirm dialog */
+  fields: BatchEditField[]
   /** Validation failure reason (i18n key), null on success */
   error: string | null
 }
 
 const emptyResult = (error: string): BatchEditBuildResult => ({
   payload: null,
-  fieldLabels: [],
+  fields: [],
   error,
 })
 
-/** Splits a comma separated list into trimmed segments. */
-const splitCommaList = (value: string): string[] =>
-  value.split(',').map((segment) => segment.trim())
-
-/** True when the text parses into a plain JSON object (arrays, null and scalars are not). */
-const isJsonObject = (value: string): boolean => {
-  try {
-    const parsed = JSON.parse(value)
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-  } catch {
-    return false
-  }
-}
+/** Trims each comma-separated segment, mirroring the backend normalization. */
+const normalizeCommaList = (value: string): string =>
+  value
+    .split(',')
+    .map((segment) => segment.trim())
+    .join(',')
 
 /**
  * Validates the form and builds the batch edit payload:
@@ -106,7 +109,7 @@ export function buildBatchEditPayload(
     if (group.length > MAX_GROUP_LENGTH) {
       return emptyResult('Group must be less than 64 characters')
     }
-    if (splitCommaList(group).some((segment) => segment === '')) {
+    if (group.split(',').some((segment) => segment.trim() === '')) {
       return emptyResult('Group format error')
     }
   }
@@ -124,7 +127,7 @@ export function buildBatchEditPayload(
   }
 
   if (models) {
-    const modelNames = splitCommaList(models)
+    const modelNames = models.split(',').map((segment) => segment.trim())
     if (modelNames.some((name) => name === '')) {
       return emptyResult('Model list format error')
     }
@@ -141,8 +144,13 @@ export function buildBatchEditPayload(
       'Model mapping cannot be empty here. Clear it in single-channel edit instead.'
     )
   }
-  if (modelMapping && !isJsonObject(modelMapping)) {
-    return emptyResult('Model mapping must be a valid JSON object')
+  if (modelMapping) {
+    // Reuse the single-channel validation: values must be strings, matching the
+    // backend's map[string]string unmarshal on the relay path.
+    const { valid } = validateModelMappingJson(modelMapping)
+    if (!valid) {
+      return emptyResult('Model mapping must be a valid JSON object')
+    }
   }
 
   let weight: number | undefined
@@ -157,7 +165,10 @@ export function buildBatchEditPayload(
   let priority: number | undefined
   if (rawPriority) {
     const parsed = Number(rawPriority)
-    if (!Number.isSafeInteger(parsed)) {
+    if (
+      !Number.isSafeInteger(parsed) ||
+      Math.abs(parsed) > MAX_SAFE_PRIORITY
+    ) {
       return emptyResult('Priority is out of range')
     }
     priority = parsed
@@ -171,48 +182,35 @@ export function buildBatchEditPayload(
   }
 
   const payload: BatchUpdateParams = { ids }
-  const fieldLabels: string[] = []
+  const fields: BatchEditField[] = []
 
-  if (group) {
-    payload.group = group
-    fieldLabels.push('Group')
+  // Single source of effective fields: each entry appends both the payload value
+  // and its {key, label} pair, so the confirm dialog needs no reverse lookup.
+  const appendField = (
+    key: keyof BatchUpdateParams,
+    label: string,
+    value: string | number
+  ) => {
+    ;(payload as unknown as Record<string, string | number | number[]>)[key] =
+      value
+    fields.push({ key, label })
   }
-  if (tag) {
-    payload.tag = tag
-    fieldLabels.push('Tag')
-  }
-  if (remark) {
-    payload.remark = remark
-    fieldLabels.push('Remark')
-  }
-  if (models) {
-    payload.models = models
-    fieldLabels.push('Models')
-  }
+
+  if (group) appendField('group', 'Group', normalizeCommaList(group))
+  if (tag) appendField('tag', 'Tag', tag)
+  if (remark) appendField('remark', 'Remark', remark)
+  if (models) appendField('models', 'Models', normalizeCommaList(models))
   if (modelMapping) {
-    payload.model_mapping = modelMapping
-    fieldLabels.push('Model Mapping')
+    appendField('model_mapping', 'Model Mapping', modelMapping)
   }
-  if (weight !== undefined) {
-    payload.weight = weight
-    fieldLabels.push('Weight')
-  }
-  if (priority !== undefined) {
-    payload.priority = priority
-    fieldLabels.push('Priority')
-  }
-  if (testModel) {
-    payload.test_model = testModel
-    fieldLabels.push('Test Model')
-  }
-  if (autoBan !== undefined) {
-    payload.auto_ban = autoBan
-    fieldLabels.push('Auto Ban')
-  }
+  if (weight !== undefined) appendField('weight', 'Weight', weight)
+  if (priority !== undefined) appendField('priority', 'Priority', priority)
+  if (testModel) appendField('test_model', 'Test Model', testModel)
+  if (autoBan !== undefined) appendField('auto_ban', 'Auto Ban', autoBan)
 
-  if (fieldLabels.length === 0) {
+  if (fields.length === 0) {
     return emptyResult('You must fill in at least one field')
   }
 
-  return { payload, fieldLabels, error: null }
+  return { payload, fields, error: null }
 }

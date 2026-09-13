@@ -603,6 +603,7 @@
     "Batch Operations": "批量操作",
     "Batch processing failed": "批量处理失败",
     "Batch set tag for {{count}} channels": "批量为 {{count}} 个渠道设置标签",
+    "Batch updated {{count}} channels (fields: {{updated_fields}})": "批量编辑 {{count}} 个渠道（字段：{{updated_fields}}）",
     "Batch test completed: {{count}} succeeded": "批量测试完成：{{count}} 个成功",
     "Batch test completed: {{success}} succeeded, {{failed}} failed": "批量测试完成：{{success}} 个成功，{{failed}} 个失败",
     "Batch test stopped: {{completed}}/{{total}} completed, {{success}} succeeded, {{failed}} failed": "批量测试已停止：已完成 {{completed}}/{{total}}，{{success}} 个成功，{{failed}} 个失败",

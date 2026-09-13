@@ -337,11 +337,7 @@ func CleanupLogFiles(c *gin.Context) {
 	}
 
 	if len(failedFiles) > 0 {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": fmt.Sprintf("部分文件删除失败（%d/%d）", len(failedFiles), len(toDelete)),
-			"data":    result,
-		})
+		common.ApiErrorMsgAndData(c, fmt.Sprintf("部分文件删除失败（%d/%d）", len(failedFiles), len(toDelete)), result)
 		return
 	}
 

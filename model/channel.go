@@ -1100,53 +1100,176 @@ type ChannelBatchEditFields struct {
 	AutoBan      *int
 }
 
+// channelBatchEditColumns 批量编辑字段元数据表：唯一的字段清单来源。
+// applyTo 的 SET 白名单、AffectsAbilities 路由判定、controller 审计的
+// updated_fields/values 均由此派生，新增字段只加一行。
+type channelBatchEditColumn struct {
+	name     string // DB 列名，也是审计 values 的键
+	editable bool   // 是否参与批量编辑（全部为 true，保留以便与元数据语义对齐）
+	routing  bool   // 是否为路由相关列，变更需重建 abilities
+}
+
+var channelBatchEditColumns = []channelBatchEditColumn{
+	{name: "group", routing: true},
+	{name: "tag", routing: true},
+	{name: "remark"},
+	{name: "models", routing: true},
+	{name: "model_mapping"},
+	{name: "weight", routing: true},
+	{name: "priority", routing: true},
+	{name: "test_model"},
+	{name: "auto_ban"},
+}
+
+// columnValue 返回该列的生效值（指针原样返回）；未填写时返回 nil 接口。
+// 注意各分支必须显式判空：nil 指针直接 return 会以带类型的 nil 装入接口，
+// 调用方的 v != nil 判断会失效。
+func (f *ChannelBatchEditFields) columnValue(name string) any {
+	switch name {
+	case "group":
+		if f.Group != nil {
+			return f.Group
+		}
+	case "tag":
+		if f.Tag != nil {
+			return f.Tag
+		}
+	case "remark":
+		if f.Remark != nil {
+			return f.Remark
+		}
+	case "models":
+		if f.Models != nil {
+			return f.Models
+		}
+	case "model_mapping":
+		if f.ModelMapping != nil {
+			return f.ModelMapping
+		}
+	case "weight":
+		if f.Weight != nil {
+			return f.Weight
+		}
+	case "priority":
+		if f.Priority != nil {
+			return f.Priority
+		}
+	case "test_model":
+		if f.TestModel != nil {
+			return f.TestModel
+		}
+	case "auto_ban":
+		if f.AutoBan != nil {
+			return f.AutoBan
+		}
+	}
+	return nil
+}
+
+// EffectiveColumns 按声明顺序返回已填写字段的列名，供审计 updated_fields 派生。
+func (f ChannelBatchEditFields) EffectiveColumns() []string {
+	columns := make([]string, 0, len(channelBatchEditColumns))
+	for _, col := range channelBatchEditColumns {
+		if f.columnValue(col.name) != nil {
+			columns = append(columns, col.name)
+		}
+	}
+	return columns
+}
+
+// ColumnValues 返回已填写列的列名→值（解引用后），与 applyTo 的 SET 白名单同源。
+func (f ChannelBatchEditFields) ColumnValues() map[string]any {
+	values := make(map[string]any, len(channelBatchEditColumns))
+	for _, col := range channelBatchEditColumns {
+		if v := f.columnValue(col.name); v != nil {
+			values[col.name] = derefBatchEditValue(col.name, v)
+		}
+	}
+	return values
+}
+
+// derefBatchEditValue 解引用列生效值，供 SET 子句与审计 values 使用。
+func derefBatchEditValue(name string, v any) any {
+	switch name {
+	case "group":
+		return *v.(*string)
+	case "tag":
+		return *v.(*string)
+	case "remark":
+		return *v.(*string)
+	case "models":
+		return *v.(*string)
+	case "model_mapping":
+		return *v.(*string)
+	case "weight":
+		return *v.(*uint)
+	case "priority":
+		return *v.(*int64)
+	case "test_model":
+		return *v.(*string)
+	case "auto_ban":
+		return *v.(*int)
+	default:
+		return nil
+	}
+}
+
+// AnySet 报告是否至少填写一个字段。
+func (f ChannelBatchEditFields) AnySet() bool {
+	for _, col := range channelBatchEditColumns {
+		if f.columnValue(col.name) != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // AffectsAbilities 报告生效字段是否涉及路由相关列（models/group/weight/priority/tag）。
 // tag 参与 abilities 行冗余，变更同样触发重建。
 func (f ChannelBatchEditFields) AffectsAbilities() bool {
-	return f.Group != nil || f.Tag != nil || f.Models != nil || f.Weight != nil || f.Priority != nil
+	for _, col := range channelBatchEditColumns {
+		if col.routing && f.columnValue(col.name) != nil {
+			return true
+		}
+	}
+	return false
 }
 
-// applyTo 返回列白名单 SET（列名→值，仅含非 nil 字段），并把生效值写回 channel 内存对象。
+// applyTo 返回列白名单 SET（列名→解引用值，仅含非 nil 字段），并把生效值写回 channel 内存对象。
 // 回写是必需的：UpdateAbilities 取自对象字段而非 DB 读，否则会用旧值重建索引。
 func (f ChannelBatchEditFields) applyTo(channel *Channel) map[string]any {
-	updates := make(map[string]any, 9)
-	if f.Group != nil {
-		updates["group"] = *f.Group
-		channel.Group = *f.Group
-	}
-	if f.Tag != nil {
-		updates["tag"] = *f.Tag
-		channel.Tag = f.Tag
-	}
-	if f.Remark != nil {
-		updates["remark"] = *f.Remark
-		channel.Remark = f.Remark
-	}
-	if f.Models != nil {
-		updates["models"] = *f.Models
-		channel.Models = *f.Models
-	}
-	if f.ModelMapping != nil {
-		updates["model_mapping"] = *f.ModelMapping
-		channel.ModelMapping = f.ModelMapping
-	}
-	if f.Weight != nil {
-		updates["weight"] = *f.Weight
-		channel.Weight = f.Weight
-	}
-	if f.Priority != nil {
-		updates["priority"] = *f.Priority
-		channel.Priority = f.Priority
-	}
-	if f.TestModel != nil {
-		updates["test_model"] = *f.TestModel
-		channel.TestModel = f.TestModel
-	}
-	if f.AutoBan != nil {
-		updates["auto_ban"] = *f.AutoBan
-		channel.AutoBan = f.AutoBan
+	updates := make(map[string]any, len(channelBatchEditColumns))
+	for _, col := range channelBatchEditColumns {
+		if v := f.columnValue(col.name); v != nil {
+			updates[col.name] = derefBatchEditValue(col.name, v)
+			channel.setBatchEditColumn(col.name, v)
+		}
 	}
 	return updates
+}
+
+// setBatchEditColumn 把派生自 columnValue 的生效值写回内存对象（applyTo 的回写半边）。
+func (channel *Channel) setBatchEditColumn(name string, v any) {
+	switch name {
+	case "group":
+		channel.Group = *v.(*string)
+	case "tag":
+		channel.Tag = v.(*string)
+	case "remark":
+		channel.Remark = v.(*string)
+	case "models":
+		channel.Models = *v.(*string)
+	case "model_mapping":
+		channel.ModelMapping = v.(*string)
+	case "weight":
+		channel.Weight = v.(*uint)
+	case "priority":
+		channel.Priority = v.(*int64)
+	case "test_model":
+		channel.TestModel = v.(*string)
+	case "auto_ban":
+		channel.AutoBan = v.(*int)
+	}
 }
 
 // ChannelBatchUpdateFailure 触发事务回滚的失败渠道。
@@ -1155,7 +1278,7 @@ type ChannelBatchUpdateFailure struct {
 	Reason string `json:"reason"`
 }
 
-// BatchUpdateChannels 在单个事务内逐渠道更新生效列并按需重建 abilities，全成全败。
+// BatchUpdateChannels 在单个事务内更新生效列并按需同步 abilities，全成全败。
 // 返回实际更新的渠道数、触发回滚的失败渠道（成功为 nil）、错误。
 func BatchUpdateChannels(ids []int, fields ChannelBatchEditFields) (int, *ChannelBatchUpdateFailure, error) {
 	if len(ids) == 0 {
@@ -1167,27 +1290,30 @@ func BatchUpdateChannels(ids []int, fields ChannelBatchEditFields) (int, *Channe
 		return 0, nil, tx.Error
 	}
 
-	// 事务内读目标渠道，ids 中已不存在的 id 自然跳过
+	// 事务内加锁读目标渠道：无锁快照会在 abilities 重建时覆盖并发提交的路由变更；
+	// ids 中已不存在的 id 自然跳过
 	var channels []*Channel
-	if err := tx.Where("id in (?)", ids).Find(&channels).Error; err != nil {
+	if err := lockForUpdate(tx).Where("id in (?)", ids).Find(&channels).Error; err != nil {
 		tx.Rollback()
 		return 0, nil, err
 	}
+	if len(channels) == 0 {
+		tx.Rollback()
+		return 0, nil, nil
+	}
 
-	rebuildAbilities := fields.AffectsAbilities()
-	for _, channel := range channels {
-		// 必须用 map 形式：weight/priority/auto_ban 的合法生效值含 0，struct 形式会被丢弃
-		if updates := fields.applyTo(channel); len(updates) > 0 {
-			if err := tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(updates).Error; err != nil {
-				tx.Rollback()
-				return 0, &ChannelBatchUpdateFailure{Id: channel.Id, Reason: err.Error()}, err
-			}
+	// SET 子句与具体渠道无关，单条 id IN UPDATE 即可（参考 BatchSetChannelTag）
+	if updates := fields.applyToChannels(channels); len(updates) > 0 {
+		if err := tx.Model(&Channel{}).Where("id in (?)", idsOfChannels(channels)).Updates(updates).Error; err != nil {
+			tx.Rollback()
+			return 0, &ChannelBatchUpdateFailure{Id: channels[0].Id, Reason: err.Error()}, err
 		}
-		if rebuildAbilities {
-			if err := channel.UpdateAbilities(tx); err != nil {
-				tx.Rollback()
-				return 0, &ChannelBatchUpdateFailure{Id: channel.Id, Reason: fmt.Sprintf("更新 abilities 失败: %v", err)}, err
-			}
+	}
+
+	if fields.AffectsAbilities() {
+		if syncErr := syncAbilitiesForBatchEdit(tx, channels, fields); syncErr != nil {
+			tx.Rollback()
+			return 0, &ChannelBatchUpdateFailure{Id: syncErr.id, Reason: fmt.Sprintf("更新 abilities 失败: %v", syncErr.err)}, syncErr.err
 		}
 	}
 
@@ -1195,6 +1321,70 @@ func BatchUpdateChannels(ids []int, fields ChannelBatchEditFields) (int, *Channe
 		return 0, nil, err
 	}
 	return len(channels), nil, nil
+}
+
+// applyToChannels 对一批渠道应用生效字段，返回列白名单 SET（列名→解引用值，仅含非 nil 字段）。
+func (f ChannelBatchEditFields) applyToChannels(channels []*Channel) map[string]any {
+	if len(channels) == 0 {
+		return nil
+	}
+	updates := make(map[string]any, len(channelBatchEditColumns))
+	for _, col := range channelBatchEditColumns {
+		if v := f.columnValue(col.name); v != nil {
+			updates[col.name] = derefBatchEditValue(col.name, v)
+			for _, channel := range channels {
+				channel.setBatchEditColumn(col.name, v)
+			}
+		}
+	}
+	return updates
+}
+
+func idsOfChannels(channels []*Channel) []int {
+	ids := make([]int, len(channels))
+	for i, channel := range channels {
+		ids[i] = channel.Id
+	}
+	return ids
+}
+
+// abilitiesSyncError 携带触发失败的渠道 id，供失败明细展示。
+type abilitiesSyncError struct {
+	id  int
+	err error
+}
+
+// syncAbilitiesForBatchEdit 同步批量编辑后的 abilities：
+//   - 仅改行内列（weight/priority/tag）时 (group,model) 行集不变，单条 UPDATE 完成；
+//   - models/group 变更改变行集，逐渠道删除重插（行集按渠道各异，无法合并）。
+func syncAbilitiesForBatchEdit(tx *gorm.DB, channels []*Channel, fields ChannelBatchEditFields) *abilitiesSyncError {
+	onlyInlineColumns := fields.Models == nil && fields.Group == nil
+	if onlyInlineColumns {
+		// 行内列更新：值对全批渠道一致（来自同一 fields），走 tag 之外按 channel_id 的单条 UPDATE
+		updates := map[string]any{}
+		if fields.Weight != nil {
+			updates["weight"] = *fields.Weight
+		}
+		if fields.Priority != nil {
+			updates["priority"] = *fields.Priority
+		}
+		if fields.Tag != nil {
+			updates["tag"] = *fields.Tag
+		}
+		if len(updates) > 0 {
+			if err := tx.Model(&Ability{}).Where("channel_id in (?)", idsOfChannels(channels)).Updates(updates).Error; err != nil {
+				return &abilitiesSyncError{id: channels[0].Id, err: err}
+			}
+		}
+		return nil
+	}
+
+	for _, channel := range channels {
+		if err := channel.UpdateAbilities(tx); err != nil {
+			return &abilitiesSyncError{id: channel.Id, err: err}
+		}
+	}
+	return nil
 }
 
 // CountAllChannels returns total channels in DB

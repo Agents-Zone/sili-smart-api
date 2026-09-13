@@ -603,6 +603,7 @@
     "Batch Operations": "Thao tác hàng loạt",
     "Batch processing failed": "Xử lý hàng loạt thất bại",
     "Batch set tag for {{count}} channels": "Đã đặt thẻ hàng loạt cho {{count}} kênh",
+    "Batch updated {{count}} channels (fields: {{updated_fields}})": "Đã cập nhật hàng loạt {{count}} kênh (các trường: {{updated_fields}})",
     "Batch test completed: {{count}} succeeded": "Kiểm thử hàng loạt hoàn tất: {{count}} thành công",
     "Batch test completed: {{success}} succeeded, {{failed}} failed": "Kiểm thử hàng loạt hoàn tất: {{success}} thành công, {{failed}} thất bại",
     "Batch test stopped: {{completed}}/{{total}} completed, {{success}} succeeded, {{failed}} failed": "Đã dừng kiểm thử hàng loạt: hoàn tất {{completed}}/{{total}}, {{success}} thành công, {{failed}} thất bại",

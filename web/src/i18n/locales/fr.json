@@ -603,6 +603,7 @@
     "Batch Operations": "Opérations par lots",
     "Batch processing failed": "Échec du traitement par lot",
     "Batch set tag for {{count}} channels": "Étiquette définie par lot pour {{count}} canaux",
+    "Batch updated {{count}} channels (fields: {{updated_fields}})": "{{count}} canaux mis à jour par lot (champs : {{updated_fields}})",
     "Batch test completed: {{count}} succeeded": "Test par lots terminé : {{count}} réussi(s)",
     "Batch test completed: {{success}} succeeded, {{failed}} failed": "Test par lots terminé : {{success}} réussi(s), {{failed}} échoué(s)",
     "Batch test stopped: {{completed}}/{{total}} completed, {{success}} succeeded, {{failed}} failed": "Test par lots arrêté : {{completed}}/{{total}} terminé(s), {{success}} réussi(s), {{failed}} échoué(s)",

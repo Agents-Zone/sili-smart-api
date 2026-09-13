@@ -17,7 +17,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import type { TFunction } from 'i18next'
 import { Loader2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -54,13 +53,16 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import { Textarea } from '@/components/ui/textarea'
+import { truncateText } from '@/lib/utils'
 
 import { getAllModels, getGroups } from '../../api'
 import {
   buildBatchEditPayload,
   handleBatchUpdate,
+  parseModelsString,
   type BatchUpdateOutcome,
   type ChannelBatchEditForm,
+  type BatchEditField,
 } from '../../lib'
 import type { BatchUpdateFailure, BatchUpdateParams } from '../../types'
 
@@ -73,54 +75,30 @@ type ChannelBatchEditDrawerProps = {
   submit?: (payload: BatchUpdateParams) => Promise<BatchUpdateOutcome>
 }
 
-/** Validated payload of the last save click plus its effective field labels (spec 4.3.2). */
+/** Validated payload of the last save click plus its effective fields (spec 4.3.2). */
 type BatchEditConfirmRequest = {
   payload: BatchUpdateParams
-  fieldLabels: string[]
+  fields: BatchEditField[]
 }
 
 /** Overlong confirmation summaries are cut here and suffixed with an ellipsis (spec 4.3.5). */
 const MAX_SUMMARY_LENGTH = 50
 
-/** Display label -> payload key, mirroring the label list built by buildBatchEditPayload. */
-const FIELD_PAYLOAD_KEYS: Record<string, keyof BatchUpdateParams> = {
-  Group: 'group',
-  Tag: 'tag',
-  Remark: 'remark',
-  Models: 'models',
-  'Model Mapping': 'model_mapping',
-  Weight: 'weight',
-  Priority: 'priority',
-  'Test Model': 'test_model',
-  'Auto Ban': 'auto_ban',
-}
-
 /** Summary of one effective field: the value written into the payload (auto_ban is tri-state). */
 function formatFieldSummary(
-  label: string,
+  field: BatchEditField,
   payload: BatchUpdateParams,
-  t: TFunction
+  t: (key: string) => string
 ): string {
-  const value = payload[FIELD_PAYLOAD_KEYS[label]]
+  const value = payload[field.key]
   if (value === undefined) return ''
-  if (label === 'Auto Ban') return t(value === 1 ? 'Enabled' : 'Disabled')
+  if (field.key === 'auto_ban') return t(value === 1 ? 'Enabled' : 'Disabled')
   return String(value)
 }
 
 /** Truncated summary; the untruncated value stays available through the element title. */
 const truncateSummary = (summary: string): string =>
-  summary.length > MAX_SUMMARY_LENGTH
-    ? `${summary.slice(0, MAX_SUMMARY_LENGTH)}…`
-    : summary
-
-/** Comma separated form value -> chip values. */
-const toChipValues = (value?: string) =>
-  value
-    ? value
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean)
-    : []
+  truncateText(summary, MAX_SUMMARY_LENGTH)
 
 export function ChannelBatchEditDrawer(props: ChannelBatchEditDrawerProps) {
   const { t } = useTranslation()
@@ -178,10 +156,12 @@ export function ChannelBatchEditDrawer(props: ChannelBatchEditDrawerProps) {
     setForm((current) => ({ ...current, ...patch }))
   }
 
-  const confirmFields = (pending?.fieldLabels ?? []).map((label) => ({
-    label,
-    summary: pending ? formatFieldSummary(label, pending.payload, t) : '',
-  }))
+  const confirmFields = pending
+    ? pending.fields.map((field) => ({
+        label: field.label,
+        summary: formatFieldSummary(field, pending.payload, t),
+      }))
+    : []
 
   const defaultSubmit = (payload: BatchUpdateParams) =>
     handleBatchUpdate(payload, queryClient, props.onCommitted)
@@ -200,7 +180,7 @@ export function ChannelBatchEditDrawer(props: ChannelBatchEditDrawerProps) {
     if (!result.payload) return
 
     setFailed([])
-    setPending({ payload: result.payload, fieldLabels: result.fieldLabels })
+    setPending({ payload: result.payload, fields: result.fields })
     setConfirmOpen(true)
   }
 
@@ -212,9 +192,13 @@ export function ChannelBatchEditDrawer(props: ChannelBatchEditDrawerProps) {
     setIsSubmitting(true)
     setFailed([])
 
-    const outcome = await submit(pending.payload)
+    let outcome: BatchUpdateOutcome
+    try {
+      outcome = await submit(pending.payload)
+    } finally {
+      setIsSubmitting(false)
+    }
 
-    setIsSubmitting(false)
     if (outcome.ok) {
       // Success closes the drawer; the upstream selection is cleared via onCommitted.
       props.onOpenChange(false)
@@ -253,7 +237,7 @@ export function ChannelBatchEditDrawer(props: ChannelBatchEditDrawerProps) {
                 <MultiSelect
                   id='batch-edit-group'
                   options={groupOptions}
-                  selected={toChipValues(form.group)}
+                  selected={parseModelsString(form.group ?? '')}
                   onChange={(values) => updateForm({ group: values.join(',') })}
                   placeholder={t('Select groups (leave empty to keep current)')}
                 />
@@ -290,7 +274,7 @@ export function ChannelBatchEditDrawer(props: ChannelBatchEditDrawerProps) {
                 <MultiSelect
                   id='batch-edit-models'
                   options={modelOptions}
-                  selected={toChipValues(form.models)}
+                  selected={parseModelsString(form.models ?? '')}
                   onChange={(values) => updateForm({ models: values.join(',') })}
                   placeholder={t('Select models or add custom ones')}
                   allowCreate
