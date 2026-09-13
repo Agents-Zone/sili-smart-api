@@ -172,11 +172,12 @@ channel.batch_edit.mapping_empty: "Model mapping cannot be empty (clear it in si
 channel.batch_edit.mapping_invalid: "Model mapping must be a valid JSON object"
 channel.batch_edit.mapping_values_not_string: "Model mapping values must be strings"
 channel.batch_edit.weight_range: "Weight must be between 0 and 4294967295"
-channel.batch_edit.priority_range: "Priority must be between -9007199254740991 and 9007199254740991"
 channel.batch_edit.test_model_too_long: "Test model must not exceed 255 characters"
 channel.batch_edit.auto_ban_invalid: "Invalid auto ban value"
 channel.batch_edit.no_fields: "Batch edit requires at least one field"
 channel.batch_edit.failed: "Batch edit failed, all changes were rolled back"
+channel.batch_edit.update_failed: "Failed to update the channel record"
+channel.batch_edit.abilities_failed: "Failed to rebuild abilities"
 
 # Model messages
 model.name_empty: "Model name cannot be empty"

@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { z } from 'zod'
+
 import type { BatchUpdateParams } from '../types'
 import { validateModelMappingJson } from './model-mapping-validation'
 
@@ -37,39 +39,15 @@ const MAX_TAG_LENGTH = 191
 /** Remark / test model / single model name length limit. */
 const MAX_TEXT_LENGTH = 255
 
-/** Form model of the batch edit drawer: every field is optional, auto_ban is tri-state. */
-export interface ChannelBatchEditForm {
-  group?: string
-  tag?: string
-  remark?: string
-  models?: string
-  model_mapping?: string
-  weight?: string
-  priority?: string
-  test_model?: string
-  auto_ban?: 'unchanged' | 'enabled' | 'disabled'
-}
+/** Tri-state auto ban: 'unchanged' keeps each channel value (spec 4.2.2 section C). */
+export type BatchEditAutoBan = 'unchanged' | 'enabled' | 'disabled'
 
-/** An effective field of a built payload: payload key plus display label. */
-export interface BatchEditField {
-  key: keyof BatchUpdateParams
-  label: string
-}
-
-export interface BatchEditBuildResult {
-  /** Submittable payload when validation passes, otherwise null */
-  payload: BatchUpdateParams | null
-  /** Effective fields (payload key + English label) for the confirm dialog */
-  fields: BatchEditField[]
-  /** Validation failure reason (i18n key), null on success */
-  error: string | null
-}
-
-const emptyResult = (error: string): BatchEditBuildResult => ({
-  payload: null,
-  fields: [],
-  error,
-})
+/**
+ * Count Unicode code points, matching the backend's utf8.RuneCountInString.
+ * String.prototype.length counts UTF-16 code units, which counts astral
+ * characters twice and would reject values the backend accepts.
+ */
+export const codePointLength = (value: string): number => [...value].length
 
 /** Trims each comma-separated segment, mirroring the backend normalization. */
 const normalizeCommaList = (value: string): string =>
@@ -78,139 +56,229 @@ const normalizeCommaList = (value: string): string =>
     .map((segment) => segment.trim())
     .join(',')
 
-/**
- * Validates the form and builds the batch edit payload:
- * ids boundary -> per-field validation -> effective field count.
- * Fields left blank (undefined or empty after trim) stay out of the payload.
- */
-export function buildBatchEditPayload(
-  ids: number[],
-  form: ChannelBatchEditForm
-): BatchEditBuildResult {
-  if (ids.length === 0) {
-    return emptyResult('No channels selected')
-  }
+const commaListSegments = (value: string): string[] =>
+  value.split(',').map((segment) => segment.trim())
 
-  if (ids.length > MAX_BATCH_EDIT_CHANNELS) {
-    return emptyResult(
-      `The number of selected channels exceeds the limit of ${MAX_BATCH_EDIT_CHANNELS}. Please split the operation.`
-    )
-  }
+/** Trimmed value, blank means the field is skipped (spec 4.2.4 rule 1). */
+const filled = (value: string | undefined): string => value?.trim() ?? ''
 
-  const group = form.group?.trim() ?? ''
-  const tag = form.tag?.trim() ?? ''
-  const remark = form.remark?.trim() ?? ''
-  const models = form.models?.trim() ?? ''
-  const testModel = form.test_model?.trim() ?? ''
-  const rawWeight = form.weight?.trim() ?? ''
-  const rawPriority = form.priority?.trim() ?? ''
+const optionalText = (maxLength: number, tooLong: string) =>
+  z
+    .string()
+    .optional()
+    .refine((value) => codePointLength(filled(value)) <= maxLength, tooLong)
 
-  if (group) {
-    if (group.length > MAX_GROUP_LENGTH) {
-      return emptyResult('Group must be less than 64 characters')
-    }
-    if (group.split(',').some((segment) => segment.trim() === '')) {
-      return emptyResult('Group format error')
-    }
-  }
+const optionalInteger = (min: number, max: number, outOfRange: string) =>
+  z.string().optional().refine((value) => {
+    const raw = filled(value)
+    if (!raw) return true
+    const parsed = Number(raw)
+    return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max
+  }, outOfRange)
 
-  if (tag.length > MAX_TAG_LENGTH) {
-    return emptyResult('Tag must be less than 191 characters')
-  }
-
-  if (remark.length > MAX_TEXT_LENGTH) {
-    return emptyResult('Remark must be less than 255 characters')
-  }
-
-  if (testModel.length > MAX_TEXT_LENGTH) {
-    return emptyResult('Test model must be less than 255 characters')
-  }
-
-  if (models) {
-    const modelNames = models.split(',').map((segment) => segment.trim())
-    if (modelNames.some((name) => name === '')) {
-      return emptyResult('Model list format error')
-    }
-    if (modelNames.some((name) => name.length > MAX_TEXT_LENGTH)) {
-      return emptyResult('Model name must be less than 255 characters')
-    }
-  }
-
+/** Validate the mapping field for batch semantics; returns the i18n issue key or null. */
+const modelMappingIssue = (value: string | undefined): string | null => {
+  if (value === undefined) return null
+  const trimmed = value.trim()
   // An explicitly emptied mapping field cannot mean "replace with empty": clearing
   // the mapping is only supported by the single channel editor.
-  const modelMapping = form.model_mapping?.trim()
-  if (modelMapping === '') {
-    return emptyResult(
-      'Model mapping cannot be empty here. Clear it in single-channel edit instead.'
+  if (!trimmed) {
+    return 'Model mapping cannot be empty here. Clear it in single-channel edit instead.'
+  }
+  // Reuse the single-channel validation: values must be strings, matching the
+  // backend's map[string]string unmarshal on the relay path.
+  const { valid, error } = validateModelMappingJson(trimmed)
+  if (valid) return null
+  return error ?? 'Model mapping must be a valid JSON object'
+}
+
+/**
+ * Drawer form schema: every field is optional, blank means skip (spec 4.2.4 rule 1).
+ * Issue messages are i18n keys, rendered through t() by FormMessage.
+ * The selected ids are validated separately by validateBatchEditTargets: they are not
+ * form state, so a selection change never resets what the user has typed.
+ */
+export const channelBatchEditSchema = z.object({
+  group: z
+    .string()
+    .optional()
+    .refine(
+      (value) => codePointLength(filled(value)) <= MAX_GROUP_LENGTH,
+      'Group must be less than 64 characters'
     )
-  }
-  if (modelMapping) {
-    // Reuse the single-channel validation: values must be strings, matching the
-    // backend's map[string]string unmarshal on the relay path.
-    const { valid } = validateModelMappingJson(modelMapping)
-    if (!valid) {
-      return emptyResult('Model mapping must be a valid JSON object')
-    }
-  }
+    .refine(
+      (value) =>
+        !filled(value) ||
+        !commaListSegments(filled(value)).some((segment) => segment === ''),
+      'Group format error'
+    ),
+  tag: optionalText(MAX_TAG_LENGTH, 'Tag must be less than 191 characters'),
+  remark: optionalText(
+    MAX_TEXT_LENGTH,
+    'Remark must be less than 255 characters'
+  ),
+  models: z
+    .string()
+    .optional()
+    .refine(
+      (value) =>
+        !filled(value) ||
+        !commaListSegments(filled(value)).some((segment) => segment === ''),
+      'Model list format error'
+    )
+    .refine(
+      (value) =>
+        commaListSegments(filled(value)).every(
+          (name) => codePointLength(name) <= MAX_TEXT_LENGTH
+        ),
+      'Model name must be less than 255 characters'
+    ),
+  model_mapping: z
+    .string()
+    .optional()
+    .refine((value) => modelMappingIssue(value) === null, {
+      error: (issue) =>
+        modelMappingIssue(issue.input as string | undefined) ?? '',
+    }),
+  weight: optionalInteger(
+    0,
+    MAX_WEIGHT,
+    'Weight must be between 0 and 4294967295'
+  ),
+  priority: optionalInteger(
+    -MAX_SAFE_PRIORITY,
+    MAX_SAFE_PRIORITY,
+    'Priority is out of range'
+  ),
+  test_model: optionalText(
+    MAX_TEXT_LENGTH,
+    'Test model must be less than 255 characters'
+  ),
+  auto_ban: z.enum(['unchanged', 'enabled', 'disabled']).optional(),
+})
 
-  let weight: number | undefined
-  if (rawWeight) {
-    const parsed = Number(rawWeight)
-    if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > MAX_WEIGHT) {
-      return emptyResult('Weight must be between 0 and 4294967295')
-    }
-    weight = parsed
-  }
+export type ChannelBatchEditFormValues = z.infer<typeof channelBatchEditSchema>
 
-  let priority: number | undefined
-  if (rawPriority) {
-    const parsed = Number(rawPriority)
-    if (
-      !Number.isSafeInteger(parsed) ||
-      Math.abs(parsed) > MAX_SAFE_PRIORITY
-    ) {
-      return emptyResult('Priority is out of range')
-    }
-    priority = parsed
-  }
+/** An effective field of a built payload: payload key plus display label. */
+export interface BatchEditField {
+  key: keyof BatchUpdateParams
+  label: string
+}
 
-  let autoBan: number | undefined
-  if (form.auto_ban === 'enabled') {
-    autoBan = 1
-  } else if (form.auto_ban === 'disabled') {
-    autoBan = 0
-  }
+/** One editable column: payload key, display label and form value reader. */
+interface BatchEditFieldDescriptor {
+  key: keyof BatchUpdateParams
+  label: string
+  /** Effective payload value, undefined when the field is blank (skipped). */
+  read: (values: ChannelBatchEditFormValues) => string | number | undefined
+}
 
+/**
+ * Single source of the effective field list: the confirmation dialog, the payload
+ * and the field summaries all derive from it, so they cannot drift apart.
+ */
+const BATCH_EDIT_FIELDS: BatchEditFieldDescriptor[] = [
+  {
+    key: 'group',
+    label: 'Group',
+    read: (values) => {
+      const group = filled(values.group)
+      return group ? normalizeCommaList(group) : undefined
+    },
+  },
+  {
+    key: 'tag',
+    label: 'Tag',
+    read: (values) => filled(values.tag) || undefined,
+  },
+  {
+    key: 'remark',
+    label: 'Remark',
+    read: (values) => filled(values.remark) || undefined,
+  },
+  {
+    key: 'models',
+    label: 'Models',
+    read: (values) => {
+      const models = filled(values.models)
+      return models ? normalizeCommaList(models) : undefined
+    },
+  },
+  {
+    key: 'model_mapping',
+    label: 'Model Mapping',
+    read: (values) => filled(values.model_mapping) || undefined,
+  },
+  {
+    key: 'weight',
+    label: 'Weight',
+    read: (values) => {
+      const raw = filled(values.weight)
+      return raw ? Number(raw) : undefined
+    },
+  },
+  {
+    key: 'priority',
+    label: 'Priority',
+    read: (values) => {
+      const raw = filled(values.priority)
+      return raw ? Number(raw) : undefined
+    },
+  },
+  {
+    key: 'test_model',
+    label: 'Test Model',
+    read: (values) => filled(values.test_model) || undefined,
+  },
+  {
+    key: 'auto_ban',
+    label: 'Auto Ban',
+    read: (values) => {
+      if (values.auto_ban === 'enabled') return 1
+      if (values.auto_ban === 'disabled') return 0
+      return undefined
+    },
+  },
+]
+
+/**
+ * Validate the selection boundary (spec 4.2.2 / 4.2.4 rule 3): returns the i18n
+ * issue key when the selection cannot be submitted, otherwise null.
+ */
+export function validateBatchEditTargets(ids: number[]): string | null {
+  if (ids.length === 0) return 'No channels selected'
+  if (ids.length > MAX_BATCH_EDIT_CHANNELS) {
+    return `The number of selected channels exceeds the limit of ${MAX_BATCH_EDIT_CHANNELS}. Please split the operation.`
+  }
+  return null
+}
+
+export interface BatchEditSubmission {
+  /** Submittable payload, null when no field is effective */
+  payload: BatchUpdateParams | null
+  /** Effective fields (payload key + English label) for the confirm dialog */
+  fields: BatchEditField[]
+}
+
+/** Build the batch edit payload from validated form values (spec 4.2.4 rules 1/6). */
+export function buildBatchEditSubmission(
+  ids: number[],
+  values: ChannelBatchEditFormValues
+): BatchEditSubmission {
   const payload: BatchUpdateParams = { ids }
   const fields: BatchEditField[] = []
 
-  // Single source of effective fields: each entry appends both the payload value
-  // and its {key, label} pair, so the confirm dialog needs no reverse lookup.
-  const appendField = (
-    key: keyof BatchUpdateParams,
-    label: string,
-    value: string | number
-  ) => {
-    ;(payload as unknown as Record<string, string | number | number[]>)[key] =
-      value
-    fields.push({ key, label })
+  for (const descriptor of BATCH_EDIT_FIELDS) {
+    const value = descriptor.read(values)
+    if (value === undefined) continue
+    ;(
+      payload as unknown as Record<string, string | number | number[]>
+    )[descriptor.key] = value
+    fields.push({ key: descriptor.key, label: descriptor.label })
   }
-
-  if (group) appendField('group', 'Group', normalizeCommaList(group))
-  if (tag) appendField('tag', 'Tag', tag)
-  if (remark) appendField('remark', 'Remark', remark)
-  if (models) appendField('models', 'Models', normalizeCommaList(models))
-  if (modelMapping) {
-    appendField('model_mapping', 'Model Mapping', modelMapping)
-  }
-  if (weight !== undefined) appendField('weight', 'Weight', weight)
-  if (priority !== undefined) appendField('priority', 'Priority', priority)
-  if (testModel) appendField('test_model', 'Test Model', testModel)
-  if (autoBan !== undefined) appendField('auto_ban', 'Auto Ban', autoBan)
 
   if (fields.length === 0) {
-    return emptyResult('You must fill in at least one field')
+    return { payload: null, fields: [] }
   }
-
-  return { payload, fields, error: null }
+  return { payload, fields }
 }

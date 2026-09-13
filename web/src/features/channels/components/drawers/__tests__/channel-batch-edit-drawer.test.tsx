@@ -135,9 +135,19 @@ function findButton(container: ParentNode, text: string): HTMLButtonElement {
   return button
 }
 
-function inputById(id: string): HTMLInputElement {
+/**
+ * Resolve a form control through its label: the RHF FormControl owns the generated
+ * id, so tests look the input up by the label text the user actually sees.
+ */
+function inputByLabel(label: string): HTMLInputElement {
+  const labelElement = [
+    ...document.querySelectorAll<HTMLLabelElement>('label'),
+  ].find((candidate) => candidate.textContent?.trim() === label)
+  assert.ok(labelElement, `Expected a label "${label}"`)
+  const id = labelElement.getAttribute('for')
+  assert.ok(id, `Label "${label}" is not associated with a control`)
   const input = document.querySelector<HTMLInputElement>(`#${id}`)
-  assert.ok(input, `Expected an input with id "${id}"`)
+  assert.ok(input, `Expected an input labelled "${label}"`)
   return input
 }
 
@@ -216,7 +226,7 @@ describe('ChannelBatchEditDrawer', () => {
     installApiFixtures()
     await renderDrawer({ selectedIds: [1, 2, 3] })
 
-    await changeInput(inputById('batch-edit-weight'), '10')
+    await changeInput(inputByLabel('Weight'), '10')
     await click(findButton(sheetContent() ?? document, 'Save'))
 
     await waitFor(
@@ -232,21 +242,26 @@ describe('ChannelBatchEditDrawer', () => {
 
     assert.equal(dialogContent(), null)
     assert.ok(sheetContent())
-    assert.equal(inputById('batch-edit-weight').value, '10')
+    assert.equal(inputByLabel('Weight').value, '10')
   })
 
-  test('renders failure details and keeps the form for a retry', async () => {
+  test('renders failure details, the rollback message and keeps the form for a retry', async () => {
     installApiFixtures()
     const submitted: BatchUpdateParams[] = []
     await renderDrawer({
       selectedIds: [1, 2, 3],
       submit: async (payload) => {
         submitted.push(payload)
-        return { ok: false, count: 0, failed: [{ id: 2, reason: 'boom' }] }
+        return {
+          ok: false,
+          count: 0,
+          failed: [{ id: 2, reason: 'Failed to rebuild abilities' }],
+          message: 'Batch edit failed, all changes were rolled back',
+        }
       },
     })
 
-    await changeInput(inputById('batch-edit-weight'), '10')
+    await changeInput(inputByLabel('Weight'), '10')
     await click(findButton(sheetContent() ?? document, 'Save'))
     await waitFor(
       () => dialogContent() !== null,
@@ -257,7 +272,9 @@ describe('ChannelBatchEditDrawer', () => {
     await click(findButton(dialog, 'Confirm'))
 
     await waitFor(
-      () => document.body.textContent?.includes('boom') === true,
+      () =>
+        document.body.textContent?.includes('Failed to rebuild abilities') ===
+        true,
       'failure details were not rendered'
     )
 
@@ -265,10 +282,33 @@ describe('ChannelBatchEditDrawer', () => {
     const sheet = sheetContent()
     assert.ok(sheet)
     assert.equal(sheet.textContent?.includes('Channel #2'), true)
+    // 服务端本地化的回滚说明必须可见：用户需要知道没有任何渠道被修改
+    assert.equal(
+      sheet.textContent?.includes(
+        'Batch edit failed, all changes were rolled back'
+      ),
+      true
+    )
     const saveButton = findButton(sheet, 'Save')
     assert.equal(saveButton.disabled, false)
     assert.equal(saveButton.querySelector('.animate-spin'), null)
-    assert.equal(inputById('batch-edit-weight').value, '10')
+    assert.equal(inputByLabel('Weight').value, '10')
+  })
+
+  test('keeps the dialog closed and reports the issue under the field', async () => {
+    installApiFixtures()
+    await renderDrawer({ selectedIds: [1] })
+
+    await changeInput(inputByLabel('Remark'), 'r'.repeat(256))
+    await click(findButton(sheetContent() ?? document, 'Save'))
+
+    assert.equal(dialogContent(), null)
+    const sheet = sheetContent()
+    assert.ok(sheet)
+    assert.equal(
+      sheet.textContent?.includes('Remark must be less than 255 characters'),
+      true
+    )
   })
 
   test('opens the confirmation dialog only after a field is filled', async () => {
@@ -278,7 +318,7 @@ describe('ChannelBatchEditDrawer', () => {
     await click(findButton(sheetContent() ?? document, 'Save'))
     assert.equal(dialogContent(), null)
 
-    await changeInput(inputById('batch-edit-remark'), 'batch')
+    await changeInput(inputByLabel('Remark'), 'batch')
     await click(findButton(sheetContent() ?? document, 'Save'))
 
     await waitFor(
@@ -293,7 +333,7 @@ describe('ChannelBatchEditDrawer', () => {
     await renderDrawer({ selectedIds: [4] })
 
     const longRemark = 'r'.repeat(60)
-    await changeInput(inputById('batch-edit-remark'), longRemark)
+    await changeInput(inputByLabel('Remark'), longRemark)
     await click(findButton(sheetContent() ?? document, 'Save'))
     await waitFor(
       () => dialogContent() !== null,
@@ -320,7 +360,7 @@ describe('ChannelBatchEditDrawer', () => {
       },
     })
 
-    await changeInput(inputById('batch-edit-remark'), 'batch')
+    await changeInput(inputByLabel('Remark'), 'batch')
     await click(findButton(sheetContent() ?? document, 'Save'))
     await waitFor(
       () => dialogContent() !== null,

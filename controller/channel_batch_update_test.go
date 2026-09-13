@@ -2,8 +2,10 @@ package controller
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -159,16 +161,6 @@ func TestBuildBatchUpdateFieldsRejectsInvalidInput(t *testing.T) {
 			wantErr: i18n.MsgChannelBatchWeightRange,
 		},
 		{
-			name:    "priority 超过 JS 安全整数上限",
-			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Priority: ptr(int64(9007199254740992))},
-			wantErr: i18n.MsgChannelBatchPriorityRange,
-		},
-		{
-			name:    "priority 低于 JS 安全整数下限",
-			req:     ChannelBatchUpdateRequest{Ids: []int{1}, Priority: ptr(int64(-9007199254740992))},
-			wantErr: i18n.MsgChannelBatchPriorityRange,
-		},
-		{
 			name:    "auto_ban 取值非 0/1",
 			req:     ChannelBatchUpdateRequest{Ids: []int{1}, AutoBan: ptr(2)},
 			wantErr: i18n.MsgChannelBatchAutoBanInvalid,
@@ -243,7 +235,7 @@ func TestBuildBatchUpdateFieldsAcceptsValidInput(t *testing.T) {
 		assert.Equal(t, "gpt-4o,claude", *fields.Models)
 	})
 
-	t.Run("边界值被接受", func(t *testing.T) {
+	t.Run("边界值被接受且九个字段全量搬运", func(t *testing.T) {
 		req := ChannelBatchUpdateRequest{
 			Ids:          []int{1},
 			Group:        ptr(strings.Repeat("a", 64)),
@@ -253,6 +245,8 @@ func TestBuildBatchUpdateFieldsAcceptsValidInput(t *testing.T) {
 			Models:       ptr("gpt-4o, claude-3-5-sonnet"),
 			ModelMapping: ptr(`{"gpt-4o":"gpt-4o-mini"}`),
 			Weight:       ptr(4294967295),
+			Priority:     ptr(int64(-1)),
+			AutoBan:      ptr(1),
 		}
 		fields, err := req.buildBatchUpdateFields()
 		require.NoError(t, err)
@@ -272,6 +266,14 @@ func TestBuildBatchUpdateFieldsAcceptsValidInput(t *testing.T) {
 		assert.Equal(t, `{"gpt-4o":"gpt-4o-mini"}`, *fields.ModelMapping)
 		require.NotNil(t, fields.Weight)
 		assert.Equal(t, uint(4294967295), *fields.Weight)
+		require.NotNil(t, fields.Priority)
+		assert.Equal(t, int64(-1), *fields.Priority)
+		require.NotNil(t, fields.AutoBan)
+		assert.Equal(t, 1, *fields.AutoBan)
+		// 九列全部进入生效集合，缺一列都会让审计 updated_fields 少一项
+		assert.Equal(t,
+			[]string{"group", "tag", "remark", "models", "model_mapping", "weight", "priority", "test_model", "auto_ban"},
+			fields.EffectiveColumns())
 	})
 
 	t.Run("多字节字符按码点计数：上限内汉字放行", func(t *testing.T) {
@@ -299,19 +301,15 @@ func TestBuildBatchUpdateFieldsAcceptsValidInput(t *testing.T) {
 		assert.Equal(t, 255, utf8.RuneCountInString(*fields.Models))
 	})
 
-	t.Run("priority 在 JS 安全整数域内保留精度", func(t *testing.T) {
-		const exact = int64(9007199254740991) // 2^53 - 1，前端 Number.isSafeInteger 上限
-		req := ChannelBatchUpdateRequest{Ids: []int{1}, Priority: ptr(exact)}
-		fields, err := req.buildBatchUpdateFields()
-		require.NoError(t, err)
-		require.NotNil(t, fields.Priority)
-		assert.Equal(t, exact, *fields.Priority)
-
-		req = ChannelBatchUpdateRequest{Ids: []int{1}, Priority: ptr(-exact)}
-		fields, err = req.buildBatchUpdateFields()
-		require.NoError(t, err)
-		require.NotNil(t, fields.Priority)
-		assert.Equal(t, -exact, *fields.Priority)
+	t.Run("priority 按 int64 全域精确保留", func(t *testing.T) {
+		// 03 文档 2.2.5 声明 int64 全域：单渠道编辑同样无上限，两条入口同口径
+		for _, exact := range []int64{9007199254740993, math.MaxInt64, math.MinInt64} {
+			req := ChannelBatchUpdateRequest{Ids: []int{1}, Priority: ptr(exact)}
+			fields, err := req.buildBatchUpdateFields()
+			require.NoError(t, err)
+			require.NotNil(t, fields.Priority)
+			assert.Equal(t, exact, *fields.Priority)
+		}
 	})
 
 	t.Run("ids 恰好 200 条被接受", func(t *testing.T) {
@@ -330,10 +328,11 @@ func TestChannelBatchUpdateRequestParsesIntegersExactly(t *testing.T) {
 		var req ChannelBatchUpdateRequest
 		require.NoError(t, common.UnmarshalJsonStr(`{"ids":[1],"priority":9007199254740993}`, &req))
 		require.NotNil(t, req.Priority)
-		// 解析层保留 int64 全精度；值域校验由 buildBatchUpdateFields 拒绝
-		_, err := req.buildBatchUpdateFields()
-		require.Error(t, err)
-		assert.Equal(t, i18n.MsgChannelBatchPriorityRange, err.Error())
+		fields, err := req.buildBatchUpdateFields()
+		require.NoError(t, err)
+		require.NotNil(t, fields.Priority)
+		// 解析层保留 int64 全精度：值经 float64 中转会变成 9007199254740992
+		assert.Equal(t, int64(9007199254740993), *fields.Priority)
 	})
 
 	t.Run("非整数输入被解析阶段拒绝", func(t *testing.T) {
@@ -392,9 +391,31 @@ type batchUpdateResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 	Data    struct {
-		Count  int                               `json:"count"`
-		Failed []model.ChannelBatchUpdateFailure `json:"failed"`
+		Count  int                                `json:"count"`
+		Failed []channelBatchUpdateFailurePayload `json:"failed"`
 	} `json:"data"`
+}
+
+// TestChannelBatchUpdateRequestMirrorsDomainFields 请求 DTO 与领域字段必须逐字段对应：
+// 两份结构体各自声明时，新增字段只改一侧会让该字段被静默丢弃（空即跳过语义下无法
+// 从行为上察觉）。字段名与类型由反射逐一对齐，请求侧只多一个 ids。
+func TestChannelBatchUpdateRequestMirrorsDomainFields(t *testing.T) {
+	// weight 是唯一允许的类型差异：请求侧用 *int 才能对负数回「权重必须在 0-4294967295
+	// 之间」（03 文档 2.2.5），领域侧用 *uint 对齐 channels.weight 列
+	allowedTypeDivergence := map[string]bool{"Weight": true}
+
+	reqType := reflect.TypeOf(ChannelBatchUpdateRequest{})
+	domainType := reflect.TypeOf(model.ChannelBatchEditFields{})
+	for i := 0; i < domainType.NumField(); i++ {
+		domainField := domainType.Field(i)
+		reqField, ok := reqType.FieldByName(domainField.Name)
+		require.True(t, ok, "请求 DTO 缺少领域字段 %s", domainField.Name)
+		if allowedTypeDivergence[domainField.Name] {
+			continue
+		}
+		assert.Equal(t, domainField.Type, reqField.Type, "字段 %s 的类型与领域字段不一致", domainField.Name)
+	}
+	assert.Equal(t, domainType.NumField()+1, reqType.NumField(), "请求 DTO 只应比领域字段多一个 ids")
 }
 
 func TestBatchUpdateChannelsHandlerRejectsEmptyFields(t *testing.T) {
@@ -522,7 +543,10 @@ func TestBatchUpdateChannelsHandlerReportsFailureAndRollsBack(t *testing.T) {
 	assert.False(t, response.Success)
 	assert.Equal(t, "Batch edit failed, all changes were rolled back", response.Message)
 	require.Len(t, response.Data.Failed, 1)
-	assert.Contains(t, response.Data.Failed[0].Reason, "abilities")
+	// 失败明细精确指向触发回滚的渠道（按 id 顺序串行执行，首个渠道即失败方），
+	// 且文案为 i18n 结果而非驱动层原始错误
+	assert.Equal(t, first.Id, response.Data.Failed[0].Id)
+	assert.Equal(t, "Failed to rebuild abilities", response.Data.Failed[0].Reason)
 
 	for _, id := range []int{first.Id, second.Id} {
 		var stored model.Channel

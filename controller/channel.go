@@ -494,9 +494,10 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 			return fmt.Errorf("channel cannot be empty")
 		}
 
-		// 检查模型名称长度是否超过 255
+		// 检查模型名称长度是否超过 255（按码点，与 abilities.model varchar(255) 及
+		// 批量编辑口径一致）
 		for _, m := range channel.GetModels() {
-			if len(m) > 255 {
+			if utf8.RuneCountInString(m) > 255 {
 				return fmt.Errorf("模型名称过长: %s", m)
 			}
 		}
@@ -964,14 +965,22 @@ func optionalTrimmedString(v *string, maxLen int, tooLong string) (*string, erro
 	return common.GetPointer(trimmed), nil
 }
 
-// normalizeCommaList 把逗号分隔列表归一化为「段级 trim、逗号紧邻」形态，
-// 与 UpdateAbilities 的裸 split 语义对齐，避免带空格的段写进 abilities 行。
-func normalizeCommaList(v string) string {
-	segments := strings.Split(v, ",")
+// optionalCommaList 归一化可选逗号列表：nil 或 trim 后为空均视为未填写（返回 nil），
+// 段级 trim 后逗号紧邻，避免带空格的段经 UpdateAbilities 的裸 split 写进 abilities 行。
+// 返回的段列表供调用方逐段校验（段非空、单段长度）。
+func optionalCommaList(v *string) (segments []string, normalized *string) {
+	if v == nil {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(*v)
+	if trimmed == "" {
+		return nil, nil
+	}
+	segments = strings.Split(trimmed, ",")
 	for i, segment := range segments {
 		segments[i] = strings.TrimSpace(segment)
 	}
-	return strings.Join(segments, ",")
+	return segments, common.GetPointer(strings.Join(segments, ","))
 }
 
 // validateBatchModelMapping 校验 model_mapping：须为 JSON 对象且值全为字符串。
@@ -1008,47 +1017,42 @@ func (r *ChannelBatchUpdateRequest) buildBatchUpdateFields() (model.ChannelBatch
 		}
 	}
 
-	group, err := optionalTrimmedString(r.Group, MaxBatchEditGroupLength, i18n.MsgChannelBatchGroupTooLong)
-	if err != nil {
-		return fields, err
-	}
+	groupSegments, group := optionalCommaList(r.Group)
 	if group != nil {
-		for _, segment := range strings.Split(*group, ",") {
-			if strings.TrimSpace(segment) == "" {
+		if utf8.RuneCountInString(*group) > MaxBatchEditGroupLength {
+			return fields, errors.New(i18n.MsgChannelBatchGroupTooLong)
+		}
+		// 段归一化后逐段校验，杜绝带空格或空段的分组进入 abilities
+		for _, segment := range groupSegments {
+			if segment == "" {
 				return fields, errors.New(i18n.MsgChannelBatchGroupInvalid)
 			}
 		}
-		// 段归一化，杜绝带空格分组进入 abilities
-		fields.Group = common.GetPointer(normalizeCommaList(*group))
 	}
+	fields.Group = group
 
-	fields.Tag, err = optionalTrimmedString(r.Tag, MaxBatchEditTagLength, i18n.MsgChannelBatchTagTooLong)
+	tag, err := optionalTrimmedString(r.Tag, MaxBatchEditTagLength, i18n.MsgChannelBatchTagTooLong)
 	if err != nil {
 		return fields, err
 	}
+	fields.Tag = tag
 
 	fields.Remark, err = optionalTrimmedString(r.Remark, MaxBatchEditTextLength, i18n.MsgChannelBatchRemarkTooLong)
 	if err != nil {
 		return fields, err
 	}
 
-	if r.Models != nil {
-		models := strings.TrimSpace(*r.Models)
-		if models != "" {
-			for _, segment := range strings.Split(models, ",") {
-				name := strings.TrimSpace(segment)
-				if name == "" {
-					return fields, errors.New(i18n.MsgChannelBatchModelsInvalid)
-				}
-				// 按码点计数，与其余文本字段一致（03 文档 4.2.4）
-				if utf8.RuneCountInString(name) > MaxBatchEditTextLength {
-					return fields, &i18nParamError{key: i18n.MsgChannelBatchModelTooLong, args: map[string]any{"Name": name}}
-				}
-			}
-			// 段归一化，杜绝带空格模型名进入 abilities
-			fields.Models = common.GetPointer(normalizeCommaList(models))
+	modelSegments, models := optionalCommaList(r.Models)
+	for _, name := range modelSegments {
+		if name == "" {
+			return fields, errors.New(i18n.MsgChannelBatchModelsInvalid)
+		}
+		// 按码点计数，与其余文本字段及 abilities.model 列宽一致（03 文档 2.2.4）
+		if utf8.RuneCountInString(name) > MaxBatchEditTextLength {
+			return fields, &i18nParamError{key: i18n.MsgChannelBatchModelTooLong, args: map[string]any{"Name": name}}
 		}
 	}
+	fields.Models = models
 
 	if r.ModelMapping != nil {
 		mapping := strings.TrimSpace(*r.ModelMapping)
@@ -1069,11 +1073,9 @@ func (r *ChannelBatchUpdateRequest) buildBatchUpdateFields() (model.ChannelBatch
 	}
 
 	if r.Priority != nil {
-		// 与前端 Number.isSafeInteger 对齐，超出 JS 安全整数域的值会在前端读写时精度漂移
-		if *r.Priority < -maxSafeJsInteger || *r.Priority > maxSafeJsInteger {
-			return fields, errors.New(i18n.MsgChannelBatchPriorityRange)
-		}
-		fields.Priority = common.GetPointer(*r.Priority)
+		// int64 全域由 DTO 类型精确保证，不经 float64 中转也不额外设界（03 文档 2.2.5），
+		// 与单渠道编辑同口径
+		fields.Priority = r.Priority
 	}
 
 	fields.TestModel, err = optionalTrimmedString(r.TestModel, MaxBatchEditTextLength, i18n.MsgChannelBatchTestModelLong)
@@ -1097,12 +1099,18 @@ func (r *ChannelBatchUpdateRequest) buildBatchUpdateFields() (model.ChannelBatch
 // Batch edit field limits shared by validation and audit (frontend mirrors them
 // in web/src/features/channels/lib/channel-batch-edit.ts).
 const (
-	MaxBatchEditChannels     = 200
-	MaxBatchEditGroupLength  = 64
-	MaxBatchEditTagLength    = 191
-	MaxBatchEditTextLength   = 255
-	maxSafeJsInteger   int64 = 9007199254740991 // ±(2^53-1), aligned with frontend Number.isSafeInteger
+	MaxBatchEditChannels    = 200
+	MaxBatchEditGroupLength = 64
+	MaxBatchEditTagLength   = 191
+	MaxBatchEditTextLength  = 255
 )
+
+// channelBatchUpdateFailurePayload 批量编辑失败明细响应体（03 文档 2.3）：
+// reason 由失败环节的 i18n 键翻译而来，不含驱动层原始错误。
+type channelBatchUpdateFailurePayload struct {
+	Id     int    `json:"id"`
+	Reason string `json:"reason"`
+}
 
 // i18nParamError 携带模板参数的 i18n 错误，由 respondBatchUpdateError 统一翻译。
 type i18nParamError struct {
@@ -1553,10 +1561,7 @@ func BatchSetChannelTag(c *gin.Context) {
 func BatchUpdateChannels(c *gin.Context) {
 	var req ChannelBatchUpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": i18n.T(c, i18n.MsgInvalidParams),
-		})
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
 	fields, err := req.buildBatchUpdateFields()
@@ -1564,12 +1569,25 @@ func BatchUpdateChannels(c *gin.Context) {
 		respondBatchUpdateError(c, err)
 		return
 	}
-	count, failure, err := model.BatchUpdateChannels(req.Ids, fields)
+	updatedIds, failure, err := model.BatchUpdateChannels(req.Ids, fields)
 	if err != nil {
-		// 事务失败明细需额外携带 data.failed（03 文档 2.3）
+		// 事务失败明细需额外携带 data.failed（03 文档 2.3）：原始驱动错误只进服务端日志
 		if failure != nil {
-			common.ApiErrorMsgAndData(c, i18n.T(c, i18n.MsgChannelBatchFailed), gin.H{
-				"failed": []model.ChannelBatchUpdateFailure{*failure},
+			common.SysError(fmt.Sprintf("channel batch update failed: channel_id=%d kind=%s err=%v",
+				failure.Id, failure.Kind, failure.Err))
+			reasonKey := i18n.MsgChannelBatchUpdateFailed
+			if failure.Kind == model.BatchFailureSyncAbilities {
+				reasonKey = i18n.MsgChannelBatchAbilitiesFailed
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": i18n.T(c, i18n.MsgChannelBatchFailed),
+				"data": gin.H{
+					"failed": []channelBatchUpdateFailurePayload{{
+						Id:     failure.Id,
+						Reason: i18n.T(c, reasonKey),
+					}},
+				},
 			})
 			return
 		}
@@ -1577,7 +1595,7 @@ func BatchUpdateChannels(c *gin.Context) {
 		return
 	}
 	// ids 全部已不存在时数据库无变化，视作无目标而非成功（03 文档 2.2.1）
-	if count == 0 {
+	if len(updatedIds) == 0 {
 		common.ApiErrorI18n(c, i18n.MsgChannelNotExists)
 		return
 	}
@@ -1585,26 +1603,21 @@ func BatchUpdateChannels(c *gin.Context) {
 	if fields.AffectsAbilities() {
 		// 清理返回值无错误语义：零条数在渠道无绑定时为常态，失败已由该函数内部重试与
 		// SysError 承担，不阻断批量编辑结果（03 文档 2.1 处理流程 5）
-		service.ClearChannelAffinityRuntimeByChannelIDs(req.Ids)
+		service.ClearChannelAffinityRuntimeByChannelIDs(updatedIds)
 	}
 
-	// 审计的 updated_fields/values 由字段元数据表单源派生（03 文档 2.1 处理流程 6）
-	updatedFields := fields.EffectiveColumns()
-	values := fields.ColumnValues()
-	// values 记录所填值全量原文，不截断（4.2.4 规则5）；
+	// 审计的 updated_fields/values 由字段元数据表单源派生（03 文档 2.1 处理流程 6）：
+	// values 记录各生效字段的生效值（校验层已 trim 与归一化，与落库值一致，不截断）；
+	// channel_ids 记实际更新的渠道，与 count 同口径；
 	// updated_fields 以逗号连接串入审计，与模板 ${updated_fields} 的渲染形态一致
 	recordManageAudit(c, "channel.update_batch", map[string]interface{}{
-		"count":          count,
-		"channel_ids":    req.Ids,
-		"updated_fields": strings.Join(updatedFields, ", "),
-		"values":         values,
+		"count":          len(updatedIds),
+		"channel_ids":    updatedIds,
+		"updated_fields": strings.Join(fields.EffectiveColumns(), ", "),
+		"values":         fields.ColumnValues(),
 	})
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data": gin.H{
-			"count": count,
-		},
+	common.ApiSuccess(c, gin.H{
+		"count": len(updatedIds),
 	})
 }
 

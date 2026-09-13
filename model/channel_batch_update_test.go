@@ -61,10 +61,10 @@ func TestBatchUpdateChannelsWritesZeroValues(t *testing.T) {
 	seedChannel(t, 1, "a", "default", 5)
 	seedChannel(t, 2, "a", "default", 5)
 
-	count, failure, err := BatchUpdateChannels([]int{1, 2}, ChannelBatchEditFields{Weight: ptrUint(0)})
+	updatedIds, failure, err := BatchUpdateChannels([]int{1, 2}, ChannelBatchEditFields{Weight: ptrUint(0)})
 	require.NoError(t, err)
 	assert.Nil(t, failure)
-	assert.Equal(t, 2, count)
+	assert.Equal(t, []int{1, 2}, updatedIds)
 
 	var ch1, ch2 Channel
 	require.NoError(t, DB.First(&ch1, 1).Error)
@@ -81,10 +81,10 @@ func TestBatchUpdateChannelsRebuildsAbilitiesOnlyOnRouteFields(t *testing.T) {
 		seedChannel(t, 1, "a", "default", 5)
 		require.Equal(t, []string{"a"}, abilityModels(t, 1))
 
-		count, failure, err := BatchUpdateChannels([]int{1}, ChannelBatchEditFields{Models: ptrString("b,c")})
+		updatedIds, failure, err := BatchUpdateChannels([]int{1}, ChannelBatchEditFields{Models: ptrString("b,c")})
 		require.NoError(t, err)
 		assert.Nil(t, failure)
-		assert.Equal(t, 1, count)
+		assert.Equal(t, []int{1}, updatedIds)
 		assert.ElementsMatch(t, []string{"b", "c"}, abilityModels(t, 1))
 	})
 
@@ -93,10 +93,10 @@ func TestBatchUpdateChannelsRebuildsAbilitiesOnlyOnRouteFields(t *testing.T) {
 		seedChannel(t, 1, "a", "default", 5)
 		require.Equal(t, []string{"a"}, abilityModels(t, 1))
 
-		count, failure, err := BatchUpdateChannels([]int{1}, ChannelBatchEditFields{Remark: ptrString("x")})
+		updatedIds, failure, err := BatchUpdateChannels([]int{1}, ChannelBatchEditFields{Remark: ptrString("x")})
 		require.NoError(t, err)
 		assert.Nil(t, failure)
-		assert.Equal(t, 1, count)
+		assert.Equal(t, []int{1}, updatedIds)
 		assert.ElementsMatch(t, []string{"a"}, abilityModels(t, 1))
 	})
 }
@@ -107,10 +107,10 @@ func TestBatchUpdateChannelsSkipsMissingIds(t *testing.T) {
 	seedChannel(t, 1, "a", "default", 5)
 	seedChannel(t, 2, "a", "default", 5)
 
-	count, failure, err := BatchUpdateChannels([]int{1, 2, 999}, ChannelBatchEditFields{Weight: ptrUint(7)})
+	updatedIds, failure, err := BatchUpdateChannels([]int{1, 2, 999}, ChannelBatchEditFields{Weight: ptrUint(7)})
 	require.NoError(t, err)
 	assert.Nil(t, failure)
-	assert.Equal(t, 2, count)
+	assert.Equal(t, []int{1, 2}, updatedIds)
 
 	var ch1, ch2 Channel
 	require.NoError(t, DB.First(&ch1, 1).Error)
@@ -120,7 +120,7 @@ func TestBatchUpdateChannelsSkipsMissingIds(t *testing.T) {
 }
 
 // TestBatchUpdateChannelsRollsBackOnFailure 事务中任一写库语句失败即整体回滚：
-// channels 更新成功后 abilities 同步失败（第 2 个 UPDATE 回调注入错误）。
+// 第 2 个 UPDATE（渠道 2）失败即回滚，失败明细精确指向该渠道。
 func TestBatchUpdateChannelsRollsBackOnFailure(t *testing.T) {
 	resetChannelBatchTables(t)
 	seedChannel(t, 1, "a", "default", 5)
@@ -136,10 +136,15 @@ func TestBatchUpdateChannelsRollsBackOnFailure(t *testing.T) {
 	}))
 	t.Cleanup(func() { DB.Callback().Update().Remove(cbName) })
 
-	_, failure, err := BatchUpdateChannels([]int{1, 2}, ChannelBatchEditFields{Weight: ptrUint(0)})
+	updatedIds, failure, err := BatchUpdateChannels([]int{1, 2}, ChannelBatchEditFields{Weight: ptrUint(0)})
 	require.Error(t, err)
+	assert.Empty(t, updatedIds)
 	require.NotNil(t, failure)
-	assert.Contains(t, failure.Reason, "boom")
+	// 失败明细指向触发回滚的渠道，而非整批的首个渠道
+	assert.Equal(t, 2, failure.Id)
+	assert.Equal(t, BatchFailureUpdateChannels, failure.Kind)
+	require.Error(t, failure.Err)
+	assert.Contains(t, failure.Err.Error(), "boom")
 
 	for _, id := range []int{1, 2} {
 		var ch Channel
@@ -153,10 +158,10 @@ func TestBatchUpdateChannelsEmptyIds(t *testing.T) {
 	resetChannelBatchTables(t)
 	seedChannel(t, 1, "a", "default", 5)
 
-	count, failure, err := BatchUpdateChannels(nil, ChannelBatchEditFields{Weight: ptrUint(0)})
+	updatedIds, failure, err := BatchUpdateChannels(nil, ChannelBatchEditFields{Weight: ptrUint(0)})
 	require.NoError(t, err)
 	assert.Nil(t, failure)
-	assert.Equal(t, 0, count)
+	assert.Empty(t, updatedIds)
 
 	var ch1 Channel
 	require.NoError(t, DB.First(&ch1, 1).Error)
@@ -172,10 +177,10 @@ func TestBatchUpdateChannelsNilFieldsKeepOriginal(t *testing.T) {
 		"remark": "r1",
 	}).Error)
 
-	count, failure, err := BatchUpdateChannels([]int{1}, ChannelBatchEditFields{Group: ptrString("vip")})
+	updatedIds, failure, err := BatchUpdateChannels([]int{1}, ChannelBatchEditFields{Group: ptrString("vip")})
 	require.NoError(t, err)
 	assert.Nil(t, failure)
-	assert.Equal(t, 1, count)
+	assert.Equal(t, []int{1}, updatedIds)
 
 	var got Channel
 	require.NoError(t, DB.First(&got, 1).Error)
@@ -213,8 +218,9 @@ func TestChannelBatchEditFieldsAffectsAbilities(t *testing.T) {
 	}
 }
 
-// TestChannelBatchEditFieldsApplyTo 列白名单 SET 与内存对象回写。
-func TestChannelBatchEditFieldsApplyTo(t *testing.T) {
+// TestChannelBatchEditFieldsColumnValuesAndAssign 列白名单 SET 与内存对象回写同源：
+// 同一个字段访问器产出写入值，也把生效值落回渠道对象。
+func TestChannelBatchEditFieldsColumnValuesAndAssign(t *testing.T) {
 	fields := ChannelBatchEditFields{
 		Group:        ptrString("vip"),
 		Tag:          ptrString("t1"),
@@ -226,8 +232,6 @@ func TestChannelBatchEditFieldsApplyTo(t *testing.T) {
 		TestModel:    ptrString("m1"),
 		AutoBan:      ptrInt(0),
 	}
-	ch := &Channel{}
-	got := fields.applyTo(ch)
 
 	assert.Equal(t, map[string]any{
 		"group":         "vip",
@@ -239,7 +243,10 @@ func TestChannelBatchEditFieldsApplyTo(t *testing.T) {
 		"priority":      int64(0),
 		"test_model":    "m1",
 		"auto_ban":      0,
-	}, got)
+	}, fields.ColumnValues())
+
+	ch := &Channel{}
+	fields.assignTo(ch)
 
 	// 内存对象须同步生效值：UpdateAbilities 取自对象字段而非 DB 读。
 	assert.Equal(t, "vip", ch.Group)
@@ -255,13 +262,17 @@ func TestChannelBatchEditFieldsApplyTo(t *testing.T) {
 	assert.Equal(t, 0, ch.GetWeight())
 }
 
-// TestChannelBatchEditFieldsApplyToSkipsNil 仅非 nil 字段进入 SET 白名单。
-func TestChannelBatchEditFieldsApplyToSkipsNil(t *testing.T) {
-	got := ChannelBatchEditFields{}.applyTo(&Channel{})
-	assert.Empty(t, got)
+// TestChannelBatchEditFieldsColumnValuesSkipsNil 仅非 nil 字段进入 SET 白名单与回写。
+func TestChannelBatchEditFieldsColumnValuesSkipsNil(t *testing.T) {
+	ch := &Channel{Group: "default"}
+	assert.Empty(t, ChannelBatchEditFields{}.ColumnValues())
+	ChannelBatchEditFields{}.assignTo(ch)
+	assert.Equal(t, "default", ch.Group)
 
-	got = ChannelBatchEditFields{Group: ptrString("vip")}.applyTo(&Channel{})
-	assert.Equal(t, map[string]any{"group": "vip"}, got)
+	groupOnly := ChannelBatchEditFields{Group: ptrString("vip")}
+	assert.Equal(t, map[string]any{"group": "vip"}, groupOnly.ColumnValues())
+	groupOnly.assignTo(ch)
+	assert.Equal(t, "vip", ch.Group)
 }
 
 // TestBatchUpdateChannelsKeepsAbilitySegmentsClean 段值原样落库时 abilities 行
@@ -292,16 +303,17 @@ func TestBatchUpdateChannelsKeepsAbilitySegmentsClean(t *testing.T) {
 	}
 }
 
-// TestBatchUpdateChannelsInlineAbilityColumns 仅改行内列（weight/priority/tag）时
-// abilities 行集不变、行内列同步更新：模型集合保持原样，weight 落到 ability 行。
-func TestBatchUpdateChannelsInlineAbilityColumns(t *testing.T) {
+// TestBatchUpdateChannelsRebuildsAbilityColumns 仅改行内列（weight/priority/tag）时
+// 重建后的 abilities 行集不变、行内列取到新值：模型集合保持原样，weight 落到 ability 行。
+func TestBatchUpdateChannelsRebuildsAbilityColumns(t *testing.T) {
 	resetChannelBatchTables(t)
 	seedChannel(t, 1, "a,b", "default", 5)
 	seedChannel(t, 2, "a,b", "default", 5)
 
-	_, failure, err := BatchUpdateChannels([]int{1, 2}, ChannelBatchEditFields{Weight: ptrUint(9)})
+	updatedIds, failure, err := BatchUpdateChannels([]int{1, 2}, ChannelBatchEditFields{Weight: ptrUint(9)})
 	require.NoError(t, err)
 	assert.Nil(t, failure)
+	assert.Equal(t, []int{1, 2}, updatedIds)
 
 	// (group,model) 行集不变：每渠道仍是 default×{a,b}
 	assert.ElementsMatch(t, []string{"a", "b"}, abilityModels(t, 1))
@@ -314,8 +326,23 @@ func TestBatchUpdateChannelsInlineAbilityColumns(t *testing.T) {
 	}
 }
 
-// TestChannelBatchEditFieldsDerivedFromSingleSource 审计派生方法与 applyTo 的
-// SET 白名单同源：列集合一致，值经解引用。
+// TestBatchUpdateChannelsRepairsDriftedAbilities 路由字段生效时按渠道删除重插：
+// 渠道行与 abilities 漂移（缺行）时批量编辑可自愈，与单渠道编辑口径一致。
+func TestBatchUpdateChannelsRepairsDriftedAbilities(t *testing.T) {
+	resetChannelBatchTables(t)
+	seedChannel(t, 1, "a,b", "default", 5)
+	// 模拟 channels 行已写入但 abilities 缺行的漂移状态
+	require.NoError(t, DB.Exec("DELETE FROM abilities WHERE channel_id = ? AND model = ?", 1, "b").Error)
+	require.Equal(t, []string{"a"}, abilityModels(t, 1))
+
+	_, failure, err := BatchUpdateChannels([]int{1}, ChannelBatchEditFields{Weight: ptrUint(9)})
+	require.NoError(t, err)
+	assert.Nil(t, failure)
+	assert.ElementsMatch(t, []string{"a", "b"}, abilityModels(t, 1))
+}
+
+// TestChannelBatchEditFieldsDerivedFromSingleSource 审计派生方法与 SET 白名单同源：
+// 列集合一致，值经解引用。
 func TestChannelBatchEditFieldsDerivedFromSingleSource(t *testing.T) {
 	fields := ChannelBatchEditFields{
 		Remark: ptrString("r1"),
@@ -323,5 +350,4 @@ func TestChannelBatchEditFieldsDerivedFromSingleSource(t *testing.T) {
 	}
 	assert.Equal(t, []string{"remark", "weight"}, fields.EffectiveColumns())
 	assert.Equal(t, map[string]any{"remark": "r1", "weight": uint(0)}, fields.ColumnValues())
-	assert.Equal(t, map[string]any{"remark": "r1", "weight": uint(0)}, fields.applyTo(&Channel{}))
 }

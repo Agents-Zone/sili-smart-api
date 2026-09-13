@@ -173,11 +173,12 @@ channel.batch_edit.mapping_empty: "模型重定向不能為空（如需清空請
 channel.batch_edit.mapping_invalid: "模型重定向必須是合法的 JSON 對象"
 channel.batch_edit.mapping_values_not_string: "模型重定向的值必須都是字符串"
 channel.batch_edit.weight_range: "權重必須在 0-4294967295 之間"
-channel.batch_edit.priority_range: "優先級必須在 -9007199254740991 到 9007199254740991 之間"
 channel.batch_edit.test_model_too_long: "測試模型長度不能超過 255 字符"
 channel.batch_edit.auto_ban_invalid: "自動封禁取值錯誤"
 channel.batch_edit.no_fields: "批量編輯至少需要填寫一個字段"
 channel.batch_edit.failed: "批量編輯失敗，已全部回滾"
+channel.batch_edit.update_failed: "更新渠道記錄失敗"
+channel.batch_edit.abilities_failed: "重建 abilities 失敗"
 
 # Model messages
 model.name_empty: "模型名稱不能為空"

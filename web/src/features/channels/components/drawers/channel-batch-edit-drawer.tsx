@@ -16,34 +16,23 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
-import { Dialog } from '@/components/dialog'
 import {
   sideDrawerContentClassName,
   sideDrawerFooterClassName,
   sideDrawerFormClassName,
   sideDrawerHeaderClassName,
-  SideDrawerSection,
-  SideDrawerSectionHeader,
 } from '@/components/drawer-layout'
-import { MultiSelect } from '@/components/multi-select'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { Form } from '@/components/ui/form'
 import {
   Sheet,
   SheetContent,
@@ -52,19 +41,20 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-import { Textarea } from '@/components/ui/textarea'
-import { truncateText } from '@/lib/utils'
 
 import { getAllModels, getGroups } from '../../api'
 import {
-  buildBatchEditPayload,
+  buildBatchEditSubmission,
+  channelBatchEditSchema,
   handleBatchUpdate,
-  parseModelsString,
-  type BatchUpdateOutcome,
-  type ChannelBatchEditForm,
+  validateBatchEditTargets,
   type BatchEditField,
+  type ChannelBatchEditFormValues,
 } from '../../lib'
-import type { BatchUpdateFailure, BatchUpdateParams } from '../../types'
+import type { BatchUpdateOutcome } from '../../lib'
+import type { BatchUpdateParams } from '../../types'
+import { BatchEditConfirmDialog } from './channel-batch-edit-confirm-dialog'
+import { ChannelBatchEditFields } from './channel-batch-edit-fields'
 
 type ChannelBatchEditDrawerProps = {
   open: boolean
@@ -75,58 +65,43 @@ type ChannelBatchEditDrawerProps = {
   submit?: (payload: BatchUpdateParams) => Promise<BatchUpdateOutcome>
 }
 
-/** Validated payload of the last save click plus its effective fields (spec 4.3.2). */
-type BatchEditConfirmRequest = {
-  payload: BatchUpdateParams
-  fields: BatchEditField[]
-}
-
-/** Overlong confirmation summaries are cut here and suffixed with an ellipsis (spec 4.3.5). */
-const MAX_SUMMARY_LENGTH = 50
-
-/** Summary of one effective field: the value written into the payload (auto_ban is tri-state). */
-function formatFieldSummary(
-  field: BatchEditField,
-  payload: BatchUpdateParams,
-  t: (key: string) => string
-): string {
-  const value = payload[field.key]
-  if (value === undefined) return ''
-  if (field.key === 'auto_ban') return t(value === 1 ? 'Enabled' : 'Disabled')
-  return String(value)
-}
-
-/** Truncated summary; the untruncated value stays available through the element title. */
-const truncateSummary = (summary: string): string =>
-  truncateText(summary, MAX_SUMMARY_LENGTH)
-
 export function ChannelBatchEditDrawer(props: ChannelBatchEditDrawerProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [form, setForm] = useState<ChannelBatchEditForm>({})
-  const [pending, setPending] = useState<BatchEditConfirmRequest | null>(null)
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [pending, setPending] = useState<{
+    payload: BatchUpdateParams
+    fields: BatchEditField[]
+  } | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [failed, setFailed] = useState<BatchUpdateFailure[]>([])
+  const [outcome, setOutcome] = useState<BatchUpdateOutcome | null>(null)
 
+  const form = useForm<ChannelBatchEditFormValues>({
+    resolver: zodResolver(channelBatchEditSchema),
+    defaultValues: { auto_ban: 'unchanged' },
+  })
+
+  // 抽屉随批量工具条常驻挂载，未打开时不预取全量模型列表
   const { data: groupsData } = useQuery({
     queryKey: ['groups'],
     queryFn: getGroups,
+    enabled: props.open,
   })
 
   const { data: allModelsData } = useQuery({
     queryKey: ['channel_models'],
     queryFn: getAllModels,
+    enabled: props.open,
   })
 
   useEffect(() => {
     if (!props.open) return
-    setForm({})
+    form.reset({ auto_ban: 'unchanged' })
     setPending(null)
     setConfirmOpen(false)
     setIsSubmitting(false)
-    setFailed([])
-  }, [props.open])
+    setOutcome(null)
+  }, [props.open, form])
 
   const groupOptions = useMemo(
     () =>
@@ -146,43 +121,33 @@ export function ChannelBatchEditDrawer(props: ChannelBatchEditDrawerProps) {
     [allModelsData]
   )
 
-  const autoBanOptions = [
-    { value: 'unchanged', label: t('Keep unchanged') },
-    { value: 'enabled', label: t('Enabled') },
-    { value: 'disabled', label: t('Disabled') },
-  ]
-
-  const updateForm = (patch: Partial<ChannelBatchEditForm>) => {
-    setForm((current) => ({ ...current, ...patch }))
+  const onSubmit = (values: ChannelBatchEditFormValues) => {
+    const submission = buildBatchEditSubmission(props.selectedIds, values)
+    if (!submission.payload) {
+      // No effective field: warn instead of opening the dialog.
+      toast.warning(t('You must fill in at least one field'))
+      return
+    }
+    setOutcome(null)
+    setPending({ payload: submission.payload, fields: submission.fields })
+    setConfirmOpen(true)
   }
-
-  const confirmFields = pending
-    ? pending.fields.map((field) => ({
-        label: field.label,
-        summary: formatFieldSummary(field, pending.payload, t),
-      }))
-    : []
-
-  const defaultSubmit = (payload: BatchUpdateParams) =>
-    handleBatchUpdate(payload, queryClient, props.onCommitted)
 
   const handleSave = () => {
     if (isSubmitting) return
 
-    const result = buildBatchEditPayload(props.selectedIds, form)
-
-    if (result.error) {
-      // No effective field (or invalid input): warn instead of opening the dialog.
-      toast.warning(t(result.error))
+    const targetIssue = validateBatchEditTargets(props.selectedIds)
+    if (targetIssue) {
+      toast.warning(t(targetIssue))
       return
     }
 
-    if (!result.payload) return
-
-    setFailed([])
-    setPending({ payload: result.payload, fields: result.fields })
-    setConfirmOpen(true)
+    // Field level issues are rendered by FormMessage under each input.
+    void form.handleSubmit(onSubmit)()
   }
+
+  const defaultSubmit = (payload: BatchUpdateParams) =>
+    handleBatchUpdate(payload, queryClient, props.onCommitted)
 
   const handleConfirm = async () => {
     if (!pending || isSubmitting) return
@@ -190,23 +155,30 @@ export function ChannelBatchEditDrawer(props: ChannelBatchEditDrawerProps) {
     const submit = props.submit ?? defaultSubmit
     setConfirmOpen(false)
     setIsSubmitting(true)
-    setFailed([])
 
-    let outcome: BatchUpdateOutcome
+    let failed: BatchUpdateOutcome | null = null
     try {
-      outcome = await submit(pending.payload)
+      const result = await submit(pending.payload)
+      if (result.ok) {
+        // Success closes the drawer; the upstream selection is cleared via onCommitted.
+        props.onOpenChange(false)
+        return
+      }
+      failed = result
+    } catch (error) {
+      // 提交实现抛错时给兜底提示：失败明细为空时告警块不渲染，静默失败会让用户无从下手
+      toast.error(
+        error instanceof Error && error.message
+          ? error.message
+          : t('Failed to update channels')
+      )
+      failed = { ok: false, count: 0, failed: [] }
     } finally {
       setIsSubmitting(false)
     }
 
-    if (outcome.ok) {
-      // Success closes the drawer; the upstream selection is cleared via onCommitted.
-      props.onOpenChange(false)
-      return
-    }
-
     // Failure keeps the drawer and the filled values so the user can retry.
-    setFailed(outcome.failed)
+    setOutcome(failed)
   }
 
   return (
@@ -229,152 +201,14 @@ export function ChannelBatchEditDrawer(props: ChannelBatchEditDrawerProps) {
               </AlertDescription>
             </Alert>
 
-            <SideDrawerSection>
-              <SideDrawerSectionHeader title={t('Basic Information')} />
-
-              <div className='grid gap-2'>
-                <Label htmlFor='batch-edit-group'>{t('Group')}</Label>
-                <MultiSelect
-                  id='batch-edit-group'
-                  options={groupOptions}
-                  selected={parseModelsString(form.group ?? '')}
-                  onChange={(values) => updateForm({ group: values.join(',') })}
-                  placeholder={t('Select groups (leave empty to keep current)')}
-                />
-              </div>
-
-              <div className='grid gap-2'>
-                <Label htmlFor='batch-edit-tag'>{t('Tag')}</Label>
-                <Input
-                  id='batch-edit-tag'
-                  value={form.tag ?? ''}
-                  onChange={(event) => updateForm({ tag: event.target.value })}
-                  placeholder={t('Enter tag name (optional)')}
-                />
-              </div>
-
-              <div className='grid gap-2'>
-                <Label htmlFor='batch-edit-remark'>{t('Remark')}</Label>
-                <Input
-                  id='batch-edit-remark'
-                  value={form.remark ?? ''}
-                  onChange={(event) =>
-                    updateForm({ remark: event.target.value })
-                  }
-                  placeholder={t('Enter remark (optional)')}
-                />
-              </div>
-            </SideDrawerSection>
-
-            <SideDrawerSection>
-              <SideDrawerSectionHeader title={t('Models')} />
-
-              <div className='grid gap-2'>
-                <Label htmlFor='batch-edit-models'>{t('Models')}</Label>
-                <MultiSelect
-                  id='batch-edit-models'
-                  options={modelOptions}
-                  selected={parseModelsString(form.models ?? '')}
-                  onChange={(values) => updateForm({ models: values.join(',') })}
-                  placeholder={t('Select models or add custom ones')}
-                  allowCreate
-                  createLabel='Add custom model "{{value}}"'
-                  maxVisibleChips={8}
-                />
-              </div>
-
-              <div className='grid gap-2'>
-                <Label htmlFor='batch-edit-model-mapping'>
-                  {t('Model Mapping')}
-                </Label>
-                <Textarea
-                  id='batch-edit-model-mapping'
-                  value={form.model_mapping ?? ''}
-                  onChange={(event) =>
-                    updateForm({ model_mapping: event.target.value })
-                  }
-                  placeholder='{"gpt-4o":"gpt-4o-mini"}'
-                  rows={3}
-                />
-              </div>
-            </SideDrawerSection>
-
-            <SideDrawerSection>
-              <SideDrawerSectionHeader title={t('Advanced Settings')} />
-
-              <div className='grid gap-4 sm:grid-cols-2'>
-                <div className='grid gap-2'>
-                  <Label htmlFor='batch-edit-weight'>{t('Weight')}</Label>
-                  <Input
-                    id='batch-edit-weight'
-                    inputMode='numeric'
-                    value={form.weight ?? ''}
-                    onChange={(event) =>
-                      updateForm({ weight: event.target.value })
-                    }
-                    placeholder='0'
-                  />
-                </div>
-
-                <div className='grid gap-2'>
-                  <Label htmlFor='batch-edit-priority'>{t('Priority')}</Label>
-                  <Input
-                    id='batch-edit-priority'
-                    inputMode='numeric'
-                    value={form.priority ?? ''}
-                    onChange={(event) =>
-                      updateForm({ priority: event.target.value })
-                    }
-                    placeholder='0'
-                  />
-                </div>
-              </div>
-
-              <div className='grid gap-2'>
-                <Label htmlFor='batch-edit-test-model'>{t('Test Model')}</Label>
-                <Input
-                  id='batch-edit-test-model'
-                  value={form.test_model ?? ''}
-                  onChange={(event) =>
-                    updateForm({ test_model: event.target.value })
-                  }
-                  placeholder={t('Enter the model used for channel testing')}
-                />
-              </div>
-
-              <div className='grid gap-2'>
-                <Label htmlFor='batch-edit-auto-ban'>{t('Auto Ban')}</Label>
-                <Select
-                  value={form.auto_ban ?? 'unchanged'}
-                  onValueChange={(value) =>
-                    updateForm({
-                      auto_ban: value as ChannelBatchEditForm['auto_ban'],
-                    })
-                  }
-                  items={autoBanOptions}
-                >
-                  <SelectTrigger id='batch-edit-auto-ban' className='w-full'>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent alignItemWithTrigger={false}>
-                    <SelectGroup>
-                      {autoBanOptions.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-              </div>
-            </SideDrawerSection>
-
-            {failed.length > 0 && (
+            {outcome && !outcome.ok && outcome.failed.length > 0 && (
               <Alert variant='destructive'>
                 <AlertTitle>{t('Failed to update channels')}</AlertTitle>
                 <AlertDescription>
+                  {/* 服务端已本地化的回滚说明（如「已全部回滚」） */}
+                  {outcome.message && <p>{outcome.message}</p>}
                   <ul className='space-y-1'>
-                    {failed.map((item) => (
+                    {outcome.failed.map((item) => (
                       <li key={item.id}>
                         {t('Channel #{{id}}', { id: item.id })}: {item.reason}
                       </li>
@@ -383,6 +217,24 @@ export function ChannelBatchEditDrawer(props: ChannelBatchEditDrawerProps) {
                 </AlertDescription>
               </Alert>
             )}
+
+            <Form {...form}>
+              <form
+                onSubmit={(event) => {
+                  // 回车提交与「保存」同路径：同样先校验勾选边界
+                  event.preventDefault()
+                  handleSave()
+                }}
+                className='space-y-6'
+                noValidate
+              >
+                <ChannelBatchEditFields
+                  form={form}
+                  groupOptions={groupOptions}
+                  modelOptions={modelOptions}
+                />
+              </form>
+            </Form>
           </div>
 
           <SheetFooter className={sideDrawerFooterClassName()}>
@@ -402,36 +254,15 @@ export function ChannelBatchEditDrawer(props: ChannelBatchEditDrawerProps) {
         </SheetContent>
       </Sheet>
 
-      <Dialog
+      <BatchEditConfirmDialog
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
-        title={t('{{count}} channel(s) will be updated', {
-          count: props.selectedIds.length,
-        })}
-        contentHeight='auto'
-        bodyClassName='space-y-3'
-        footer={
-          <>
-            <Button variant='outline' onClick={() => setConfirmOpen(false)}>
-              {t('Cancel')}
-            </Button>
-            <Button disabled={isSubmitting} onClick={handleConfirm}>
-              {t('Confirm')}
-            </Button>
-          </>
-        }
-      >
-        <div className='space-y-2'>
-          <div className='text-sm font-medium'>{t('Fields to update')}</div>
-          <ul className='space-y-1 text-sm'>
-            {confirmFields.map((field) => (
-              <li key={field.label} title={field.summary}>
-                {t(field.label)}: {truncateSummary(field.summary)}
-              </li>
-            ))}
-          </ul>
-        </div>
-      </Dialog>
+        selectedCount={props.selectedIds.length}
+        payload={pending?.payload ?? null}
+        fields={pending?.fields ?? []}
+        isSubmitting={isSubmitting}
+        onConfirm={handleConfirm}
+      />
     </>
   )
 }
