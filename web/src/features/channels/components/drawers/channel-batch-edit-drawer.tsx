@@ -49,9 +49,9 @@ import {
   handleBatchUpdate,
   validateBatchEditTargets,
   type BatchEditField,
+  type BatchUpdateOutcome,
   type ChannelBatchEditFormValues,
 } from '../../lib'
-import type { BatchUpdateOutcome } from '../../lib'
 import type { BatchUpdateParams } from '../../types'
 import { BatchEditConfirmDialog } from './channel-batch-edit-confirm-dialog'
 import { ChannelBatchEditFields } from './channel-batch-edit-fields'

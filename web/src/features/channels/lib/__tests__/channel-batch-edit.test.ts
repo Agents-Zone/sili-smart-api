@@ -127,10 +127,19 @@ describe('channelBatchEditSchema', () => {
   })
 
   test('rejects model mappings that are not plain objects', () => {
-    for (const model_mapping of ['null', '123', '"gpt-4o"', 'not json', '{}[']) {
+    // Parsed but not a plain object → object-specific issue message.
+    for (const model_mapping of ['null', '123', '"gpt-4o"']) {
       assert.equal(
         firstIssue({ model_mapping }),
         'Model mapping must be a valid JSON object',
+        model_mapping
+      )
+    }
+    // Unparseable strings surface the shared format issue message.
+    for (const model_mapping of ['not json', '{}[']) {
+      assert.equal(
+        firstIssue({ model_mapping }),
+        'Model mapping must be valid JSON format',
         model_mapping
       )
     }

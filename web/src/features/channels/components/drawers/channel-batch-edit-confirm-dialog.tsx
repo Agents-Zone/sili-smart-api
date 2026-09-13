@@ -46,8 +46,10 @@ function summarize(
 ): { display: string; full: string } {
   const value = payload[field.key]
   if (value === undefined) return { display: '', full: '' }
-  if (field.key === 'auto_ban')
-    return { display: t(value === 1 ? 'Enabled' : 'Disabled') }
+  if (field.key === 'auto_ban') {
+    const label = t(value === 1 ? 'Enabled' : 'Disabled')
+    return { display: label, full: label }
+  }
   const full = String(value)
   return { display: truncateText(full, MAX_SUMMARY_LENGTH), full }
 }
