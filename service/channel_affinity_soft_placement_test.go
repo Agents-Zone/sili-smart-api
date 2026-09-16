@@ -272,10 +272,9 @@ func TestDisabledChannelRandomFallbackNotPinned(t *testing.T) {
 	assert.Equal(t, 0, channelMemberCount(t, 921))
 }
 
-// T2 keep_on_channel_disabled=true：绑定保留在禁用渠道，随机兜底不得覆盖绑定、
-// 不得追加占用。全部候选可用时随机兜底落点不确定，断言固定在"922 键数不变 +
-// 绑定不动"两个核心不变量。
-func TestKeepOnDisabledKeepsBinding(t *testing.T) {
+// 独占规则在渠道禁用后重新绑定，即使 keep_on_channel_disabled=true。
+// 新绑定避开其他键占用的渠道，并释放旧渠道占用。
+func TestExclusiveDisabledRebindOverridesKeepSetting(t *testing.T) {
 	useSoftPlacementFixture(t, true)
 	setting := operation_setting.GetChannelAffinitySetting()
 	origKeep := setting.KeepOnChannelDisabled
@@ -288,18 +287,20 @@ func TestKeepOnDisabledKeepsBinding(t *testing.T) {
 	setChannelsDisabled(t, 921)
 
 	used := mirrorDistributorRequest(t, "key-a")
-	require.Contains(t, []int{922, 923, 924, 925, 926}, used)
+	require.Contains(t, []int{923, 924, 925, 926}, used)
 
-	assert.Equal(t, 921, forwardBinding(t, "key-a"),
-		"keep_on_channel_disabled must keep the binding on the disabled channel")
-	// 软落位：A 的指纹仍只在原渠道 921（keep 保留占位），不得外溢到兜底渠道。
+	assert.Equal(t, used, forwardBinding(t, "key-a"), "独占规则禁用后必须重绑")
+	// 仅新绑定渠道持有 A 的指纹，其他渠道占用保持原样。
 	for _, id := range []int{922, 923, 924, 925, 926} {
 		_, fps, err := occupancyBindingCount(id)
 		require.NoError(t, err)
-		assert.NotContains(t, fps, affinityFingerprint("key-a"),
-			"keep-path fallback must not register key-a occupancy on channel %d", id)
+		if id == used {
+			assert.Contains(t, fps, affinityFingerprint("key-a"))
+		} else {
+			assert.NotContains(t, fps, affinityFingerprint("key-a"))
+		}
 	}
-	assert.Equal(t, 1, channelMemberCount(t, 921), "key-a occupancy stays on kept channel 921")
+	assert.Equal(t, 0, channelMemberCount(t, 921), "旧渠道释放占用")
 	assert.Equal(t, 1, channelMemberCount(t, 922), "channel 922 keeps only key-b")
 }
 

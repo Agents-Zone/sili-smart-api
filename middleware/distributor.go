@@ -128,6 +128,12 @@ func Distribute() func(c *gin.Context) {
 						}
 					}
 					if !affinityUsable {
+						if service.IsExclusiveChannelAffinity(c) {
+							// 禁用后的重绑由亲和选路统一处理。其余不可用状态保留绑定，
+							// 包括模型/分组不匹配及选路后发生的禁用，等待后续请求重新检查。
+							abortWithOpenAiMessage(c, http.StatusServiceUnavailable, i18n.T(c, i18n.MsgDistributorNoAvailableChannel, map[string]any{"Group": usingGroup, "Model": modelRequest.Model}), types.ErrorCodeModelNotFound)
+							return
+						}
 						if !service.ShouldKeepChannelAffinityOnChannelDisabled() {
 							service.ClearCurrentChannelAffinityCache(c)
 							// 独占规则清占位后重新走亲和获取：正向缓存已清，内部进

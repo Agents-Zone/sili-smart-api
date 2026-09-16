@@ -123,7 +123,9 @@ end
 // now+ttl。v1 数组格式成员按 now+回退 TTL 重写为 v2。条目 PX 取本次 TTL 与
 // 现有条目剩余寿命的较大者（entryPttlMs）：短 TTL 成员后到时不得截断条目，
 // 否则长 TTL 成员随条目整体消失、占用丢失被新键 claim 形成静默双占。
-var occupancyAddScript = redis.NewScript(occupancyEntryPttlLua + `
+var occupancyAddScript = redis.NewScript(occupancyEntryPttlLua + occupancyAddLua)
+
+const occupancyAddLua = `
 local key = KEYS[1]
 local fp = ARGV[1]
 local ttl_ms = tonumber(ARGV[2])
@@ -151,7 +153,7 @@ end
 fps[fp] = now_ms + ttl_ms
 redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', entryPttlMs(key, ttl_ms, now_ms))
 return 1
-`)
+`
 
 // occupancyClaimExclusiveScript 为独占条件占位的 Redis 实现（D3 竞态根治）：
 // KEYS[1] 为 occupancy 条目全键，ARGV 同 occupancyAddScript。
@@ -202,7 +204,9 @@ return 1
 // ARGV[1] 为键指纹，ARGV[2] 为当前时刻毫秒，ARGV[3] 为回退 TTL 毫秒（条目 PTTL
 // 异常或 v1 成员重写时使用）。读条目 -> 惰性剔除过期成员 -> 移除目标成员 ->
 // 空则 DEL / 否则按剩余 TTL（PTTL，不续期）写回，成员不在条目内时幂等 no-op。
-var occupancyRemoveScript = redis.NewScript(`
+var occupancyRemoveScript = redis.NewScript(occupancyRemoveLua)
+
+const occupancyRemoveLua = `
 local key = KEYS[1]
 local fp = ARGV[1]
 local now_ms = tonumber(ARGV[2])
@@ -251,7 +255,7 @@ if pttl <= 0 then
 end
 redis.call('SET', key, cjson.encode({key_fps = fps}), 'PX', pttl)
 return 1
-`)
+`
 
 // occupancyPlaceSharedScript 为满载复用降级的服务端原子最小落位（跨实例串行）：
 // KEYS[1..N] 为全部候选渠道的 occupancy 条目全键（顺序与调用方 candidates 一致），
@@ -505,7 +509,7 @@ type occupancyPlacement struct {
 // occupancyPlaceSharedLeast 满载降级的原子最小落位：在全部候选渠道的实时占用中
 // 选最少绑定数层（同层按调用方给定的随机起点打散），并把本键指纹登记到选定渠道，
 // 决策与登记一次完成。Redis 模式经 occupancyPlaceSharedScript 服务端原子执行
-//（跨实例串行，根治并发键共享陈旧快照集中挤入同一渠道的堆积）；内存模式在
+// （跨实例串行，根治并发键共享陈旧快照集中挤入同一渠道的堆积）；内存模式在
 // placement 全局锁内重读实时占用后决策登记（进程内串行，等价语义）。
 // 随机起点由调用方传入以保持本函数可测（注入式随机，与 pickWeighted 同思路）。
 func occupancyPlaceSharedLeast(candidates []int, keyFP string, ttl time.Duration, startIdx int) (occupancyPlacement, error) {
@@ -1150,12 +1154,9 @@ func rollbackBindingPlacement(cacheKey string, keyFP string, channelID int) {
 	}
 }
 
-// RollbackChannelAffinityOnFinalFailure 终态失败回滚入口（导出供 controller 调用，
-// SSOT 5.1.2 第4条末）：无 affinity meta 直接返回；终态失败必然未发生成功切换
-// （成功回写仅走 RecordChannelAffinity），一律回滚首次占位渠道三处，避免失败
-// 占位把亲和键钉在失败渠道上直至 TTL 到期。回滚后在 gin context 标记终态失败，
-// 供 RecordChannelAffinity 跳过重建（错误经 status_code_mapping 映射为 2xx 或
-// WS 已升级 101 时，distributor 的 status<400 判定无法识别失败）。
+// RollbackChannelAffinityOnFinalFailure 标记终态失败，阻止成功回写。
+// 独占规则保留绑定，手动或自动禁用后的释放由下一次选路处理；普通亲和仍回滚。
+// 错误映射为 2xx 或 WS 已升级 101 时，同样依靠此标记阻止回写。
 func RollbackChannelAffinityOnFinalFailure(c *gin.Context) {
 	if c == nil {
 		return
@@ -1165,6 +1166,10 @@ func RollbackChannelAffinityOnFinalFailure(c *gin.Context) {
 		return
 	}
 	c.Set(ginKeyChannelAffinityFinalFailure, true)
+	// 独占绑定仅在渠道禁用后的选路阶段释放；普通失败保留原绑定及其 TTL。
+	if meta.ExclusiveBind {
+		return
+	}
 	boundChannel := 0
 	if v, exists := c.Get(ginKeyChannelAffinityBoundChannel); exists {
 		if id, valid := v.(int); valid {
@@ -1520,7 +1525,7 @@ func HandleChannelAffinityRulesUpdate(oldRulesJSON string, newRulesJSON string) 
 // 所在渠道绑定数下降，分布的最大堆严格减小）。仅当目标为完全空闲（0 键）或
 // 差距 >=2 时迁移：差距 1 时迁移只交换两渠道的绑定数（本键从 n+1 渠道到 n
 // 渠道，最大堆不变），属无意义的迁移扰动。前提不成立时只读不写返回 {0,0}
-//（绑定维持原值）；成立时在最少绑定层按 ARGV[5] 随机起点选定目标，从旧渠道
+// （绑定维持原值）；成立时在最少绑定层按 ARGV[5] 随机起点选定目标，从旧渠道
 // 移除本键（空则 DEL，否则 KEEPTTL 写回），向目标登记本键（成员合并/过期
 // 剔除/v1 重写/条目 PX 只延长不截断，与登记脚本同语义），返回
 // {目标候选下标(0基), 旧渠道其它键数}。
@@ -1699,7 +1704,7 @@ func rebalanceExclusiveBinding(c *gin.Context, currentChannelID int, usingGroup 
 
 // occupancyHopLeast 原子 hop 的存储层执行：Redis 模式经 occupancyHopScript
 // 服务端原子完成复核与迁移；内存模式在占位全局锁内重读实时占用后同语义执行
-//（进程内串行，等价语义）。返回 ChannelID=0 表示前提不成立（无共享或无空闲）。
+// （进程内串行，等价语义）。返回 ChannelID=0 表示前提不成立（无共享或无空闲）。
 func occupancyHopLeast(candidates []int, oldChannelID int, keyFP string, ttl time.Duration, startIdx int) (occupancyPlacement, error) {
 	if common.RedisEnabled && common.RDB != nil {
 		cache := getChannelAffinityOccupancyCache()

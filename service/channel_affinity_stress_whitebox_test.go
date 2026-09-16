@@ -533,10 +533,9 @@ func TestStressFullLoadConcurrentNewKeys(t *testing.T) {
 	t.Logf("full-load concurrent distribution: %v", counts)
 }
 
-// 场景五：并发绑定后部分终态失败的交错回滚。
-// 键 A、B 各自绑定成功后，A 终态失败回滚：A 的占位三处必须清干净，
-// B 的占位不受影响（回滚按键隔离，不误删同渠道其它键的成员）。
-func TestStressRollbackIsolationBetweenKeys(t *testing.T) {
+// 场景五：键 A、B 各自绑定成功后，A 普通失败仍保留三处绑定数据，
+// B 的占位保持原样，后续新键从剩余空闲渠道独占选路。
+func TestStressFailurePreservesExclusiveBindings(t *testing.T) {
 	useAffinityStressMode(t)
 	metaA := exclusiveAcquireTestMeta()
 	metaA.KeyFingerprint = "rollback-fp-a"
@@ -562,21 +561,22 @@ func TestStressRollbackIsolationBetweenKeys(t *testing.T) {
 	require.True(t, foundB)
 	require.NotEqual(t, chA, chB, "fixture: two keys must hold distinct exclusive channels")
 
-	// A 终态失败回滚（模拟 controller 出口调用）。
+	// A 普通失败保持绑定，其他键的占用也保持原样。
 	RollbackChannelAffinityOnFinalFailure(ctxA)
 
-	// A 占位三处全清。
+	// A 占位三处保持。
 	_, found, err := getChannelAffinityCache().Get(exclusiveCacheKeySuffix(metaA))
 	require.NoError(t, err)
-	assert.False(t, found, "failed key forward binding must be rolled back")
+	assert.True(t, found, "普通失败保留绑定")
 
 	countA, fpsA, err := occupancyBindingCount(chA)
 	require.NoError(t, err)
-	assert.Equal(t, 0, countA, "failed key occupancy must be cleared, residual fps: %v", fpsA)
+	assert.Equal(t, 1, countA)
+	assert.ElementsMatch(t, []string{metaA.KeyFingerprint}, fpsA)
 
 	_, found, err = lastBindGet(exclusiveCacheKeySuffix(metaA))
 	require.NoError(t, err)
-	assert.False(t, found, "failed key last bind must be deleted")
+	assert.True(t, found, "普通失败保留最近绑定")
 
 	// B 占位原样保留。
 	cachedB, found, err := getChannelAffinityCache().Get(exclusiveCacheKeySuffix(metaB))
@@ -594,10 +594,7 @@ func TestStressRollbackIsolationBetweenKeys(t *testing.T) {
 	require.True(t, found)
 	assert.Equal(t, chB, recordB.ChannelID)
 
-	// A 回滚释放的渠道进入空闲集可被下一个键独占。C 键无 lastBind 记录，
-	// 空闲集内均匀随机选定（SSOT 8.3 D1），断言绑定成功且不降级即可；
-	// 稳定绑回被释放渠道的行为由 TestStressFullLoadThenRelease 的
-	// lastBind 场景覆盖（那里 C 键路径与 freed 渠道有记录约束）。
+	// C 从剩余空闲渠道独占选路，A、B 的渠道均继续被占用。
 	metaC := exclusiveAcquireTestMeta()
 	metaC.KeyFingerprint = "rollback-fp-c"
 	metaC.CacheKey = channelAffinityCacheNamespace + ":exclusive-test-rule:default:rollback-c"
@@ -608,8 +605,9 @@ func TestStressRollbackIsolationBetweenKeys(t *testing.T) {
 	beforeC := degradedReuseTotal()
 	chC, foundC := acquireExclusiveBinding(buildExclusiveAcquireContext(t, metaC), metaC, metaC.UsingGroup, metaC.ModelName)
 	require.True(t, foundC)
-	assert.NotEqual(t, chB, chC, "next key must claim a freed channel, not the still-occupied one")
-	assert.Equal(t, beforeC, degradedReuseTotal(), "exclusive bind after rollback must not degrade")
+	assert.NotEqual(t, chB, chC, "新键应使用剩余空闲渠道")
+	assert.NotEqual(t, chA, chC, "普通失败后的渠道仍被原键占用")
+	assert.Equal(t, beforeC, degradedReuseTotal(), "仍有空闲渠道时保持独占")
 }
 
 // 场景二（Redis 模式真实过期）：正向/占用 TTL 到期后 lastBind 仍存活，

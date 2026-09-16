@@ -23,16 +23,16 @@ import (
 )
 
 const (
-	ginKeyChannelAffinityCacheKey          = "channel_affinity_cache_key"
-	ginKeyChannelAffinityTTLSeconds        = "channel_affinity_ttl_seconds"
-	ginKeyChannelAffinityMeta              = "channel_affinity_meta"
-	ginKeyChannelAffinityLogInfo           = "channel_affinity_log_info"
-	ginKeyChannelAffinitySkipRetry         = "channel_affinity_skip_retry_on_failure"
-	ginKeyChannelAffinityExclusiveDegrade  = "channel_affinity_exclusive_degrade"
-	ginKeyChannelAffinityStorageDegrade    = "channel_affinity_storage_degrade"
-	ginKeyChannelAffinityBoundChannel      = "channel_affinity_bound_channel"
-	ginKeyChannelAffinityFinalFailure      = "channel_affinity_final_failure"
-	ginKeyChannelAffinitySoftPlacement     = "channel_affinity_soft_placement"
+	ginKeyChannelAffinityCacheKey         = "channel_affinity_cache_key"
+	ginKeyChannelAffinityTTLSeconds       = "channel_affinity_ttl_seconds"
+	ginKeyChannelAffinityMeta             = "channel_affinity_meta"
+	ginKeyChannelAffinityLogInfo          = "channel_affinity_log_info"
+	ginKeyChannelAffinitySkipRetry        = "channel_affinity_skip_retry_on_failure"
+	ginKeyChannelAffinityExclusiveDegrade = "channel_affinity_exclusive_degrade"
+	ginKeyChannelAffinityStorageDegrade   = "channel_affinity_storage_degrade"
+	ginKeyChannelAffinityBoundChannel     = "channel_affinity_bound_channel"
+	ginKeyChannelAffinityFinalFailure     = "channel_affinity_final_failure"
+	ginKeyChannelAffinitySoftPlacement    = "channel_affinity_soft_placement"
 
 	channelAffinityCacheNamespace           = "new-api:channel_affinity:v1"
 	channelAffinityUsageCacheStatsNamespace = "new-api:channel_affinity_usage_cache_stats:v1"
@@ -646,6 +646,16 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 			return 0, false
 		}
 		if found {
+			if rule.ExclusiveBind {
+				meta, _ := getChannelAffinityMeta(c)
+				if disabled, releaseErr := releaseDisabledAffinityBinding(meta, channelID); releaseErr != nil {
+					common.SysError(fmt.Sprintf("channel affinity disabled binding release failed: channel=%d err=%v", channelID, releaseErr))
+					// 保留命中结果，让分发器返回不可用，避免存储故障触发随机切换。
+					return channelID, true
+				} else if disabled {
+					return acquireExclusiveBinding(c, meta, usingGroup, modelName)
+				}
+			}
 			// 命中渠道记为首次占位渠道：后续失败切换迁移时从该渠道条目
 			// 移除本键指纹（SSOT 5.2.2 第2条），终态失败也据此回滚。
 			if c != nil {
@@ -674,6 +684,9 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 }
 
 func ShouldSkipRetryAfterChannelAffinityFailure(c *gin.Context) bool {
+	if IsExclusiveChannelAffinity(c) {
+		return true
+	}
 	if c == nil {
 		return false
 	}
@@ -689,6 +702,15 @@ func ShouldSkipRetryAfterChannelAffinityFailure(c *gin.Context) bool {
 		return false
 	}
 	return meta.SkipRetry
+}
+
+// IsExclusiveChannelAffinity 表示本次请求命中了独占亲和规则。
+func IsExclusiveChannelAffinity(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	meta, ok := getChannelAffinityMeta(c)
+	return ok && meta.ExclusiveBind
 }
 
 func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
@@ -906,17 +928,12 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 		ttlSeconds = 3600
 	}
 	cache := getChannelAffinityCache()
-	// 独占规则命中续期的在途回写防护：请求在途期间（流式可达数秒），并发请求的
-	// hop/重绑可能已把正向绑定改向新渠道。本请求携带的渠道是选中瞬间的旧值，
-	// 无条件覆盖会复活旧绑定并无条件重登记占用（旧渠道幽灵占用，污染空闲判定
-	// 形成堆积）。回写前比对正向缓存当前值：已被改向（现值与本请求渠道不一致
-	// 且非首次绑定）时跳过固化与登记，绑定维持胜者结果。软规则不受影响。
-	if c != nil {
-		if meta, metaOK := getChannelAffinityMeta(c); metaOK && meta.ExclusiveBind {
-			if current, found, err := cache.Get(cacheKey); err == nil && found && current > 0 && current != channelID {
-				return
-			}
+	if IsExclusiveChannelAffinity(c) {
+		meta, _ := getChannelAffinityMeta(c)
+		if err := renewExclusiveAffinityBinding(meta, channelID, time.Duration(ttlSeconds)*time.Second); err != nil {
+			common.SysError(fmt.Sprintf("channel affinity exclusive renewal failed: channel=%d err=%v", channelID, err))
 		}
+		return
 	}
 	if err := cache.SetWithTTL(cacheKey, channelID, time.Duration(ttlSeconds)*time.Second); err != nil {
 		common.SysError(fmt.Sprintf("channel affinity cache set failed: key=%s, err=%v", cacheKey, err))
