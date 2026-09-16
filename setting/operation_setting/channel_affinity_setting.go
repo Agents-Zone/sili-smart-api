@@ -2,6 +2,11 @@ package operation_setting
 
 import "github.com/QuantumNous/new-api/setting/config"
 
+const (
+	DefaultChannelAffinityLastBindTTLSeconds = 7 * 24 * 60 * 60
+	MaxChannelAffinityLastBindTTLSeconds     = 365 * 24 * 60 * 60
+)
+
 type ChannelAffinityKeySource struct {
 	Type string `json:"type"` // context_int, context_string, request_header, gjson
 	Key  string `json:"key,omitempty"`
@@ -35,6 +40,7 @@ type ChannelAffinitySetting struct {
 	KeepOnChannelDisabled bool                  `json:"keep_on_channel_disabled"`
 	MaxEntries            int                   `json:"max_entries"`
 	DefaultTTLSeconds     int                   `json:"default_ttl_seconds"`
+	LastBindTTLSeconds    int                   `json:"last_bind_ttl_seconds"`
 	Rules                 []ChannelAffinityRule `json:"rules"`
 }
 
@@ -117,6 +123,7 @@ var channelAffinitySetting = ChannelAffinitySetting{
 	KeepOnChannelDisabled: false,
 	MaxEntries:            100_000,
 	DefaultTTLSeconds:     3600,
+	LastBindTTLSeconds:    DefaultChannelAffinityLastBindTTLSeconds,
 	Rules: []ChannelAffinityRule{
 		{
 			Name:       "codex cli trace",

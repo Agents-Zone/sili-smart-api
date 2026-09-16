@@ -1,5 +1,8 @@
 {
   "translation": {
+    "Previous binding retention (seconds)": "Conservation de la liaison précédente (secondes)",
+    "Previous binding retention must be an integer from 1 to 31536000 seconds": "La durée doit être un entier compris entre 1 et 31536000 secondes",
+    "Default: 7 days; at least twice the binding TTL. After expiry, prefer the previous channel when available and free; otherwise use a free channel, or the least occupied channel when full.": "Par défaut : 7 jours, au moins deux fois le TTL. Après expiration, privilégier le canal précédent disponible et libre ; sinon un canal libre, ou le moins occupé si tous sont utilisés.",
     "360": "360",
     "1000": "1000",
     "10000": "10000",

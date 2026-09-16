@@ -945,7 +945,7 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 	// （SSOT 5.2.4 规则1）。迁移前渠道取本次请求首次占位渠道：>0 即失败切换
 	// 迁移场景，旧渠道移除、迁入豁免独占判定（SSOT 5.1.2 第4条）。
 	// boundChannel 未设置（软规则首绑/正向 TTL 过期后重绑）时回退读最近绑定
-	// 记录（两周期寿命覆盖正向过期窗口）：正向过期后随机重绑到新渠道，旧渠道
+	// 记录（独立保留期覆盖正向过期窗口）：正向过期后随机重绑到新渠道，旧渠道
 	// 上的指纹必须迁移移除，否则占用虚高污染独占判定（残留随活跃键续期永不过期）。
 	if c != nil {
 		meta, metaOK := getChannelAffinityMeta(c)

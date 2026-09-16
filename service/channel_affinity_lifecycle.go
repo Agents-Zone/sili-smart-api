@@ -16,7 +16,7 @@ import (
 var renewExclusiveAffinityScript = redis.NewScript(occupancyEntryPttlLua + `
 if redis.call('GET', KEYS[2]) ~= ARGV[5] then return 0 end
 redis.call('PEXPIRE', KEYS[2], ARGV[2])
-redis.call('SET', KEYS[3], ARGV[6], 'PX', tonumber(ARGV[2]) * 2)
+redis.call('SET', KEYS[3], ARGV[6], 'PX', ARGV[7])
 ` + occupancyAddLua)
 
 // 判断渠道归属与三套数据的清理必须在同一次脚本内完成，避免扫描后改绑被误删。
@@ -138,7 +138,7 @@ func renewExclusiveAffinityBinding(meta channelAffinityMeta, channelID int, ttl 
 		return renewExclusiveAffinityScript.Run(ctx, common.RDB, []string{
 			getChannelAffinityOccupancyCache().FullKey(strconv.Itoa(channelID)),
 			cache.FullKey(suffix), getChannelAffinityLastBindCache().FullKey(suffix),
-		}, meta.KeyFingerprint, ttl.Milliseconds(), time.Now().UnixMilli(), occupancyLegacyMemberTTL().Milliseconds(), strconv.Itoa(channelID), string(record)).Err()
+		}, meta.KeyFingerprint, ttl.Milliseconds(), time.Now().UnixMilli(), occupancyLegacyMemberTTL().Milliseconds(), strconv.Itoa(channelID), string(record), channelAffinityLastBindTTL(ttl).Milliseconds()).Err()
 	}
 	current, found, err := cache.Get(suffix)
 	if err != nil || !found || current != channelID {
@@ -150,5 +150,5 @@ func renewExclusiveAffinityBinding(meta channelAffinityMeta, channelID int, ttl 
 	if err := occupancyAddKeyFP(channelID, meta.KeyFingerprint, ttl); err != nil {
 		return err
 	}
-	return lastBindSet(suffix, channelID, 2*ttl)
+	return lastBindSet(suffix, channelID, channelAffinityLastBindTTL(ttl))
 }

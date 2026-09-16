@@ -613,8 +613,20 @@ func occupancyFallbackTTL() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// lastBindSet 写入最近绑定记录：键与正向缓存键同 suffix（命名空间不同），
-// 值为渠道与绑定时间戳，TTL 由调用方传入（正向绑定两个周期，SSOT 5.2.4 规则2）。
+// channelAffinityLastBindTTL 将历史记录的保留期与有效绑定分开，至少保留两个绑定周期。
+func channelAffinityLastBindTTL(bindingTTL time.Duration) time.Duration {
+	seconds := operation_setting.GetChannelAffinitySetting().LastBindTTLSeconds
+	if seconds <= 0 {
+		seconds = operation_setting.DefaultChannelAffinityLastBindTTLSeconds
+	}
+	// 限制配置换算范围，避免超大秒数溢出 time.Duration。
+	if seconds > operation_setting.MaxChannelAffinityLastBindTTLSeconds {
+		seconds = operation_setting.MaxChannelAffinityLastBindTTLSeconds
+	}
+	return max(2*bindingTTL, time.Duration(seconds)*time.Second)
+}
+
+// lastBindSet 写入最近绑定记录，ttl 为独立保留期，记录本身不占用渠道。
 func lastBindSet(cacheKeySuffix string, channelID int, ttl time.Duration) error {
 	record := channelAffinityLastBindRecord{
 		ChannelID: channelID,
@@ -1065,7 +1077,7 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 	// 任一步失败即回滚正向绑定与占用占位后降级软亲和：残留孤儿正向绑定无占位
 	// 三写配套（终态失败时无 boundChannel 标记可回滚），按独占未生效处理
 	// （SSOT 5.1.5），清除失败记 SysError，残留随 TTL 过期。
-	if err := lastBindSet(cacheKeySuffix, decision.ChannelID, 2*ttl); err != nil {
+	if err := lastBindSet(cacheKeySuffix, decision.ChannelID, channelAffinityLastBindTTL(ttl)); err != nil {
 		common.SysError(fmt.Sprintf("channel affinity last bind write failed: channel=%d key_fp=%s err=%v", decision.ChannelID, meta.KeyFingerprint, err))
 		markChannelAffinityStorageDegrade(c)
 		rollbackBindingPlacement(cache.FullKey(cacheKeySuffix), meta.KeyFingerprint, decision.ChannelID)
@@ -1120,7 +1132,7 @@ func acquireExclusiveBinding(c *gin.Context, meta channelAffinityMeta, usingGrou
 
 // registerBindingIndexes 绑定登记/迁移索引同步（SSOT 5.2.2 第1、2条）：
 // oldChannelID>0 且不等于新渠道为失败切换迁移场景，先从旧渠道条目移除该键；随后
-// 登记新渠道条目（同 TTL），并写入最近绑定记录（两周期）。old==new（亲和命中续期）
+// 登记新渠道条目（同 TTL），并按独立保留期写入最近绑定记录。old==new（亲和命中续期）
 // 直接走登记续期，跳过移除：先删后加会在同渠道制造无锁空闲窗口，并发独占 miss
 // 可借此误占。迁入豁免独占判定：直接登记，不检查新渠道占用（SSOT 5.1.2 第4条）。
 // 任一步失败记 SysError（含渠道与键指纹），不影响请求，残留随 TTL 过期（SSOT 5.1.5）。
@@ -1133,7 +1145,7 @@ func registerBindingIndexes(cacheKeySuffix string, keyFP string, oldChannelID in
 	if err := occupancyAddKeyFP(newChannelID, keyFP, ttl); err != nil {
 		common.SysError(fmt.Sprintf("channel affinity occupancy register failed: channel=%d key_fp=%s err=%v", newChannelID, keyFP, err))
 	}
-	if err := lastBindSet(cacheKeySuffix, newChannelID, 2*ttl); err != nil {
+	if err := lastBindSet(cacheKeySuffix, newChannelID, channelAffinityLastBindTTL(ttl)); err != nil {
 		common.SysError(fmt.Sprintf("channel affinity last bind write failed: channel=%d key_fp=%s err=%v", newChannelID, keyFP, err))
 	}
 }
@@ -1291,7 +1303,7 @@ func removeExclusiveOccupancyBySuffix(channelID int, suffix string) {
 // 的 full key）定位该键的绑定渠道，键指纹由正向键推导（成员级移除，04 文档 §6.2），
 // 随后 lastBindDelete（去正向前缀）。渠道定位次序：boundChannels（调用方在正向
 // DeleteByPrefix 前读出的 suffix→渠道映射，主路径；正向删除后自身已读不到值）、
-// 正向缓存（调用方未删正向时兜底）、lastBind 记录（与正向同批写入、两周期 TTL，
+// 正向缓存（调用方未删正向时兜底）、lastBind 记录（与正向同批写入、独立保留期，
 // 值一致）。边界：渠道无法定位或指纹无法命中的键跳过 occupancy 移除并 SysLog
 // 声明，残留依赖 TTL 收敛（SSOT 5.2.5）；清理失败重试一次，仍失败记 SysError。
 func clearExclusiveRuntimeByForwardKeys(forwardKeys []string, boundChannels map[string]int) {
@@ -1698,7 +1710,7 @@ func rebalanceExclusiveBinding(c *gin.Context, currentChannelID int, usingGroup 
 		_ = occupancyAddKeyFP(currentChannelID, meta.KeyFingerprint, ttl)
 		return currentChannelID
 	}
-	if err := lastBindSet(cacheKeySuffix, placement.ChannelID, 2*ttl); err != nil {
+	if err := lastBindSet(cacheKeySuffix, placement.ChannelID, channelAffinityLastBindTTL(ttl)); err != nil {
 		common.SysError(fmt.Sprintf("channel affinity hop last bind write failed: channel=%d key_fp=%s err=%v", placement.ChannelID, meta.KeyFingerprint, err))
 	}
 	// 迁移后首占渠道更新为 hop 目标：终态失败回滚与后续迁移据此定位。

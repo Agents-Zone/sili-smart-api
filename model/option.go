@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -216,6 +217,12 @@ func SyncOptions(frequency int) {
 }
 
 func validateOptionValue(key string, value string) error {
+	if key == "channel_affinity_setting.last_bind_ttl_seconds" {
+		seconds, err := strconv.Atoi(value)
+		if err != nil || seconds < 1 || seconds > operation_setting.MaxChannelAffinityLastBindTTLSeconds {
+			return errors.New("最近绑定保留时间必须为 1 至 31536000 秒的整数")
+		}
+	}
 	if key == operation_setting.ToolPriceOptionKey {
 		return operation_setting.ValidateToolPricesJSON(value)
 	}
