@@ -935,6 +935,9 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 		}
 		return
 	}
+	lock := channelAffinityBindLock(strings.TrimPrefix(cacheKey, channelAffinityCacheNamespace+":"))
+	lock.Lock()
+	defer lock.Unlock()
 	if err := cache.SetWithTTL(cacheKey, channelID, time.Duration(ttlSeconds)*time.Second); err != nil {
 		common.SysError(fmt.Sprintf("channel affinity cache set failed: key=%s, err=%v", cacheKey, err))
 	}

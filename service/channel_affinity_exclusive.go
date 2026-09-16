@@ -1388,17 +1388,8 @@ func clearExclusiveRuntimeByRuleNamePrefix(ruleName string) (int, error) {
 	return deleted, nil
 }
 
-// ClearChannelAffinityRuntimeByChannelIDs 按渠道同批清除三套运行时数据（三批同清，
-// SSOT 5.2.2 第7条、5.2.4 规则2）：该渠道仍持有的正向绑定、该渠道的反向占用索引
-// 条目与对应键的最近绑定记录。供下游渠道配置变更（渠道批量编辑）在路由相关字段
-// 生效后调用。返回清除的正向绑定条数（口径同 ClearChannelAffinityCacheAll()）。
-// 目标集合为 channelIDs 中 id > 0 的去重集合，为空时零副作用直接返回 0。
-//
-// 键绑定渠道必须在删除正向之前读出（删除后无法再定位该键占用的渠道）；
-// DeleteMany 失败重试一次（SSOT 5.2.5），仍失败仅记 SysError 并继续回放反向数据
-// （正向残留随 TTL 收敛，方向为多清不少清）；回放复用
-// clearExclusiveRuntimeByForwardKeys，按键后缀推导指纹做 occupancy 成员级移除
-// 并批删对应 lastBind。
+// ClearChannelAffinityRuntimeByChannelIDs 扫描正向和历史记录，按渠道条件清理三套数据。
+// 扫描快照只用于定位候选，删除前原子复核当前渠道；返回实际清除的正向绑定数。
 func ClearChannelAffinityRuntimeByChannelIDs(channelIDs []int) int {
 	targets := make(map[int]struct{}, len(channelIDs))
 	for _, id := range channelIDs {
@@ -1409,46 +1400,54 @@ func ClearChannelAffinityRuntimeByChannelIDs(channelIDs []int) int {
 	if len(targets) == 0 {
 		return 0
 	}
-
 	forward := getChannelAffinityCache()
+	history := getChannelAffinityLastBindCache()
+	candidates := make(map[string]int)
 	keys, err := forward.Keys()
 	if err != nil {
-		common.SysError(fmt.Sprintf("channel affinity cache list keys failed: err=%v", err))
-		keys = nil
+		common.SysError(fmt.Sprintf("channel affinity forward scan failed: %v", err))
 	}
-	matched := make([]string, 0, len(keys))
-	boundChannels := make(map[string]int, len(keys))
-	for _, k := range keys {
-		suffix, ok := strings.CutPrefix(k, channelAffinityCacheNamespace+":")
-		if !ok || suffix == "" {
-			continue
-		}
-		channelID, found, err := forward.Get(k)
+	for _, key := range keys {
+		id, found, err := forward.Get(key)
 		if err != nil {
-			common.SysError(fmt.Sprintf("channel affinity forward read failed on clear by channels: key=%s err=%v", k, err))
+			common.SysError(fmt.Sprintf("channel affinity forward read failed: %v", err))
 			continue
 		}
-		if !found || channelID <= 0 {
+		if _, hit := targets[id]; found && hit {
+			candidates[strings.TrimPrefix(key, channelAffinityCacheNamespace+":")] = id
+		}
+	}
+	keys, err = history.Keys()
+	if err != nil {
+		common.SysError(fmt.Sprintf("channel affinity history scan failed: %v", err))
+	}
+	for _, key := range keys {
+		record, found, err := history.Get(key)
+		if err != nil {
+			common.SysError(fmt.Sprintf("channel affinity history read failed: %v", err))
 			continue
 		}
-		if _, hit := targets[channelID]; !hit {
-			continue
+		if _, hit := targets[record.ChannelID]; found && hit {
+			suffix := strings.TrimPrefix(key, channelAffinityLastBindNamespace+":")
+			if _, exists := candidates[suffix]; !exists {
+				candidates[suffix] = record.ChannelID
+			}
 		}
-		matched = append(matched, k)
-		boundChannels[suffix] = channelID
 	}
-	if len(matched) == 0 {
-		return 0
+	deleted := 0
+	for suffix, id := range candidates {
+		err := retryOnce(func() error {
+			removed, err := clearChannelAffinityBinding(suffix, id, "")
+			if removed {
+				deleted++
+			}
+			return err
+		})
+		if err != nil {
+			common.SysError(fmt.Sprintf("channel affinity clear by channel failed: channel=%d key=%s err=%v", id, suffix, err))
+		}
 	}
-
-	if err := retryOnce(func() error {
-		_, err := forward.DeleteMany(matched)
-		return err
-	}); err != nil {
-		common.SysError(fmt.Sprintf("channel affinity forward clear by channels failed: err=%v", err))
-	}
-	clearExclusiveRuntimeByForwardKeys(matched, boundChannels)
-	return len(matched)
+	return deleted
 }
 
 // HandleChannelAffinityRulesUpdate 规则数组保存后的开关联动清空入口
@@ -1670,6 +1669,16 @@ func rebalanceExclusiveBinding(c *gin.Context, currentChannelID int, usingGroup 
 
 	ttl := exclusiveAffinityTTL(meta)
 	cacheKeySuffix := strings.TrimPrefix(meta.CacheKey, channelAffinityCacheNamespace+":")
+	lock := channelAffinityBindLock(cacheKeySuffix)
+	lock.Lock()
+	defer lock.Unlock()
+	current, found, err := getChannelAffinityCache().Get(cacheKeySuffix)
+	if err != nil || !found {
+		return currentChannelID
+	}
+	if current != currentChannelID {
+		return currentChannelID
+	}
 
 	placement, err := occupancyHopLeast(candidates, currentChannelID, meta.KeyFingerprint, ttl, exclusivePickRandom(candidates)-candidates[0])
 	if err != nil {
