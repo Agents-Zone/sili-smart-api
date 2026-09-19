@@ -1273,6 +1273,16 @@ func GetChannelAffinityBindings() ([]ChannelAffinityBinding, error) {
 		}
 		valid := false
 		for _, rule := range setting.Rules {
+			hasTokenIDKeySource := false
+			for _, source := range rule.KeySources {
+				if source.Type == "context_int" && source.Key == "token_id" {
+					hasTokenIDKeySource = true
+					break
+				}
+			}
+			if !hasTokenIDKeySource {
+				continue
+			}
 			idx := 0
 			if rule.IncludeRuleName {
 				if idx >= len(parts) || strings.TrimSpace(rule.Name) == "" || parts[idx] != rule.Name {
