@@ -1,0 +1,35 @@
+feature_id: "P2_CHL_003_FEAT_渠道亲和性绑定查看"
+module_code: "CHL"
+phase: "P2"
+type: "FEAT"
+root_base: null
+base_on: null
+change_group: null
+change_history: []
+dependencies: []
+feature_name: "渠道亲和性绑定查看"
+creator: "lixuetao"
+created_at: "2026-09-19T14:29:48Z"
+updated_at: "2026-09-19T15:24:48Z"
+stages:
+  specs:
+    status: "completed"
+    started_at: "2026-09-19T14:52:19Z"
+    completed_at: "2026-09-19T14:52:19Z"
+    check_owner: "lixuetao"
+  interface:
+    status: "completed"
+    started_at: "2026-09-19T14:52:19Z"
+    completed_at: "2026-09-19T15:10:53Z"
+    check_owner: "lixuetao"
+  dev_plan:
+    status: "completed"
+    started_at: "2026-09-19T15:10:53Z"
+    completed_at: "2026-09-19T15:24:48Z"
+    check_owner: "lixuetao"
+  dev_exec:
+    status: "in_progress"
+    started_at: "2026-09-19T15:24:48Z"
+    completed_at: null
+    check_owner: null
+rollback_history: []
