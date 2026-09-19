@@ -44,6 +44,7 @@ import { useUpdateOption } from '../../hooks/use-update-option'
 import { getCacheStats, clearAllCache, clearRuleCache } from './api'
 import { RULE_TEMPLATES, cloneTemplate, makeUniqueName } from './constants'
 import { RuleEditorDialog } from './rule-editor-dialog'
+import { BindingDetailsDialog } from './binding-details-dialog'
 import type { AffinityRule, CacheStats, ChannelAffinitySettings } from './types'
 
 function parseRules(jsonStr: string): AffinityRule[] {
@@ -174,6 +175,7 @@ export function ChannelAffinitySection(props: Props) {
   const [clearAllDialogOpen, setClearAllDialogOpen] = useState(false)
   const [clearRuleName, setClearRuleName] = useState<string | null>(null)
   const [fillTemplateDialogOpen, setFillTemplateDialogOpen] = useState(false)
+  const [bindingDetailsOpen, setBindingDetailsOpen] = useState(false)
 
   useEffect(() => {
     setEnabled(props.defaultValues['channel_affinity_setting.enabled'])
@@ -598,8 +600,10 @@ export function ChannelAffinitySection(props: Props) {
           </Button>
           {cacheStats && (
             <span className='text-muted-foreground text-xs'>
-              {t('Cache Entries')}: {cacheStats.total} /{' '}
-              {cacheStats.cache_capacity} · {t('Exclusive Bindings')}:{' '}
+              {t('Cache Entries')}:{' '}
+              <button type='button' className='cursor-pointer underline underline-offset-2' aria-label={t('View channel affinity bindings')} onClick={() => setBindingDetailsOpen(true)}>
+                {cacheStats.total}
+              </button>{' '} / {cacheStats.cache_capacity} · {t('Exclusive Bindings')}:{' '}
               {formatStat(cacheStats.exclusive_bindings)} ·{' '}
               {t('Shared Bindings')}: {formatStat(cacheStats.shared_bindings)} ·{' '}
               {t('Degraded Reuse Total')}:{' '}
@@ -738,6 +742,8 @@ export function ChannelAffinitySection(props: Props) {
         )}
       </SettingsSection>
 
+      <BindingDetailsDialog open={bindingDetailsOpen} onOpenChange={setBindingDetailsOpen} />
+
       <RuleEditorDialog
         open={ruleEditorOpen}
         onOpenChange={setRuleEditorOpen}
@@ -780,3 +786,4 @@ export function ChannelAffinitySection(props: Props) {
     </>
   )
 }
+

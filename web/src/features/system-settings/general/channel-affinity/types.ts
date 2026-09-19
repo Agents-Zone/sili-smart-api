@@ -60,3 +60,14 @@ export interface ChannelAffinitySettings {
   'channel_affinity_setting.last_bind_ttl_seconds': number
   'channel_affinity_setting.rules': string
 }
+
+export interface ChannelAffinityToken {
+  token_id: number
+  token_name: string
+}
+
+export interface ChannelAffinityBinding {
+  channel_id: number
+  channel_name: string
+  tokens: ChannelAffinityToken[]
+}
