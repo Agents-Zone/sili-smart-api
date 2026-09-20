@@ -388,7 +388,6 @@ const AUDIT_TEMPLATES: Record<string, string> = {
   'user.oauth_unbind': 'Removed an OAuth binding for the user',
   // System settings
   'option.update': 'Updated system setting {{key}}',
-  'option.payment_compliance': 'Confirmed payment compliance',
   'option.reset_ratio': 'Reset model ratios',
   'option.clear_affinity_cache': 'Cleared channel affinity cache',
   // Custom OAuth
@@ -410,6 +409,8 @@ const AUDIT_TEMPLATES: Record<string, string> = {
   'channel.tag_enable': 'Enabled channels with tag {{tag}}',
   'channel.tag_edit': 'Edited channels with tag {{tag}}',
   'channel.tag_batch_set': 'Batch set tag for {{count}} channels',
+  'channel.update_batch':
+    'Batch updated {{count}} channels (fields: {{updated_fields}})',
   'channel.copy':
     'Copied channel (source ID: {{sourceId}}) to {{name}} (new ID: {{id}})',
   'channel.multi_key_manage':

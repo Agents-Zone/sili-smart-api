@@ -55,6 +55,9 @@ const (
 	MsgTokenExhausted            = "token.exhausted"
 	MsgTokenStatusUnavailable    = "token.status_unavailable"
 	MsgTokenDbError              = "token.db_error"
+	MsgTokenAutoGroupsTooMany    = "token.auto_groups_too_many"
+	MsgTokenAutoGroupsDuplicate  = "token.auto_groups_duplicate"
+	MsgTokenAutoGroupsInvalid    = "token.auto_groups_invalid"
 )
 
 // Redemption related messages
@@ -145,17 +148,16 @@ const (
 
 // Payment related messages
 const (
-	MsgPaymentNotConfigured      = "payment.not_configured"
-	MsgPaymentMethodNotExists    = "payment.method_not_exists"
-	MsgPaymentCallbackError      = "payment.callback_error"
-	MsgPaymentCreateFailed       = "payment.create_failed"
-	MsgPaymentStartFailed        = "payment.start_failed"
-	MsgPaymentAmountTooLow       = "payment.amount_too_low"
-	MsgPaymentStripeNotConfig    = "payment.stripe_not_configured"
-	MsgPaymentWebhookNotConfig   = "payment.webhook_not_configured"
-	MsgPaymentPriceIdNotConfig   = "payment.price_id_not_configured"
-	MsgPaymentCreemNotConfig     = "payment.creem_not_configured"
-	MsgPaymentComplianceRequired = "payment.compliance_required"
+	MsgPaymentNotConfigured    = "payment.not_configured"
+	MsgPaymentMethodNotExists  = "payment.method_not_exists"
+	MsgPaymentCallbackError    = "payment.callback_error"
+	MsgPaymentCreateFailed     = "payment.create_failed"
+	MsgPaymentStartFailed      = "payment.start_failed"
+	MsgPaymentAmountTooLow     = "payment.amount_too_low"
+	MsgPaymentStripeNotConfig  = "payment.stripe_not_configured"
+	MsgPaymentWebhookNotConfig = "payment.webhook_not_configured"
+	MsgPaymentPriceIdNotConfig = "payment.price_id_not_configured"
+	MsgPaymentCreemNotConfig   = "payment.creem_not_configured"
 )
 
 // Topup related messages
@@ -180,6 +182,25 @@ const (
 	MsgChannelNoValidUpstream    = "channel.no_valid_upstream"
 	MsgChannelUpstreamSaturated  = "channel.upstream_saturated"
 	MsgChannelGetAvailableFailed = "channel.get_available_failed"
+
+	// Batch edit (channel.batch_edit.*) messages
+	MsgChannelBatchLimit           = "channel.batch_edit.limit"
+	MsgChannelBatchGroupTooLong    = "channel.batch_edit.group_too_long"
+	MsgChannelBatchGroupInvalid    = "channel.batch_edit.group_invalid"
+	MsgChannelBatchTagTooLong      = "channel.batch_edit.tag_too_long"
+	MsgChannelBatchRemarkTooLong   = "channel.batch_edit.remark_too_long"
+	MsgChannelBatchModelsInvalid   = "channel.batch_edit.models_invalid"
+	MsgChannelBatchModelTooLong    = "channel.batch_edit.model_too_long"
+	MsgChannelBatchMappingEmpty    = "channel.batch_edit.mapping_empty"
+	MsgChannelBatchMappingInvalid  = "channel.batch_edit.mapping_invalid"
+	MsgChannelBatchMappingValues   = "channel.batch_edit.mapping_values_not_string"
+	MsgChannelBatchWeightRange     = "channel.batch_edit.weight_range"
+	MsgChannelBatchTestModelLong   = "channel.batch_edit.test_model_too_long"
+	MsgChannelBatchAutoBanInvalid  = "channel.batch_edit.auto_ban_invalid"
+	MsgChannelBatchNoFields        = "channel.batch_edit.no_fields"
+	MsgChannelBatchFailed          = "channel.batch_edit.failed"
+	MsgChannelBatchUpdateFailed    = "channel.batch_edit.update_failed"
+	MsgChannelBatchAbilitiesFailed = "channel.batch_edit.abilities_failed"
 )
 
 // Model related messages
@@ -321,6 +342,11 @@ const (
 	MsgDistributorNoAvailableChannel      = "distributor.no_available_channel"
 	MsgDistributorInvalidMidjourney       = "distributor.invalid_midjourney_request"
 	MsgDistributorInvalidParseModel       = "distributor.invalid_request_parse_model"
+)
+
+// Conversation related messages
+const (
+	MsgConversationNotFound = "conversation.not_found"
 )
 
 // Custom OAuth provider related messages

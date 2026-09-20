@@ -325,6 +325,30 @@ export interface BatchSetTagParams {
   tag: string | null
 }
 
+export interface BatchUpdateParams {
+  ids: number[]
+  group?: string
+  tag?: string
+  remark?: string
+  models?: string
+  model_mapping?: string
+  weight?: number
+  priority?: number
+  test_model?: string
+  auto_ban?: number // 1=启用 0=停用；省略即不变
+}
+
+export interface BatchUpdateFailure {
+  id: number
+  reason: string
+}
+
+export interface BatchUpdateResult {
+  success: boolean
+  message?: string
+  data?: { count?: number; failed?: BatchUpdateFailure[] }
+}
+
 export interface TagOperationParams {
   tag: string
   new_tag?: string

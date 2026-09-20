@@ -452,32 +452,43 @@ func BatchInsertChannels(channels []Channel) error {
 	return tx.Commit().Error
 }
 
-func BatchDeleteChannels(ids []int) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
+func BatchDeleteChannels(ids []int) ([]int, error) {
+	var deletedIDs []int
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		deletedIDs, err = deleteChannelBatch(tx, ids, false)
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-	// 使用事务 分批删除channel表和abilities表
-	tx := DB.Begin()
-	if tx.Error != nil {
-		return 0, tx.Error
-	}
-	var deletedCount int64
+	return deletedIDs, nil
+}
+
+// 在事务中锁定实际删除目标，供提交后的缓存清理使用。
+func deleteChannelBatch(tx *gorm.DB, ids []int, disabledOnly bool) ([]int, error) {
+	var deletedIDs []int
 	for _, chunk := range lo.Chunk(ids, 200) {
-		result := tx.Where("id in (?)", chunk).Delete(&Channel{})
-		if result.Error != nil {
-			tx.Rollback()
-			return 0, result.Error
+		query := lockForUpdate(tx).Model(&Channel{}).Where("id IN ?", chunk)
+		if disabledOnly {
+			query = query.Where("status IN ?", []int{common.ChannelStatusAutoDisabled, common.ChannelStatusManuallyDisabled})
 		}
-		deletedCount += result.RowsAffected
-		if err := tx.Where("channel_id in (?)", chunk).Delete(&Ability{}).Error; err != nil {
-			tx.Rollback()
-			return 0, err
+		var actualIDs []int
+		if err := query.Pluck("id", &actualIDs).Error; err != nil {
+			return nil, err
 		}
+		if len(actualIDs) == 0 {
+			continue
+		}
+		if err := tx.Where("id IN ?", actualIDs).Delete(&Channel{}).Error; err != nil {
+			return nil, err
+		}
+		if err := tx.Where("channel_id IN ?", actualIDs).Delete(&Ability{}).Error; err != nil {
+			return nil, err
+		}
+		deletedIDs = append(deletedIDs, actualIDs...)
 	}
-	if err := tx.Commit().Error; err != nil {
-		return 0, err
-	}
-	return deletedCount, nil
+	return deletedIDs, nil
 }
 
 func (channel *Channel) GetPriority() int64 {
@@ -878,9 +889,21 @@ func DeleteChannelByStatus(status int64) (int64, error) {
 	return result.RowsAffected, result.Error
 }
 
-func DeleteDisabledChannel() (int64, error) {
-	result := DB.Where("status = ? or status = ?", common.ChannelStatusAutoDisabled, common.ChannelStatusManuallyDisabled).Delete(&Channel{})
-	return result.RowsAffected, result.Error
+func DeleteDisabledChannel() ([]int, error) {
+	var deletedIDs []int
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var ids []int
+		if err := tx.Model(&Channel{}).Where("status IN ?", []int{common.ChannelStatusAutoDisabled, common.ChannelStatusManuallyDisabled}).Pluck("id", &ids).Error; err != nil {
+			return err
+		}
+		var err error
+		deletedIDs, err = deleteChannelBatch(tx, ids, true)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return deletedIDs, nil
 }
 
 func GetPaginatedTags(offset int, limit int) ([]*string, error) {
@@ -1085,6 +1108,203 @@ func BatchSetChannelTag(ids []int, tag *string) error {
 
 	// 提交事务
 	return tx.Commit().Error
+}
+
+// ChannelBatchEditFields 批量编辑的生效字段，nil 表示未填写（保持各渠道原值）。
+type ChannelBatchEditFields struct {
+	Group        *string
+	Tag          *string
+	Remark       *string
+	Models       *string
+	ModelMapping *string
+	Weight       *uint
+	Priority     *int64
+	TestModel    *string
+	AutoBan      *int
+}
+
+// channelBatchEditColumns 批量编辑字段元数据表：列名、路由标记与字段访问器。
+// EffectiveColumns/ColumnValues/AnySet/AffectsAbilities/assignTo 均由此派生，
+// 新增字段只需在表里加一行。
+type channelBatchEditColumn struct {
+	name    string                                  // DB 列名，也是审计 values 的键
+	routing bool                                    // 是否为路由相关列，变更需重建 abilities
+	value   func(*ChannelBatchEditFields) any       // 解引用后的生效值；未填写为 nil
+	assign  func(*Channel, *ChannelBatchEditFields) // 把生效值写回渠道内存对象
+}
+
+// batchEditColumn 由单一字段选择器生成一行元数据：取值与回写共用同一类型参数，
+// 字段改名或改类型都在编译期暴露。分开手写三份 switch 则漏改不会报错，漏 value
+// 会把整列写成 NULL，漏 assign 会让 UpdateAbilities 用旧值重建索引。
+func batchEditColumn[T any](
+	name string,
+	routing bool,
+	pick func(*ChannelBatchEditFields) *T,
+	assign func(*Channel, *T),
+) channelBatchEditColumn {
+	return channelBatchEditColumn{
+		name:    name,
+		routing: routing,
+		value: func(f *ChannelBatchEditFields) any {
+			if v := pick(f); v != nil {
+				return *v
+			}
+			return nil
+		},
+		assign: func(c *Channel, f *ChannelBatchEditFields) {
+			if v := pick(f); v != nil {
+				assign(c, v)
+			}
+		},
+	}
+}
+
+var channelBatchEditColumns = []channelBatchEditColumn{
+	batchEditColumn("group", true,
+		func(f *ChannelBatchEditFields) *string { return f.Group },
+		func(c *Channel, v *string) { c.Group = *v }),
+	batchEditColumn("tag", true,
+		func(f *ChannelBatchEditFields) *string { return f.Tag },
+		func(c *Channel, v *string) { c.Tag = v }),
+	batchEditColumn("remark", false,
+		func(f *ChannelBatchEditFields) *string { return f.Remark },
+		func(c *Channel, v *string) { c.Remark = v }),
+	batchEditColumn("models", true,
+		func(f *ChannelBatchEditFields) *string { return f.Models },
+		func(c *Channel, v *string) { c.Models = *v }),
+	batchEditColumn("model_mapping", false,
+		func(f *ChannelBatchEditFields) *string { return f.ModelMapping },
+		func(c *Channel, v *string) { c.ModelMapping = v }),
+	batchEditColumn("weight", true,
+		func(f *ChannelBatchEditFields) *uint { return f.Weight },
+		func(c *Channel, v *uint) { c.Weight = v }),
+	batchEditColumn("priority", true,
+		func(f *ChannelBatchEditFields) *int64 { return f.Priority },
+		func(c *Channel, v *int64) { c.Priority = v }),
+	batchEditColumn("test_model", false,
+		func(f *ChannelBatchEditFields) *string { return f.TestModel },
+		func(c *Channel, v *string) { c.TestModel = v }),
+	batchEditColumn("auto_ban", false,
+		func(f *ChannelBatchEditFields) *int { return f.AutoBan },
+		func(c *Channel, v *int) { c.AutoBan = v }),
+}
+
+// EffectiveColumns 按声明顺序返回已填写字段的列名，供审计 updated_fields 派生。
+func (f ChannelBatchEditFields) EffectiveColumns() []string {
+	columns := make([]string, 0, len(channelBatchEditColumns))
+	for _, col := range channelBatchEditColumns {
+		if col.value(&f) != nil {
+			columns = append(columns, col.name)
+		}
+	}
+	return columns
+}
+
+// ColumnValues 返回列名→生效值，既是渠道行 UPDATE 的 SET map，也是审计 values
+// 的来源，两者天然同源。
+func (f ChannelBatchEditFields) ColumnValues() map[string]any {
+	values := make(map[string]any, len(channelBatchEditColumns))
+	for _, col := range channelBatchEditColumns {
+		if v := col.value(&f); v != nil {
+			values[col.name] = v
+		}
+	}
+	return values
+}
+
+// assignTo 把生效值写回渠道内存对象：UpdateAbilities 取自对象字段而非 DB 读，
+// 漏回写会用旧值重建 abilities。
+func (f ChannelBatchEditFields) assignTo(channel *Channel) {
+	for _, col := range channelBatchEditColumns {
+		col.assign(channel, &f)
+	}
+}
+
+// AnySet 报告是否至少填写一个字段。
+func (f ChannelBatchEditFields) AnySet() bool {
+	for _, col := range channelBatchEditColumns {
+		if col.value(&f) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// AffectsAbilities 报告生效字段是否涉及路由相关列（03 文档 2.2 路由标记）。
+func (f ChannelBatchEditFields) AffectsAbilities() bool {
+	for _, col := range channelBatchEditColumns {
+		if col.routing && col.value(&f) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// 批量编辑触发回滚的失败环节，controller 据此翻译为面向用户的文案；
+// 原始驱动错误只进服务端日志，不外发给客户端（03 文档 2.3）。
+const (
+	BatchFailureUpdateChannels = "update_channels"
+	BatchFailureSyncAbilities  = "sync_abilities"
+)
+
+// ChannelBatchUpdateFailure 触发事务回滚的失败渠道。
+type ChannelBatchUpdateFailure struct {
+	Id   int    // 触发回滚的渠道 ID
+	Kind string // 失败环节
+	Err  error  // 原始错误，仅服务端日志使用
+}
+
+// BatchUpdateChannels 在单个事务内逐渠道写入生效列并按需重建 abilities，全成全败。
+// 返回实际更新的渠道 ID（ids 中不存在的渠道跳过）、触发回滚的失败渠道（成功为 nil）、错误。
+func BatchUpdateChannels(ids []int, fields ChannelBatchEditFields) ([]int, *ChannelBatchUpdateFailure, error) {
+	if len(ids) == 0 {
+		return nil, nil, nil
+	}
+
+	tx := DB.Begin()
+	if tx.Error != nil {
+		return nil, nil, tx.Error
+	}
+
+	// 事务内加锁读目标渠道：无锁快照会在 abilities 重建时覆盖并发提交的路由变更；
+	// 按 id 排序使串行执行的首个失败渠道稳定可复现
+	var channels []*Channel
+	if err := lockForUpdate(tx).Where("id in (?)", ids).Order("id").Find(&channels).Error; err != nil {
+		tx.Rollback()
+		return nil, nil, err
+	}
+	if len(channels) == 0 {
+		tx.Rollback()
+		return nil, nil, nil
+	}
+
+	// SET 值与具体渠道无关，算一次即可；写库与 abilities 重建逐渠道进行，
+	// 使失败明细能精确指向触发回滚的渠道（03 文档 2.3）
+	updates := fields.ColumnValues()
+	rebuildAbilities := fields.AffectsAbilities()
+	updatedIds := make([]int, 0, len(channels))
+	for _, channel := range channels {
+		fields.assignTo(channel)
+		if len(updates) > 0 {
+			if err := tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(updates).Error; err != nil {
+				tx.Rollback()
+				return nil, &ChannelBatchUpdateFailure{Id: channel.Id, Kind: BatchFailureUpdateChannels, Err: err}, err
+			}
+		}
+		// 路由相关字段生效时重建该渠道的 (group,model) 索引行，删除重插顺带清理陈旧行
+		if rebuildAbilities {
+			if err := channel.UpdateAbilities(tx); err != nil {
+				tx.Rollback()
+				return nil, &ChannelBatchUpdateFailure{Id: channel.Id, Kind: BatchFailureSyncAbilities, Err: err}, err
+			}
+		}
+		updatedIds = append(updatedIds, channel.Id)
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return nil, nil, err
+	}
+	return updatedIds, nil, nil
 }
 
 // CountAllChannels returns total channels in DB

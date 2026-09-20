@@ -1,8 +1,10 @@
 package model
 
 import (
+	"errors"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -120,6 +122,7 @@ func InitOptionMap() {
 	common.OptionMap["Chats"] = setting.Chats2JsonString()
 	common.OptionMap["AutoGroups"] = setting.AutoGroups2JsonString()
 	common.OptionMap["DefaultUseAutoGroup"] = strconv.FormatBool(setting.DefaultUseAutoGroup)
+	common.OptionMap["MaxTokenAutoGroups"] = strconv.Itoa(setting.GetMaxTokenAutoGroups())
 	common.OptionMap["PayMethods"] = operation_setting.PayMethods2JsonString()
 	common.OptionMap["GitHubClientId"] = ""
 	common.OptionMap["GitHubClientSecret"] = ""
@@ -186,7 +189,16 @@ func InitOptionMap() {
 	loadOptionsFromDatabase()
 }
 
+// optionsLoadedFromDB 标记当前处于数据库加载阶段（启动首扫或周期同步）。
+// channel_affinity_setting.rules 的开关联动钩子在该阶段跳过：启动首扫时内存配置
+// 仍是内置默认，与库值比对会把"进程重启"误判为"开关变化"，错误触发独占运行时
+// 清空（多节点部署下即单节点重启清空全集群）。周期同步稳态 old==new 本就不触发；
+// 跨节点变更经保存节点的钩子执行，清空作用于共享 Redis，无需本节点重复联动。
+var optionsLoadedFromDB atomic.Bool
+
 func loadOptionsFromDatabase() {
+	optionsLoadedFromDB.Store(true)
+	defer optionsLoadedFromDB.Store(false)
 	options, _ := AllOption()
 	for _, option := range options {
 		err := updateOptionMap(option.Key, option.Value)
@@ -205,8 +217,17 @@ func SyncOptions(frequency int) {
 }
 
 func validateOptionValue(key string, value string) error {
+	if key == "channel_affinity_setting.last_bind_ttl_seconds" {
+		seconds, err := strconv.Atoi(value)
+		if err != nil || seconds < 1 || seconds > operation_setting.MaxChannelAffinityLastBindTTLSeconds {
+			return errors.New("最近绑定保留时间必须为 1 至 31536000 秒的整数")
+		}
+	}
 	if key == operation_setting.ToolPriceOptionKey {
 		return operation_setting.ValidateToolPricesJSON(value)
+	}
+	if key == "MaxTokenAutoGroups" {
+		return setting.ValidateMaxTokenAutoGroups(value)
 	}
 	return nil
 }
@@ -413,6 +434,8 @@ func updateOptionMap(key string, value string) (err error) {
 		err = setting.UpdateChatsByJsonString(value)
 	case "AutoGroups":
 		err = setting.UpdateAutoGroupsByJsonString(value)
+	case "MaxTokenAutoGroups":
+		err = setting.UpdateMaxTokenAutoGroups(value)
 	case "CustomCallbackAddress":
 		operation_setting.CustomCallbackAddress = value
 	case "EpayId":
@@ -618,6 +641,13 @@ func handleConfigUpdate(key, value string) bool {
 		return false // 未注册的配置
 	}
 
+	// channel_affinity_setting.rules 在覆盖前读旧值，供 exclusive_bind 变化的
+	// 联动清空比对（SSOT 4.1.4 规则1；经 operation_setting 钩子解耦，避免 model→service 环）。
+	oldAffinityRules := ""
+	if configName == "channel_affinity_setting" && configKey == "rules" {
+		oldAffinityRules = readChannelAffinityRulesJSON(cfg)
+	}
+
 	// 更新配置
 	configMap := map[string]string{
 		configKey: value,
@@ -630,7 +660,28 @@ func handleConfigUpdate(key, value string) bool {
 	} else if configName == "billing_setting" {
 		InvalidatePricingCache()
 		ratio_setting.InvalidateExposedDataCache()
+	} else if configName == "channel_affinity_setting" && configKey == "rules" {
+		// 启动/周期同步的数据库加载阶段跳过联动：此时"旧值"是进程内置默认或
+		// 上一轮同步值，与库值比对不代表用户开关操作（误触发会清空独占运行时数据）。
+		if !optionsLoadedFromDB.Load() && operation_setting.OnRulesExclusiveBindChanged != nil {
+			operation_setting.OnRulesExclusiveBindChanged(oldAffinityRules, value)
+		}
 	}
 
 	return true // 已处理
+}
+
+// readChannelAffinityRulesJSON 读配置对象当前 rules 字段并序列化为 JSON 串
+// （cfg 为 config.GlobalConfig.Get 返回的 interface{}，按具体类型断言取值）；
+// 类型不匹配时返回空串（联动入口按解析失败静默返回）。
+func readChannelAffinityRulesJSON(cfg interface{}) string {
+	if cfg == nil {
+		return ""
+	}
+	if affinityCfg, ok := cfg.(*operation_setting.ChannelAffinitySetting); ok {
+		if data, err := common.Marshal(affinityCfg.Rules); err == nil {
+			return string(data)
+		}
+	}
+	return ""
 }

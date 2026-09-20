@@ -2,6 +2,11 @@ package operation_setting
 
 import "github.com/QuantumNous/new-api/setting/config"
 
+const (
+	DefaultChannelAffinityLastBindTTLSeconds = 7 * 24 * 60 * 60
+	MaxChannelAffinityLastBindTTLSeconds     = 365 * 24 * 60 * 60
+)
+
 type ChannelAffinityKeySource struct {
 	Type string `json:"type"` // context_int, context_string, request_header, gjson
 	Key  string `json:"key,omitempty"`
@@ -25,6 +30,8 @@ type ChannelAffinityRule struct {
 	IncludeUsingGroup bool `json:"include_using_group"`
 	IncludeModelName  bool `json:"include_model_name"`
 	IncludeRuleName   bool `json:"include_rule_name"`
+
+	ExclusiveBind bool `json:"exclusive_bind"`
 }
 
 type ChannelAffinitySetting struct {
@@ -33,6 +40,7 @@ type ChannelAffinitySetting struct {
 	KeepOnChannelDisabled bool                  `json:"keep_on_channel_disabled"`
 	MaxEntries            int                   `json:"max_entries"`
 	DefaultTTLSeconds     int                   `json:"default_ttl_seconds"`
+	LastBindTTLSeconds    int                   `json:"last_bind_ttl_seconds"`
 	Rules                 []ChannelAffinityRule `json:"rules"`
 }
 
@@ -115,6 +123,7 @@ var channelAffinitySetting = ChannelAffinitySetting{
 	KeepOnChannelDisabled: false,
 	MaxEntries:            100_000,
 	DefaultTTLSeconds:     3600,
+	LastBindTTLSeconds:    DefaultChannelAffinityLastBindTTLSeconds,
 	Rules: []ChannelAffinityRule{
 		{
 			Name:       "codex cli trace",
@@ -156,3 +165,8 @@ func init() {
 func GetChannelAffinitySetting() *ChannelAffinitySetting {
 	return &channelAffinitySetting
 }
+
+// OnRulesExclusiveBindChanged 为 rules 配置更新的联动钩子（SSOT 4.1.4 规则1）：
+// model 包 handleConfigUpdate 在配置覆盖后以旧/新 JSON 调用。model 依赖 service
+// 会成环，故经本包暴露回调，由 service 包 init 注册实现，默认 nil 时跳过联动。
+var OnRulesExclusiveBindChanged func(oldJSON, newJSON string)

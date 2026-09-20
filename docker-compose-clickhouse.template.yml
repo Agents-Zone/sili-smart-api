@@ -1,0 +1,101 @@
+# sili-smart-api 编排（PostgreSQL 主库 + ClickHouse 日志库）
+#
+# 数据分工：
+#   - 主库 PostgreSQL：业务数据（用户、令牌、渠道、配额等）
+#   - 日志库 ClickHouse：消费日志（logs 表）与对话内容记录（conversation_turns 表）
+#
+# 前置：先打包镜像（版本号 = 当日日期，build.sh 会自动写入 .env 里的 TAG）：
+#   bash build.sh
+# 随后启动：
+#   docker compose -f docker-compose-clickhouse.yml up -d
+#
+# ⚠️ 生产部署请修改所有默认密码（postgres / redis / clickhouse）。
+
+services:
+  sili-smart-api:
+    image: sili/sili-smart-api:${TAG:-local}
+    container_name: sili-smart-api
+    restart: always
+    command: --log-dir /app/logs
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+    environment:
+      # 主库：业务数据
+      - SQL_DSN=postgresql://root:123456@postgres:5432/new-api
+      # 日志库：logs 与 conversation_turns 共用 ClickHouse
+      - LOG_SQL_DSN=clickhouse://default:123456@clickhouse:9000/new_api_logs
+      - LOG_SQL_CLICKHOUSE_TTL_DAYS=0              # logs 表保留天数（0/未设=永久，负值归 0）
+      - LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS=60     # conversation_turns 表保留天数（与 logs 独立，不回退）
+      - CONVERSATION_LOG_ENABLED=true               # 对话内容记录总开关（需配 LOG_SQL_DSN 指向 ClickHouse，否则不生效）
+      # 集成密钥通道：CONVERSATION_LOG_ENABLED=true 时必填，否则启动 FatalLog 退出。
+      # 分析平台经 Authorization: Bearer <key> 拉取 /api/conversation-log；经 .env 或部署环境注入，不进库不下发前端。
+      - CONVERSATION_LOG_INTEGRATION_KEY=${CONVERSATION_LOG_INTEGRATION_KEY:-sk-conv-log-please-change-me}
+      - REDIS_CONN_STRING=redis://:123456@redis:6379
+      - TZ=Asia/Shanghai
+      - ERROR_LOG_ENABLED=true
+      - BATCH_UPDATE_ENABLED=true
+      - NODE_NAME=sili-smart-api-node-1
+      - SEARCH_RATE_LIMIT_ENABLE=false
+      - GODEBUG=http2client=0
+    depends_on:
+      - redis
+      - postgres
+      - clickhouse
+    networks:
+      - sili-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/status | grep -o '\"success\":\\s*true' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:latest
+    container_name: sili-redis
+    restart: always
+    command: ["redis-server", "--requirepass", "123456"]
+    networks:
+      - sili-network
+
+  postgres:
+    image: postgres:15
+    container_name: sili-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: 123456
+      POSTGRES_DB: new-api
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - sili-network
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: sili-clickhouse
+    restart: always
+    environment:
+      CLICKHOUSE_DB: new_api_logs
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: 123456
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    networks:
+      - sili-network
+    # 默认暴露 8123(HTTP)/9000(Native)，供外部工具（DBeaver、clickhouse-client 等）查询日志库；
+    # new-api 容器经 sili-network 直连 clickhouse:9000，不依赖此映射。生产无需外部访问时可注释。
+    ports:
+      - "8123:8123"   # HTTP 接口（DBeaver、HTTP 查询）
+      - "9000:9000"   # Native 接口（clickhouse-client、LOG_SQL_DSN）
+
+volumes:
+  pg_data:
+  clickhouse_data:
+
+networks:
+  sili-network:
+    driver: bridge

@@ -37,7 +37,16 @@ skills-lock.json
 
 # Local-only live probes and scratch test workspaces.
 .local-tests/
+.worktrees/
 service/relayconvert/chat_responses_live_local_test.go
 service/openaicompat/chat_responses_live_local_test.go
 go.work
 go.work.sum
+
+# 构建生成的固化解（image tag 已写死，不入库）
+/docker-compose-clickhouse.yml
+# 离线交付镜像 tar
+/release/
+
+# 迁移脚本本地连接配置（含生产密码，不入库）
+/scripts/.migrate.env

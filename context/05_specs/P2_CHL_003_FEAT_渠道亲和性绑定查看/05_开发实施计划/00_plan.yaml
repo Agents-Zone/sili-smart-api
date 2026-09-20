@@ -1,0 +1,13 @@
+feature_id: "P2_CHL_003_FEAT_渠道亲和性绑定查看"
+name: "渠道亲和性绑定查看"
+created_at: "2026-09-19"
+finalized: true
+
+sub_plans:
+  - id: "01"
+    name: "绑定明细查看"
+    file: "01_绑定明细查看.md"
+    status: "completed"
+
+execution_order:
+  - "01"

@@ -39,17 +39,6 @@ export type UpdateOptionResponse = {
   message: string
 }
 
-export type ConfirmPaymentComplianceResponse = {
-  success: boolean
-  message: string
-  data?: {
-    confirmed: boolean
-    terms_version: string
-    confirmed_at: number
-    confirmed_by: number
-  }
-}
-
 export type SystemTaskStatus = 'pending' | 'running' | 'succeeded' | 'failed'
 
 export type SystemTask<
@@ -223,6 +212,7 @@ export type ModelSettings = {
   UserUsableGroups: string
   GroupGroupRatio: string
   AutoGroups: string
+  MaxTokenAutoGroups: number
   DefaultUseAutoGroup: boolean
   'group_ratio_setting.group_special_usable_group': string
   RetryTimes: number
@@ -240,6 +230,7 @@ export type ModelSettings = {
   'channel_affinity_setting.keep_on_channel_disabled': boolean
   'channel_affinity_setting.max_entries': number
   'channel_affinity_setting.default_ttl_seconds': number
+  'channel_affinity_setting.last_bind_ttl_seconds': number
   'channel_affinity_setting.rules': string
   'model_deployment.ionet.api_key': string
   'model_deployment.ionet.enabled': boolean
@@ -277,6 +268,7 @@ export type BillingSettings = {
   UserUsableGroups: string
   GroupGroupRatio: string
   AutoGroups: string
+  MaxTokenAutoGroups: number
   DefaultUseAutoGroup: boolean
   'group_ratio_setting.group_special_usable_group': string
   PayAddress: string
@@ -288,11 +280,6 @@ export type BillingSettings = {
   PayMethods: string
   'payment_setting.amount_options': string
   'payment_setting.amount_discount': string
-  'payment_setting.compliance_confirmed': boolean
-  'payment_setting.compliance_terms_version': string
-  'payment_setting.compliance_confirmed_at': number
-  'payment_setting.compliance_confirmed_by': number
-  'payment_setting.compliance_confirmed_ip': string
   StripeApiSecret: string
   StripeWebhookSecret: string
   StripePriceId: string

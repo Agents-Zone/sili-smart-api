@@ -427,6 +427,8 @@ Token、Origin 校验和 PAT 契约见[用户鉴权与登录会话](./docs/authe
 - `REDIS_CONN_STRING`：Redis 缓存（推荐）
 - `MEMORY_CACHE_ENABLED`：内存缓存
 
+渠道独占绑定依赖运行时共享缓存：多实例部署且未启用 Redis（内存缓存模式）时，反向占用索引与原子占位在实例间不可见，独占判定与先到先得语义退化为现有软亲和。需要跨实例独占时，请配置 Redis（`REDIS_CONN_STRING`）。
+
 ---
 
 ## 🔗 相关项目

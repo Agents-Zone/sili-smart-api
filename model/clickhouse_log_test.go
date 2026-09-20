@@ -90,6 +90,31 @@ func TestClickHouseLogCreateTableSQL(t *testing.T) {
 	assert.Contains(t, withTTL, "TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE")
 }
 
+// TestClickHouseConversationTTLDays 守护 conversation_turns 表独立 TTL 配置的归一规则与
+// 与 logs 配置彻底解耦的契约：默认 0、正值照读、负值归 0，且不回退 LOG_SQL_CLICKHOUSE_TTL_DAYS。
+func TestClickHouseConversationTTLDays(t *testing.T) {
+	cases := []struct {
+		name         string
+		conversation string // LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS 的值，空串等价未配置
+		logs         string // LOG_SQL_CLICKHOUSE_TTL_DAYS 的值，仅用于验证不回退
+		want         int
+	}{
+		{"unset defaults to zero", "", "", 0},
+		{"explicit zero", "0", "", 0},
+		{"positive passthrough", "45", "", 45},
+		{"negative clamps to zero", "-7", "", 0},
+		{"does not fall back to logs TTL", "", "30", 0},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("LOG_CONVERSATION_CLICKHOUSE_TTL_DAYS", c.conversation)
+			t.Setenv("LOG_SQL_CLICKHOUSE_TTL_DAYS", c.logs)
+			assert.Equal(t, c.want, clickHouseConversationTTLDays())
+		})
+	}
+}
+
 func TestClickHouseCreateTableHasTTL(t *testing.T) {
 	assert.True(t, clickHouseCreateTableHasTTL("CREATE TABLE logs (...)\nTTL toDateTime(created_at) + INTERVAL 30 DAY DELETE"))
 	assert.True(t, clickHouseCreateTableHasTTL("CREATE TABLE logs (...) TTL toDateTime(created_at)"))

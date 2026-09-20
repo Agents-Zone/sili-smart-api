@@ -17,6 +17,27 @@ func GetChannelAffinityCacheStats(c *gin.Context) {
 	})
 }
 
+// GetChannelAffinityBindings returns the current channel affinity bindings.
+// Authorization is provided by the parent option route's RootAuth middleware.
+func GetChannelAffinityBindings(c *gin.Context) {
+	bindings, err := service.GetChannelAffinityBindings()
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "渠道亲和性绑定读取失败",
+		})
+		return
+	}
+	if bindings == nil {
+		bindings = []service.ChannelAffinityBinding{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    bindings,
+	})
+}
+
 func ClearChannelAffinityCache(c *gin.Context) {
 	all := strings.TrimSpace(c.Query("all"))
 	ruleName := strings.TrimSpace(c.Query("rule_name"))

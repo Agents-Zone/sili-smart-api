@@ -117,14 +117,31 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		} else {
 			newAPIError = types.NewError(err, types.ErrorCodeInvalidRequest)
 		}
+		// 占位已在 distributor 写入，请求解析失败同样属终态失败，需回滚。
+		service.RollbackChannelAffinityOnFinalFailure(c)
 		return
 	}
 
 	relayInfo, err := relaycommon.GenRelayInfo(c, relayFormat, request, ws)
 	if err != nil {
 		newAPIError = types.NewError(err, types.ErrorCodeGenRelayInfoFailed)
+		service.RollbackChannelAffinityOnFinalFailure(c)
 		return
 	}
+
+	// 终态失败回滚统一收口在 defer 内：覆盖 relayInfo 就绪后（敏感词/计token/
+	// 定价/预扣费/重试循环）的全部失败 return。Refund/违规费内部各自幂等，
+	// 无预扣时为空操作。
+	defer func() {
+		if newAPIError != nil {
+			service.RollbackChannelAffinityOnFinalFailure(c)
+			newAPIError = service.NormalizeViolationFeeError(newAPIError)
+			if relayInfo.Billing != nil {
+				relayInfo.Billing.Refund(c)
+			}
+			service.ChargeViolationFeeIfNeeded(c, relayInfo, newAPIError)
+		}
+	}()
 
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
 	needCountToken := constant.CountToken
@@ -170,17 +187,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 	}
 
-	defer func() {
-		// Only return quota if downstream failed and quota was actually pre-consumed
-		if newAPIError != nil {
-			newAPIError = service.NormalizeViolationFeeError(newAPIError)
-			if relayInfo.Billing != nil {
-				relayInfo.Billing.Refund(c)
-			}
-			service.ChargeViolationFeeIfNeeded(c, relayInfo, newAPIError)
-		}
-	}()
-
 	retryParam := &service.RetryParam{
 		Ctx:         c,
 		TokenGroup:  relayInfo.TokenGroup,
@@ -199,8 +205,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = channelErr
 			break
 		}
-
 		addUsedChannel(c, channel.Id)
+		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
+			newAPIError = billingErr
+			break
+		}
+
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
 			// Ensure consistent 413 for oversized bodies even when error occurs later (e.g., retry path)
@@ -308,15 +318,14 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		}, nil
 	}
 	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
-
-	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
-
 	if err != nil {
 		return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", selectGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 	if channel == nil {
 		return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
+
+	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
 
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
 	if newAPIError != nil {
@@ -406,8 +415,9 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 
 func RelayMidjourney(c *gin.Context) {
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatMjProxy, nil, nil)
-
 	if err != nil {
+		// 终态失败：回滚独占占位后输出错误（无亲和 meta 时回滚内部直接返回）。
+		service.RollbackChannelAffinityOnFinalFailure(c)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"description": fmt.Sprintf("failed to generate relay info: %s", err.Error()),
 			"type":        "upstream_error",
@@ -444,6 +454,8 @@ func RelayMidjourney(c *gin.Context) {
 		})
 		channelId := c.GetInt("channel_id")
 		logger.LogError(c, fmt.Sprintf("relay error (channel #%d, status code %d): %s", channelId, statusCode, fmt.Sprintf("%s %s", mjErr.Description, mjErr.Result)))
+		// 终态失败：回滚独占占位（无亲和 meta 时内部直接返回）。
+		service.RollbackChannelAffinityOnFinalFailure(c)
 	}
 }
 
@@ -489,6 +501,8 @@ func RelayTaskFetch(c *gin.Context) {
 func RelayTask(c *gin.Context) {
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
+		// 终态失败：回滚独占占位后输出错误（无亲和 meta 时回滚内部直接返回）。
+		service.RollbackChannelAffinityOnFinalFailure(c)
 		c.JSON(http.StatusInternalServerError, &taskdto.TaskError{
 			Code:       "gen_relay_info_failed",
 			Message:    err.Error(),
@@ -498,6 +512,7 @@ func RelayTask(c *gin.Context) {
 	}
 
 	if taskErr := relay.ResolveOriginTask(c, relayInfo); taskErr != nil {
+		service.RollbackChannelAffinityOnFinalFailure(c)
 		respondTaskError(c, taskErr)
 		return
 	}
@@ -604,6 +619,8 @@ func RelayTask(c *gin.Context) {
 	}
 
 	if taskErr != nil {
+		// 终态失败：回滚独占占位（无亲和 meta 时内部直接返回）。
+		service.RollbackChannelAffinityOnFinalFailure(c)
 		respondTaskError(c, taskErr)
 	}
 }

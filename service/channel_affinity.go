@@ -4,27 +4,37 @@ import (
 	"fmt"
 	"hash/fnv"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/cachex"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/samber/hot"
 	"github.com/tidwall/gjson"
 )
 
 const (
-	ginKeyChannelAffinityCacheKey   = "channel_affinity_cache_key"
-	ginKeyChannelAffinityTTLSeconds = "channel_affinity_ttl_seconds"
-	ginKeyChannelAffinityMeta       = "channel_affinity_meta"
-	ginKeyChannelAffinityLogInfo    = "channel_affinity_log_info"
-	ginKeyChannelAffinitySkipRetry  = "channel_affinity_skip_retry_on_failure"
+	ginKeyChannelAffinityCacheKey         = "channel_affinity_cache_key"
+	ginKeyChannelAffinityTTLSeconds       = "channel_affinity_ttl_seconds"
+	ginKeyChannelAffinityMeta             = "channel_affinity_meta"
+	ginKeyChannelAffinityLogInfo          = "channel_affinity_log_info"
+	ginKeyChannelAffinitySkipRetry        = "channel_affinity_skip_retry_on_failure"
+	ginKeyChannelAffinityExclusiveDegrade = "channel_affinity_exclusive_degrade"
+	ginKeyChannelAffinityStorageDegrade   = "channel_affinity_storage_degrade"
+	ginKeyChannelAffinityBoundChannel     = "channel_affinity_bound_channel"
+	ginKeyChannelAffinityFinalFailure     = "channel_affinity_final_failure"
+	ginKeyChannelAffinitySoftPlacement    = "channel_affinity_soft_placement"
 
 	channelAffinityCacheNamespace           = "new-api:channel_affinity:v1"
 	channelAffinityUsageCacheStatsNamespace = "new-api:channel_affinity_usage_cache_stats:v1"
@@ -54,6 +64,7 @@ type channelAffinityMeta struct {
 	UsingGroup     string
 	ModelName      string
 	RequestPath    string
+	ExclusiveBind  bool
 }
 
 type ChannelAffinityStatsContext struct {
@@ -76,6 +87,12 @@ type ChannelAffinityCacheStats struct {
 	ByRuleName    map[string]int `json:"by_rule_name"`
 	CacheCapacity int            `json:"cache_capacity"`
 	CacheAlgo     string         `json:"cache_algo"`
+	// 三指标为向后兼容扩展（SSOT 4.2.2、5.3.2 第3条、5.3.4 规则2）：
+	// exclusive/shared 按反向占用索引实时统计（4.2.4 规则1，跨规则全局口径），
+	// degraded 为进程启动累计降级次数（重启清零）。
+	ExclusiveBindings  int    `json:"exclusive_bindings"`
+	SharedBindings     int    `json:"shared_bindings"`
+	DegradedReuseTotal uint64 `json:"degraded_reuse_total"`
 }
 
 func getChannelAffinityCache() *cachex.HybridCache[int] {
@@ -92,7 +109,10 @@ func getChannelAffinityCache() *cachex.HybridCache[int] {
 
 		channelAffinityCache = cachex.NewHybridCache[int](cachex.HybridCacheConfig[int]{
 			Namespace: cachex.Namespace(channelAffinityCacheNamespace),
-			Redis:     common.RDB,
+			// 实时解析 RDB：避免构造时捕获指针把单例锁死在构造时点的模式。
+			RedisClient: func() *redis.Client {
+				return common.RDB
+			},
 			RedisEnabled: func() bool {
 				return common.RedisEnabled && common.RDB != nil
 			},
@@ -185,13 +205,17 @@ func GetChannelAffinityCacheStats() ChannelAffinityCacheStats {
 		byRuleName[ruleName]++
 	}
 
+	exclusive, shared := GetChannelAffinityExclusiveStats()
 	return ChannelAffinityCacheStats{
-		Enabled:       setting.Enabled,
-		Total:         total,
-		Unknown:       unknown,
-		ByRuleName:    byRuleName,
-		CacheCapacity: mainCap,
-		CacheAlgo:     mainAlgo,
+		Enabled:            setting.Enabled,
+		Total:              total,
+		Unknown:            unknown,
+		ByRuleName:         byRuleName,
+		CacheCapacity:      mainCap,
+		CacheAlgo:          mainAlgo,
+		ExclusiveBindings:  exclusive,
+		SharedBindings:     shared,
+		DegradedReuseTotal: GetChannelAffinityDegradedReuseTotal(),
 	}
 }
 
@@ -207,6 +231,9 @@ func ClearChannelAffinityCacheAll() int {
 			common.SysError(fmt.Sprintf("channel affinity cache delete many failed: err=%v", err))
 		}
 	}
+	// 正向清空后同步清空反向占用索引与最近绑定记录（三批同清，
+	// SSOT 5.2.2 第4条、5.2.4 规则2）；失败仅 SysError 不影响返回值。
+	clearExclusiveRuntimeAll()
 	return len(keys)
 }
 
@@ -237,12 +264,10 @@ func ClearChannelAffinityCacheByRuleName(ruleName string) (int, error) {
 		return 0, fmt.Errorf("该规则未启用 include_rule_name，无法按规则清空缓存")
 	}
 
-	cache := getChannelAffinityCache()
-	deleted, err := cache.DeleteByPrefix(ruleName)
-	if err != nil {
-		return 0, err
-	}
-	return deleted, nil
+	// 校验通过后复用按规则名前缀的清空路径：收集前缀下全部键、DeleteByPrefix
+	//（重试一次）、回放清理反向占用索引与最近绑定记录（三批同清，SSOT 5.2.2
+	// 第4条、5.2.4 规则2）；返回值语义沿用现状（03 文档 3.3）。
+	return clearExclusiveRuntimeByRuleNamePrefix(ruleName)
 }
 
 func matchAnyRegexCached(patterns []string, s string) bool {
@@ -415,8 +440,10 @@ func affinityFingerprint(s string) string {
 		return ""
 	}
 	hex := common.Sha1([]byte(s))
-	if len(hex) >= 8 {
-		return hex[:8]
+	// 截断 16 位 hex（64bit）：10 万键容量下 32bit 生日碰撞近乎必然（约 6.5 万键
+	// 即 50%），碰撞会跨键误判占用与误删成员；64bit 下同容量碰撞概率可忽略。
+	if len(hex) >= 16 {
+		return hex[:16]
 	}
 	return hex
 }
@@ -607,16 +634,51 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 			UsingGroup:     usingGroup,
 			ModelName:      modelName,
 			RequestPath:    path,
+			ExclusiveBind:  rule.ExclusiveBind,
 		})
 
 		cache := getChannelAffinityCache()
 		channelID, found, err := cache.Get(cacheKeySuffix)
 		if err != nil {
 			common.SysError(fmt.Sprintf("channel affinity cache get failed: key=%s, err=%v", cacheKeyFull, err))
+			// 读故障时本键绑定状态未知：置存储降级标记，防止 distributor 随机
+			// 选路结果被 RecordChannelAffinity 固化为正式绑定（old=0 追加占用
+			// 登记，绕过独占判定，与 acquire 降级同口径，SSOT 5.1.5）。
+			markChannelAffinityStorageDegrade(c)
 			return 0, false
 		}
 		if found {
+			if rule.ExclusiveBind {
+				meta, _ := getChannelAffinityMeta(c)
+				if disabled, releaseErr := releaseDisabledAffinityBinding(meta, channelID); releaseErr != nil {
+					common.SysError(fmt.Sprintf("channel affinity disabled binding release failed: channel=%d err=%v", channelID, releaseErr))
+					// 保留命中结果，让分发器返回不可用，避免存储故障触发随机切换。
+					return channelID, true
+				} else if disabled {
+					return acquireExclusiveBinding(c, meta, usingGroup, modelName)
+				}
+			}
+			// 命中渠道记为首次占位渠道：后续失败切换迁移时从该渠道条目
+			// 移除本键指纹（SSOT 5.2.2 第2条），终态失败也据此回滚。
+			if c != nil {
+				c.Set(ginKeyChannelAffinityBoundChannel, channelID)
+			}
+			// 独占命中续期时的满载残留收敛：本键与其它键共享渠道（满载降级
+			// 或渠道禁用扰动的遗产）而候选集已有空闲渠道时，原子 hop 到空闲
+			// 渠道，把堆积的消解从"整 TTL 到期"提前到本键的下一请求。
+			if rule.ExclusiveBind {
+				channelID = rebalanceExclusiveBinding(c, channelID, usingGroup, modelName)
+			}
 			return channelID, true
+		}
+		if rule.ExclusiveBind {
+			meta, _ := getChannelAffinityMeta(c)
+			return acquireExclusiveBinding(c, meta, usingGroup, modelName)
+		}
+		// 未启用独占的软亲和请求同样记录首次占位渠道（值为 0，
+		// RecordChannelAffinity 时迁移前渠道取 0 即纯新增登记）。
+		if c != nil {
+			c.Set(ginKeyChannelAffinityBoundChannel, 0)
 		}
 		return 0, false
 	}
@@ -624,6 +686,9 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 }
 
 func ShouldSkipRetryAfterChannelAffinityFailure(c *gin.Context) bool {
+	if IsExclusiveChannelAffinity(c) {
+		return true
+	}
 	if c == nil {
 		return false
 	}
@@ -641,6 +706,15 @@ func ShouldSkipRetryAfterChannelAffinityFailure(c *gin.Context) bool {
 	return meta.SkipRetry
 }
 
+// IsExclusiveChannelAffinity 表示本次请求命中了独占亲和规则。
+func IsExclusiveChannelAffinity(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	meta, ok := getChannelAffinityMeta(c)
+	return ok && meta.ExclusiveBind
+}
+
 func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
 	if c == nil {
 		return false
@@ -651,10 +725,24 @@ func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
 	}
 
 	cache := getChannelAffinityCache()
+	// 删除前先取出正向缓存值（即渠道 ID），供同步清理反向索引与最近绑定记录
+	// （keep_on_channel_disabled=false 清缓存路径，SSOT 5.1.2 第4条末）。
+	cachedChannelID := 0
+	if channelID, found, err := cache.Get(cacheKey); err == nil && found {
+		cachedChannelID = channelID
+	}
 	deleted, err := cache.DeleteMany([]string{cacheKey})
 	if err != nil {
 		common.SysError(fmt.Sprintf("channel affinity cache delete current failed: err=%v", err))
 		return false
+	}
+	if cachedChannelID > 0 {
+		meta, metaOK := getChannelAffinityMeta(c)
+		keyFP := ""
+		if metaOK {
+			keyFP = meta.KeyFingerprint
+		}
+		rollbackBindingPlacement(cacheKey, keyFP, cachedChannelID)
 	}
 	c.Set(ginKeyChannelAffinitySkipRetry, false)
 	for _, ok := range deleted {
@@ -696,6 +784,12 @@ func MarkChannelAffinityUsed(c *gin.Context, selectedGroup string, channelID int
 		"key_hint":       meta.KeyHint,
 		"key_fp":         meta.KeyFingerprint,
 	}
+	// 独占降级标记（满载复用）随现有 admin_info 链路输出（最终形态 T8 验证）。
+	if anyDegrade, exists := c.Get(ginKeyChannelAffinityExclusiveDegrade); exists {
+		if degrade, valid := anyDegrade.(map[string]interface{}); valid {
+			info["exclusive_degrade"] = degrade
+		}
+	}
 	c.Set(ginKeyChannelAffinityLogInfo, info)
 }
 
@@ -710,6 +804,69 @@ func AppendChannelAffinityAdminInfo(c *gin.Context, adminInfo map[string]interfa
 	adminInfo["channel_affinity"] = anyInfo
 }
 
+// channelAffinityFinalFailed 报告本请求是否已执行终态失败回滚（controller 出口
+// 调用 RollbackChannelAffinityOnFinalFailure 后置位）。置位后 distributor 仍可能
+// 因 2xx 状态码映射误判成功并调用 RecordChannelAffinity，此处据此跳过重建。
+func channelAffinityFinalFailed(c *gin.Context) bool {
+	v, ok := c.Get(ginKeyChannelAffinityFinalFailure)
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
+// markChannelAffinityStorageDegrade 在独占路径因存储故障降级软亲和时置位标记：
+// 该请求将走 distributor 随机选路，RecordChannelAffinity 见此标记跳过正向写入与
+// 索引登记，避免把随机选中的渠道固化为正式绑定（TTL 整周期钉死，SSOT 5.1.5
+// 降级语义的收尾补强）。存储故障属瞬时事件，跳过登记后该键下次请求重新走完整
+// 独占决策，独占性自行恢复。
+func markChannelAffinityStorageDegrade(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(ginKeyChannelAffinityStorageDegrade, true)
+}
+
+// channelAffinityStorageDegraded 报告本请求独占路径是否因存储故障降级。
+func channelAffinityStorageDegraded(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	v, ok := c.Get(ginKeyChannelAffinityStorageDegrade)
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
+// MarkChannelAffinitySoftPlacement 在独占规则的请求落位到"未经独占引擎判定"的
+// 渠道时置位软落位标记：亲和绑定渠道不可用后的随机兜底（keep/清占位两分支）与
+// 亲和渠道失败后的重试切换成功。RecordChannelAffinity 见此标记跳过绑定固化，
+// 避免把随机/重试渠道钉进其它键的独占渠道（生产缺陷：渠道大量空闲时多键共享
+// 同一渠道的堆积来源）。绑定渠道的更替交给独占引擎既有机制：终态失败回滚、
+// 渠道禁用清占位、TTL 到期重绑。软亲和规则（未启用独占）不受影响。
+func MarkChannelAffinitySoftPlacement(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(ginKeyChannelAffinitySoftPlacement, true)
+}
+
+// channelAffinitySoftPlaced 报告本请求是否为软落位。
+func channelAffinitySoftPlaced(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	v, ok := c.Get(ginKeyChannelAffinitySoftPlacement)
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
 func RecordChannelAffinity(c *gin.Context, channelID int) {
 	if channelID <= 0 {
 		return
@@ -717,6 +874,45 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 	setting := operation_setting.GetChannelAffinitySetting()
 	if setting == nil || !setting.Enabled {
 		return
+	}
+	if c != nil && channelAffinityFinalFailed(c) {
+		return
+	}
+	// 独占路径因存储故障降级的请求：随机选路结果不固化为正式绑定（独占占位
+	// 三写未完成，固化会把随机渠道钉死一个 TTL 周期，SSOT 5.1.5 降级收尾）。
+	if c != nil && channelAffinityStorageDegraded(c) {
+		return
+	}
+	// 独占规则的软落位请求（亲和渠道不可用后的随机兜底、失败重试切换）：
+	// 渠道选择未经独占引擎判定，固化会把随机/重试渠道钉进其它键的独占渠道
+	//（渠道大量空闲时多键共享同一渠道的堆积来源）。跳过固化，绑定维持原值；
+	// 渠道更替交给独占引擎既有机制（终态失败回滚、渠道禁用清占位、TTL 到期重绑）。
+	if c != nil {
+		meta, metaOK := getChannelAffinityMeta(c)
+		if metaOK && meta.ExclusiveBind {
+			// 重试切换检测：最终成功渠道（SwitchOnSuccess 时以 context channel_id
+			// 为准）与首次占位渠道不一致，即成功渠道未经独占判定（重试随机选定），
+			// 与软落位同口径处理。
+			successChannelID := channelID
+			if setting.SwitchOnSuccess {
+				if switched := c.GetInt("channel_id"); switched > 0 {
+					successChannelID = switched
+				}
+			}
+			boundChannelID := 0
+			if v, exists := c.Get(ginKeyChannelAffinityBoundChannel); exists {
+				if id, valid := v.(int); valid {
+					boundChannelID = id
+				}
+			}
+			if channelAffinitySoftPlaced(c) || (boundChannelID > 0 && successChannelID != boundChannelID) {
+				atomic.AddUint64(&channelAffinityDegradedReuseTotal, 1)
+				logger.LogWarn(c, fmt.Sprintf(
+					"channel affinity soft placement not pinned: rule=%s key_fp=%s channel=%d",
+					meta.RuleName, meta.KeyFingerprint, successChannelID))
+				return
+			}
+		}
 	}
 	if setting.SwitchOnSuccess && c != nil {
 		if successChannelID := c.GetInt("channel_id"); successChannelID > 0 {
@@ -734,8 +930,42 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 		ttlSeconds = 3600
 	}
 	cache := getChannelAffinityCache()
+	if IsExclusiveChannelAffinity(c) {
+		meta, _ := getChannelAffinityMeta(c)
+		if err := renewExclusiveAffinityBinding(meta, channelID, time.Duration(ttlSeconds)*time.Second); err != nil {
+			common.SysError(fmt.Sprintf("channel affinity exclusive renewal failed: channel=%d err=%v", channelID, err))
+		}
+		return
+	}
+	lock := channelAffinityBindLock(strings.TrimPrefix(cacheKey, channelAffinityCacheNamespace+":"))
+	lock.Lock()
+	defer lock.Unlock()
 	if err := cache.SetWithTTL(cacheKey, channelID, time.Duration(ttlSeconds)*time.Second); err != nil {
 		common.SysError(fmt.Sprintf("channel affinity cache set failed: key=%s, err=%v", cacheKey, err))
+	}
+	// 登记反向占用索引与最近绑定记录：所有规则（无论是否启用独占）均登记
+	// （SSOT 5.2.4 规则1）。迁移前渠道取本次请求首次占位渠道：>0 即失败切换
+	// 迁移场景，旧渠道移除、迁入豁免独占判定（SSOT 5.1.2 第4条）。
+	// boundChannel 未设置（软规则首绑/正向 TTL 过期后重绑）时回退读最近绑定
+	// 记录（独立保留期覆盖正向过期窗口）：正向过期后随机重绑到新渠道，旧渠道
+	// 上的指纹必须迁移移除，否则占用虚高污染独占判定（残留随活跃键续期永不过期）。
+	if c != nil {
+		meta, metaOK := getChannelAffinityMeta(c)
+		if metaOK && meta.KeyFingerprint != "" {
+			oldChannelID := 0
+			if v, exists := c.Get(ginKeyChannelAffinityBoundChannel); exists {
+				if id, valid := v.(int); valid {
+					oldChannelID = id
+				}
+			}
+			cacheKeySuffix := strings.TrimPrefix(meta.CacheKey, channelAffinityCacheNamespace+":")
+			if oldChannelID <= 0 {
+				if record, lbFound, lbErr := lastBindGet(cacheKeySuffix); lbErr == nil && lbFound && record.ChannelID > 0 {
+					oldChannelID = record.ChannelID
+				}
+			}
+			registerBindingIndexes(cacheKeySuffix, meta.KeyFingerprint, oldChannelID, channelID, time.Duration(ttlSeconds)*time.Second)
+		}
 	}
 }
 
@@ -979,7 +1209,9 @@ func getChannelAffinityUsageCacheStatsCache() *cachex.HybridCache[ChannelAffinit
 
 		channelAffinityUsageCacheStatsCache = cachex.NewHybridCache[ChannelAffinityUsageCacheCounters](cachex.HybridCacheConfig[ChannelAffinityUsageCacheCounters]{
 			Namespace: cachex.Namespace(channelAffinityUsageCacheStatsNamespace),
-			Redis:     common.RDB,
+			RedisClient: func() *redis.Client {
+				return common.RDB
+			},
 			RedisEnabled: func() bool {
 				return common.RedisEnabled && common.RDB != nil
 			},
@@ -1000,4 +1232,169 @@ func channelAffinityUsageCacheStatsLock(key string) *sync.Mutex {
 	_, _ = h.Write([]byte(key))
 	idx := h.Sum32() % uint32(len(channelAffinityUsageCacheStatsLocks))
 	return &channelAffinityUsageCacheStatsLocks[idx]
+}
+
+// ChannelAffinityBinding describes a channel and the tokens currently bound to it.
+type ChannelAffinityBinding struct {
+	ChannelID   int                    `json:"channel_id"`
+	ChannelName string                 `json:"channel_name"`
+	Tokens      []ChannelAffinityToken `json:"tokens"`
+}
+
+type ChannelAffinityToken struct {
+	TokenID   int    `json:"token_id"`
+	TokenName string `json:"token_name"`
+}
+
+// GetChannelAffinityBindings returns current valid channel affinity bindings from cache.
+func GetChannelAffinityBindings() ([]ChannelAffinityBinding, error) {
+	cache := getChannelAffinityCache()
+	keys, err := cache.Keys()
+	if err != nil {
+		common.SysError(fmt.Sprintf("channel affinity cache list keys failed: err=%v", err))
+		return nil, err
+	}
+	prefix := channelAffinityCacheNamespace + ":"
+	setting := operation_setting.GetChannelAffinitySetting()
+	if setting == nil {
+		return []ChannelAffinityBinding{}, nil
+	}
+	channelIDs := make(map[int]struct{})
+	tokenIDs := make(map[int]struct{})
+	pairs := make([]struct{ channelID, tokenID int }, 0, len(keys))
+	for _, fullKey := range keys {
+		if !strings.HasPrefix(fullKey, prefix) {
+			continue
+		}
+		suffix := strings.TrimPrefix(fullKey, prefix)
+		parts := strings.Split(suffix, ":")
+		if len(parts) < 2 {
+			continue
+		}
+		valid := false
+		for _, rule := range setting.Rules {
+			hasTokenIDKeySource := false
+			for _, source := range rule.KeySources {
+				if source.Type == "context_int" && source.Key == "token_id" {
+					hasTokenIDKeySource = true
+					break
+				}
+			}
+			if !hasTokenIDKeySource {
+				continue
+			}
+			idx := 0
+			if rule.IncludeRuleName {
+				if idx >= len(parts) || strings.TrimSpace(rule.Name) == "" || parts[idx] != rule.Name {
+					continue
+				}
+				idx++
+			}
+			if rule.IncludeModelName {
+				if idx >= len(parts)-1 {
+					continue
+				}
+				idx++
+			}
+			if rule.IncludeUsingGroup {
+				if idx >= len(parts)-1 {
+					continue
+				}
+				idx++
+			}
+			if idx != len(parts)-1 {
+				continue
+			}
+			tokenID, parseErr := strconv.Atoi(parts[len(parts)-1])
+			if parseErr != nil || tokenID <= 0 {
+				continue
+			}
+			valid = true
+			channelID, found, getErr := cache.Get(suffix)
+			if getErr != nil {
+				common.SysError(fmt.Sprintf("channel affinity cache get failed: key=%s, err=%v", fullKey, getErr))
+				return nil, getErr
+			}
+			if !found || channelID <= 0 {
+				break
+			}
+			channelIDs[channelID] = struct{}{}
+			tokenIDs[tokenID] = struct{}{}
+			pairs = append(pairs, struct{ channelID, tokenID int }{channelID, tokenID})
+			break
+		}
+		_ = valid
+	}
+	if len(pairs) == 0 {
+		return []ChannelAffinityBinding{}, nil
+	}
+	ids := make([]int, 0, len(channelIDs))
+	for id := range channelIDs {
+		ids = append(ids, id)
+	}
+	var channels []model.Channel
+	if err := model.DB.Select("id", "name").Where("id IN ?", ids).Find(&channels).Error; err != nil {
+		common.SysError(fmt.Sprintf("channel affinity bindings query channels failed: err=%v", err))
+		return nil, err
+	}
+	tids := make([]int, 0, len(tokenIDs))
+	for id := range tokenIDs {
+		tids = append(tids, id)
+	}
+	var tokens []model.Token
+	if err := model.DB.Select("id", "name").Where("id IN ?", tids).Find(&tokens).Error; err != nil {
+		common.SysError(fmt.Sprintf("channel affinity bindings query tokens failed: err=%v", err))
+		return nil, err
+	}
+	channelByID := make(map[int]model.Channel, len(channels))
+	for _, c := range channels {
+		channelByID[c.Id] = c
+	}
+	tokenByID := make(map[int]model.Token, len(tokens))
+	for _, tok := range tokens {
+		tokenByID[tok.Id] = tok
+	}
+	grouped := make(map[int]*ChannelAffinityBinding)
+	seen := make(map[int]map[int]struct{})
+	for _, p := range pairs {
+		c, ok := channelByID[p.channelID]
+		if !ok {
+			continue
+		}
+		tok, ok := tokenByID[p.tokenID]
+		if !ok {
+			continue
+		}
+		b := grouped[p.channelID]
+		if b == nil {
+			name := c.Name
+			if strings.TrimSpace(name) == "" {
+				name = "-"
+			}
+			b = &ChannelAffinityBinding{ChannelID: p.channelID, ChannelName: name}
+			grouped[p.channelID] = b
+			seen[p.channelID] = map[int]struct{}{}
+		}
+		if _, ok := seen[p.channelID][p.tokenID]; ok {
+			continue
+		}
+		name := tok.Name
+		if strings.TrimSpace(name) == "" {
+			name = "-"
+		}
+		b.Tokens = append(b.Tokens, ChannelAffinityToken{TokenID: p.tokenID, TokenName: name})
+		seen[p.channelID][p.tokenID] = struct{}{}
+	}
+	result := make([]ChannelAffinityBinding, 0, len(grouped))
+	for _, b := range grouped {
+		sort.Slice(b.Tokens, func(i, j int) bool { return b.Tokens[i].TokenID < b.Tokens[j].TokenID })
+		result = append(result, *b)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].ChannelName == result[j].ChannelName {
+			return result[i].ChannelID < result[j].ChannelID
+		}
+		return result[i].ChannelName < result[j].ChannelName
+	})
+	return result, nil
 }

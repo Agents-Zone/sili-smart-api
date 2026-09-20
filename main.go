@@ -333,6 +333,10 @@ func InitResources() error {
 		return err
 	}
 
+	// 集成密钥通道启动校验：CONVERSATION_LOG_ENABLED=true 时必须配置
+	// CONVERSATION_LOG_INTEGRATION_KEY，否则 FatalLog 终止启动（见 plan 2-ai-silly-walrus）。
+	middleware.ValidateConversationLogAuth()
+
 	// Initialize Redis
 	err = common.InitRedisClient()
 	if err != nil {

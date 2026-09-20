@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQueryClient } from '@tanstack/react-query'
 import { type Table } from '@tanstack/react-table'
-import { Power, PowerOff, Tag, Trash2 } from 'lucide-react'
+import { Pencil, Power, PowerOff, Tag, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -47,6 +47,7 @@ import {
   handleBatchSetTag,
 } from '../lib'
 import type { Channel } from '../types'
+import { ChannelBatchEditDrawer } from './drawers/channel-batch-edit-drawer'
 
 interface DataTableBulkActionsProps<TData> {
   table: Table<TData>
@@ -59,12 +60,18 @@ export function DataTableBulkActions<TData>({
   const queryClient = useQueryClient()
   const [showTagDialog, setShowTagDialog] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [showBatchEdit, setShowBatchEdit] = useState(false)
   const [tagValue, setTagValue] = useState('')
   const currentUser = useAuthStore((s) => s.auth.user)
   const canEditSensitive = hasPermission(
     currentUser,
     ADMIN_PERMISSION_RESOURCES.CHANNEL,
     ADMIN_PERMISSION_ACTIONS.SENSITIVE_WRITE
+  )
+  const canWrite = hasPermission(
+    currentUser,
+    ADMIN_PERMISSION_RESOURCES.CHANNEL,
+    ADMIN_PERMISSION_ACTIONS.WRITE
   )
 
   const selectedRows = table.getFilteredSelectedRowModel().rows
@@ -209,6 +216,42 @@ export function DataTableBulkActions<TData>({
             </p>
           </TooltipContent>
         </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant='outline'
+                size='icon'
+                onClick={() => {
+                  if (!canWrite) return
+                  setShowBatchEdit(true)
+                }}
+                aria-disabled={!canWrite}
+                className={cn(
+                  'size-8',
+                  !canWrite && 'cursor-not-allowed opacity-50'
+                )}
+                aria-label={t('Batch edit selected channels')}
+                title={
+                  canWrite
+                    ? t('Batch edit selected channels')
+                    : t('No permission to perform this action')
+                }
+              />
+            }
+          >
+            <Pencil />
+            <span className='sr-only'>{t('Batch edit selected channels')}</span>
+          </TooltipTrigger>
+          <TooltipContent>
+            <p>
+              {canWrite
+                ? t('Batch edit selected channels')
+                : t('No permission to perform this action')}
+            </p>
+          </TooltipContent>
+        </Tooltip>
       </BulkActionsToolbar>
 
       {/* Set Tag Dialog */}
@@ -286,6 +329,14 @@ export function DataTableBulkActions<TData>({
       >
         {' '}
       </Dialog>
+
+      {/* Batch Edit Drawer */}
+      <ChannelBatchEditDrawer
+        open={showBatchEdit}
+        onOpenChange={setShowBatchEdit}
+        selectedIds={selectedIds}
+        onCommitted={handleClearSelection}
+      />
     </>
   )
 }

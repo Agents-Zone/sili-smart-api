@@ -48,6 +48,9 @@ token.expired: "該令牌已過期"
 token.exhausted: "該令牌額度已用盡 TokenStatusExhausted[sk-{{.Prefix}}***{{.Suffix}}]"
 token.status_unavailable: "該令牌狀態不可用"
 token.db_error: "無效的令牌，資料庫查詢出錯，請聯繫管理員"
+token.auto_groups_too_many: "每個令牌最多可選擇 {{.Max}} 個 Auto 分組"
+token.auto_groups_duplicate: "Auto 分組 {{.Group}} 重複"
+token.auto_groups_invalid: "Auto 分組 {{.Group}} 不可用或無權存取"
 
 # Redemption messages
 redemption.name_length: "兌換碼名稱長度必須在1-20之間"
@@ -138,7 +141,6 @@ payment.stripe_not_configured: "Stripe 未設定或密鑰無效"
 payment.webhook_not_configured: "Webhook 未設定"
 payment.price_id_not_configured: "該訂閱方案未設定 StripePriceId"
 payment.creem_not_configured: "該訂閱方案未設定 CreemProductId"
-payment.compliance_required: "支付、兌換碼、訂閱方案和邀請返利功能已停用。管理員需先確認合規聲明後方可啟用。"
 
 # Topup messages
 topup.not_provided: "未提供支付單號"
@@ -159,6 +161,24 @@ channel.query_failed: "查詢管道失敗"
 channel.no_valid_upstream: "無有效上游管道"
 channel.upstream_saturated: "當前分組上游負載已飽和，請稍後再試"
 channel.get_available_failed: "獲取分組 {{.Group}} 下模型 {{.Model}} 的可用管道失敗"
+# Channel batch edit messages
+channel.batch_edit.limit: "單次批量編輯上限 200 條，請分批操作"
+channel.batch_edit.group_too_long: "分組長度不能超過 64 字符"
+channel.batch_edit.group_invalid: "分組格式錯誤"
+channel.batch_edit.tag_too_long: "標籤長度不能超過 191 字符"
+channel.batch_edit.remark_too_long: "備註長度不能超過 255 字符"
+channel.batch_edit.models_invalid: "模型列表格式錯誤"
+channel.batch_edit.model_too_long: "模型名稱過長: {{.Name}}"
+channel.batch_edit.mapping_empty: "模型重定向不能為空（如需清空請在單個編輯中操作）"
+channel.batch_edit.mapping_invalid: "模型重定向必須是合法的 JSON 對象"
+channel.batch_edit.mapping_values_not_string: "模型重定向的值必須都是字符串"
+channel.batch_edit.weight_range: "權重必須在 0-4294967295 之間"
+channel.batch_edit.test_model_too_long: "測試模型長度不能超過 255 字符"
+channel.batch_edit.auto_ban_invalid: "自動封禁取值錯誤"
+channel.batch_edit.no_fields: "批量編輯至少需要填寫一個字段"
+channel.batch_edit.failed: "批量編輯失敗，已全部回滾"
+channel.batch_edit.update_failed: "更新渠道記錄失敗"
+channel.batch_edit.abilities_failed: "重建 abilities 失敗"
 
 # Model messages
 model.name_empty: "模型名稱不能為空"
@@ -272,6 +292,9 @@ distributor.get_channel_failed: "獲取分組 {{.Group}} 下模型 {{.Model}} �
 distributor.no_available_channel: "分組 {{.Group}} 下模型 {{.Model}} 無可用管道（distributor）"
 distributor.invalid_midjourney_request: "無效的midjourney請求，{{.Error}}"
 distributor.invalid_request_parse_model: "無效的請求，無法解析模型"
+
+# Conversation messages
+conversation.not_found: "會話不存在"
 
 # Custom OAuth provider messages
 custom_oauth.not_found: "自訂 OAuth 供應者不存在"

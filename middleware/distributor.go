@@ -109,7 +109,7 @@ func Distribute() func(c *gin.Context) {
 						channelSupportsRequestPath(preferred, c.Request.URL.Path, modelRequest.Model) {
 						if usingGroup == "auto" {
 							userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
-							autoGroups := service.GetUserAutoGroup(userGroup)
+							autoGroups := service.GetRequestAutoGroups(c, userGroup)
 							for _, g := range autoGroups {
 								if model.IsChannelEnabledForGroupModel(g, modelRequest.Model, preferred.Id) {
 									selectGroup = g
@@ -127,8 +127,52 @@ func Distribute() func(c *gin.Context) {
 							service.MarkChannelAffinityUsed(c, usingGroup, preferred.Id)
 						}
 					}
-					if !affinityUsable && !service.ShouldKeepChannelAffinityOnChannelDisabled() {
-						service.ClearCurrentChannelAffinityCache(c)
+					if !affinityUsable {
+						if service.IsExclusiveChannelAffinity(c) {
+							// 禁用后的重绑由亲和选路统一处理。其余不可用状态保留绑定，
+							// 包括模型/分组不匹配及选路后发生的禁用，等待后续请求重新检查。
+							abortWithOpenAiMessage(c, http.StatusServiceUnavailable, i18n.T(c, i18n.MsgDistributorNoAvailableChannel, map[string]any{"Group": usingGroup, "Model": modelRequest.Model}), types.ErrorCodeModelNotFound)
+							return
+						}
+						if !service.ShouldKeepChannelAffinityOnChannelDisabled() {
+							service.ClearCurrentChannelAffinityCache(c)
+							// 独占规则清占位后重新走亲和获取：正向缓存已清，内部进
+							// acquire 独占决策，从当前可用候选中独占选定空闲渠道，
+							// 替代随机兜底（随机结果固化会挤进其它键的独占渠道）。
+							// keep 开启时绑定保留在禁用渠道，本次请求软落位（置标记，
+							// 回写不固化随机渠道）。
+							if rebindID, refound := service.GetPreferredChannelByAffinity(c, modelRequest.Model, usingGroup); refound {
+								if rePreferred, rerr := model.CacheGetChannel(rebindID); rerr == nil && rePreferred != nil &&
+									rePreferred.Status == common.ChannelStatusEnabled &&
+									channelSupportsRequestPath(rePreferred, c.Request.URL.Path, modelRequest.Model) {
+									groupOK := false
+									if usingGroup == "auto" {
+										userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+										for _, g := range service.GetRequestAutoGroups(c, userGroup) {
+											if model.IsChannelEnabledForGroupModel(g, modelRequest.Model, rePreferred.Id) {
+												selectGroup = g
+												common.SetContextKey(c, constant.ContextKeyAutoGroup, g)
+												groupOK = true
+												break
+											}
+										}
+									} else if model.IsChannelEnabledForGroupModel(usingGroup, modelRequest.Model, rePreferred.Id) {
+										selectGroup = usingGroup
+										groupOK = true
+									}
+									if groupOK {
+										channel = rePreferred
+										service.MarkChannelAffinityUsed(c, selectGroup, rePreferred.Id)
+									}
+								}
+							}
+						}
+						if channel == nil {
+							// 随机兜底仍会发生（acquire 降级/无可用候选）：渠道选择未经
+							// 独占引擎判定，置软落位标记防止回写固化（挤进其它键的
+							// 独占渠道，生产堆积来源）。
+							service.MarkChannelAffinitySoftPlacement(c)
+						}
 					}
 				}
 

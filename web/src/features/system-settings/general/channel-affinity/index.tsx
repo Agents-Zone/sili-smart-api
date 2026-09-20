@@ -44,6 +44,7 @@ import { useUpdateOption } from '../../hooks/use-update-option'
 import { getCacheStats, clearAllCache, clearRuleCache } from './api'
 import { RULE_TEMPLATES, cloneTemplate, makeUniqueName } from './constants'
 import { RuleEditorDialog } from './rule-editor-dialog'
+import { BindingDetailsDialog } from './binding-details-dialog'
 import type { AffinityRule, CacheStats, ChannelAffinitySettings } from './types'
 
 function parseRules(jsonStr: string): AffinityRule[] {
@@ -118,6 +119,11 @@ function serializeRules(rules: AffinityRule[]): string {
   return JSON.stringify(rules.map(({ id: _, ...rest }) => rest))
 }
 
+// 字段缺失（旧后端未返回）时显示 -；索引失败时后端返回 0，显示 0
+function formatStat(v: number | undefined): string {
+  return v === undefined ? '-' : String(v)
+}
+
 interface Props {
   defaultValues: ChannelAffinitySettings
 }
@@ -140,6 +146,10 @@ export function ChannelAffinitySection(props: Props) {
   )
   const [defaultTtl, setDefaultTtl] = useState(
     props.defaultValues['channel_affinity_setting.default_ttl_seconds']
+  )
+  const [lastBindTtl, setLastBindTtl] = useState(
+    props.defaultValues['channel_affinity_setting.last_bind_ttl_seconds'] ??
+      604800
   )
   const [rules, setRules] = useState<AffinityRule[]>(() =>
     parseRules(props.defaultValues['channel_affinity_setting.rules'])
@@ -165,6 +175,7 @@ export function ChannelAffinitySection(props: Props) {
   const [clearAllDialogOpen, setClearAllDialogOpen] = useState(false)
   const [clearRuleName, setClearRuleName] = useState<string | null>(null)
   const [fillTemplateDialogOpen, setFillTemplateDialogOpen] = useState(false)
+  const [bindingDetailsOpen, setBindingDetailsOpen] = useState(false)
 
   useEffect(() => {
     setEnabled(props.defaultValues['channel_affinity_setting.enabled'])
@@ -177,6 +188,10 @@ export function ChannelAffinitySection(props: Props) {
     setMaxEntries(props.defaultValues['channel_affinity_setting.max_entries'])
     setDefaultTtl(
       props.defaultValues['channel_affinity_setting.default_ttl_seconds']
+    )
+    setLastBindTtl(
+      props.defaultValues['channel_affinity_setting.last_bind_ttl_seconds'] ??
+        604800
     )
     const parsed = parseRules(
       props.defaultValues['channel_affinity_setting.rules']
@@ -235,6 +250,18 @@ export function ChannelAffinitySection(props: Props) {
   }
 
   const handleSave = async () => {
+    if (
+      !Number.isInteger(lastBindTtl) ||
+      lastBindTtl < 1 ||
+      lastBindTtl > 31536000
+    ) {
+      toast.error(
+        t(
+          'Previous binding retention must be an integer from 1 to 31536000 seconds'
+        )
+      )
+      return
+    }
     let rulesJson: string
     if (editMode === 'json') {
       try {
@@ -296,6 +323,18 @@ export function ChannelAffinitySection(props: Props) {
         updates.push({
           key: 'channel_affinity_setting.default_ttl_seconds',
           value: String(defaultTtl),
+        })
+      }
+
+      if (
+        lastBindTtl !==
+        (props.defaultValues[
+          'channel_affinity_setting.last_bind_ttl_seconds'
+        ] ?? 604800)
+      ) {
+        updates.push({
+          key: 'channel_affinity_setting.last_bind_ttl_seconds',
+          value: String(lastBindTtl),
         })
       }
 
@@ -438,6 +477,29 @@ export function ChannelAffinitySection(props: Props) {
               onChange={(e) => setDefaultTtl(Number(e.target.value))}
             />
           </div>
+          <div className='grid gap-1.5'>
+            <Label htmlFor='channel-affinity-last-bind-ttl'>
+              {t('Previous binding retention (seconds)')}
+            </Label>
+            <Input
+              id='channel-affinity-last-bind-ttl'
+              type='number'
+              min={1}
+              max={31536000}
+              step={1}
+              value={lastBindTtl}
+              onChange={(e) => setLastBindTtl(Number(e.target.value))}
+              aria-describedby='channel-affinity-last-bind-ttl-help'
+            />
+            <p
+              id='channel-affinity-last-bind-ttl-help'
+              className='text-muted-foreground text-sm'
+            >
+              {t(
+                'Default: 7 days; at least twice the binding TTL. After expiry, prefer the previous channel when available and free; otherwise use a free channel, or the least occupied channel when full.'
+              )}
+            </p>
+          </div>
         </div>
 
         <SettingsSwitchField
@@ -538,8 +600,14 @@ export function ChannelAffinitySection(props: Props) {
           </Button>
           {cacheStats && (
             <span className='text-muted-foreground text-xs'>
-              {t('Cache Entries')}: {cacheStats.total} /{' '}
-              {cacheStats.cache_capacity}
+              {t('Cache Entries')}:{' '}
+              <button type='button' className='cursor-pointer underline underline-offset-2' aria-label={t('View channel affinity bindings')} onClick={() => setBindingDetailsOpen(true)}>
+                {cacheStats.total}
+              </button>{' '} / {cacheStats.cache_capacity} · {t('Exclusive Bindings')}:{' '}
+              {formatStat(cacheStats.exclusive_bindings)} ·{' '}
+              {t('Shared Bindings')}: {formatStat(cacheStats.shared_bindings)} ·{' '}
+              {t('Degraded Reuse Total')}:{' '}
+              {formatStat(cacheStats.degraded_reuse_total)}
             </span>
           )}
         </SettingsPageActionsPortal>
@@ -674,6 +742,8 @@ export function ChannelAffinitySection(props: Props) {
         )}
       </SettingsSection>
 
+      <BindingDetailsDialog open={bindingDetailsOpen} onOpenChange={setBindingDetailsOpen} />
+
       <RuleEditorDialog
         open={ruleEditorOpen}
         onOpenChange={setRuleEditorOpen}
@@ -716,3 +786,4 @@ export function ChannelAffinitySection(props: Props) {
     </>
   )
 }
+

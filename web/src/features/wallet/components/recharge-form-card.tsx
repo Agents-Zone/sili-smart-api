@@ -504,7 +504,7 @@ export function RechargeFormCard({
         )}
 
       {/* Redemption Code Section */}
-      {redemptionEnabled ? (
+      {redemptionEnabled && (
         <div className='space-y-2.5 border-t pt-4 sm:space-y-3 sm:pt-6'>
           <div className='flex items-center gap-2'>
             <IconBadge tone='warning' size='xs'>
@@ -550,14 +550,6 @@ export function RechargeFormCard({
             </p>
           )}
         </div>
-      ) : (
-        <Alert className='border-t'>
-          <AlertDescription>
-            {t(
-              'Redemption codes are disabled until the administrator confirms compliance terms.'
-            )}
-          </AlertDescription>
-        </Alert>
       )}
     </TitledCard>
   )

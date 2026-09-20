@@ -424,7 +424,6 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
                               affinity.using_group ||
                               affinity.selected_group ||
                               '',
-                            key_hint: affinity.key_hint || '',
                             key_fp: affinity.key_fp || '',
                           })
                           setAffinityDialogOpen(true)

@@ -6,6 +6,12 @@
 
 这是一个用 Go 构建的 AI API 网关/代理。它在统一 API 之后聚合了 40 多家上游 AI 提供商（OpenAI、Claude、Gemini、Azure、AWS Bedrock 等），并提供用户管理、计费、限流与管理后台。
 
+## 项目级规则文件
+
+| 文件名 | 路径 | 说明 |
+|--------|------|------|
+| AGENTS_DATABASE_API_RULE | ./AGENTS_DATABASE_API_RULE.md | 数据库与 API 接口设计项目级规则，新增表结构与接口设计必须遵守 |
+
 ## 技术栈
 
 - **后端**：Go 1.22+、Gin Web 框架、GORM v2 ORM
@@ -137,6 +143,12 @@ web/           前端（React 19、Rsbuild、Base UI、Tailwind）
 - 前端 UI 文本必须以 `i18next`/`react-i18next` 支持国际化。使用 `web/src/i18n/locales/{lang}.json` 中的扁平 JSON locale 文件，以英文源字符串为键。
 - 在 React 组件中，使用 `useTranslation()` 并对面向用户的文本调用 `t('English key')`。
 - 详细前端规范见 `web/AGENTS.md`，涵盖 TypeScript、组件结构、样式、可访问性、测试与构建检查。
+
+### Git 提交规约
+
+- 默认将改动提交到当前所在分支。在提交前先确认当前分支（`git rev-parse --abbrev-ref HEAD`），并在提交说明或回复中告知用户当前分支名。
+- 仅在用户明确要求创建或切换分支时才执行 `git checkout -b`、`git switch` 等分支操作。未获明确指示时，保持在原分支上提交。
+- 涉及推送、强制推送、rebase、reset 等改变远程或历史的操作，须先提示风险并等待确认。
 
 ## 本地启动
 

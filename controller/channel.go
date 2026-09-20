@@ -3,11 +3,14 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -491,9 +494,10 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 			return fmt.Errorf("channel cannot be empty")
 		}
 
-		// 检查模型名称长度是否超过 255
+		// 检查模型名称长度是否超过 255（按码点，与 abilities.model varchar(255) 及
+		// 批量编辑口径一致）
 		for _, m := range channel.GetModels() {
-			if len(m) > 255 {
+			if utf8.RuneCountInString(m) > 255 {
 				return fmt.Errorf("模型名称过长: %s", m)
 			}
 		}
@@ -731,6 +735,7 @@ func DeleteChannel(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	service.ClearChannelAffinityRuntimeByChannelIDs([]int{id})
 	if channelLookupFailed {
 		service.ResetProxyClientCache()
 	} else {
@@ -748,12 +753,14 @@ func DeleteChannel(c *gin.Context) {
 }
 
 func DeleteDisabledChannel(c *gin.Context) {
-	rows, err := model.DeleteDisabledChannel()
+	deletedIDs, err := model.DeleteDisabledChannel()
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	model.InitChannelCache()
+	service.ClearChannelAffinityRuntimeByChannelIDs(deletedIDs)
+	rows := len(deletedIDs)
 	if rows > 0 {
 		service.ResetProxyClientCache()
 	}
@@ -907,12 +914,14 @@ func DeleteChannelBatch(c *gin.Context) {
 		})
 		return
 	}
-	deletedCount, err := model.BatchDeleteChannels(channelBatch.Ids)
+	deletedIDs, err := model.BatchDeleteChannels(channelBatch.Ids)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	model.InitChannelCache()
+	service.ClearChannelAffinityRuntimeByChannelIDs(deletedIDs)
+	deletedCount := len(deletedIDs)
 	if deletedCount > 0 {
 		service.ResetProxyClientCache()
 	}
@@ -925,6 +934,204 @@ func DeleteChannelBatch(c *gin.Context) {
 		"data":    deletedCount,
 	})
 	return
+}
+
+// ChannelBatchUpdateRequest 批量编辑请求体。字段全部为指针：省略或 null 即跳过，
+// 出现即生效（03 文档 1.2 空即跳过语义）。D 区排除字段不在结构体中声明，
+// 未知/排除字段经白名单 DTO 天然不解析（03 文档 2.2.9）。
+type ChannelBatchUpdateRequest struct {
+	Ids          []int   `json:"ids"`
+	Group        *string `json:"group"`
+	Tag          *string `json:"tag"`
+	Remark       *string `json:"remark"`
+	Models       *string `json:"models"`
+	ModelMapping *string `json:"model_mapping"`
+	Weight       *int    `json:"weight"`
+	Priority     *int64  `json:"priority"`
+	TestModel    *string `json:"test_model"`
+	AutoBan      *int    `json:"auto_ban"`
+}
+
+// optionalTrimmedString 归一化可选文本字段：nil 或 trim 后为空均视为未填写（返回 nil 跳过），
+// 超出 maxLen 返回对应错误（03 文档 4.2.4 规则1 空即跳过）。长度按 Unicode 码点计，
+// 与 specs「字符」语义及 DB varchar 列宽对齐（前端按 UTF-16 码元计数，增补平面
+// 字符处前端更严，方向安全）。
+func optionalTrimmedString(v *string, maxLen int, tooLong string) (*string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(*v)
+	if trimmed == "" {
+		return nil, nil
+	}
+	if utf8.RuneCountInString(trimmed) > maxLen {
+		return nil, errors.New(tooLong)
+	}
+	return common.GetPointer(trimmed), nil
+}
+
+// optionalCommaList 归一化可选逗号列表：nil 或 trim 后为空均视为未填写（返回 nil），
+// 段级 trim 后逗号紧邻，避免带空格的段经 UpdateAbilities 的裸 split 写进 abilities 行。
+// 返回的段列表供调用方逐段校验（段非空、单段长度）。
+func optionalCommaList(v *string) (segments []string, normalized *string) {
+	if v == nil {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(*v)
+	if trimmed == "" {
+		return nil, nil
+	}
+	segments = strings.Split(trimmed, ",")
+	for i, segment := range segments {
+		segments[i] = strings.TrimSpace(segment)
+	}
+	return segments, common.GetPointer(strings.Join(segments, ","))
+}
+
+// validateBatchModelMapping 校验 model_mapping：须为 JSON 对象且值全为字符串。
+// 值类型与中转侧 map[string]string 反序列化（relay/helper/model_mapped.go）对齐，
+// 非字符串值会让该渠道所有请求失败。
+func validateBatchModelMapping(mapping string) error {
+	var parsed map[string]any
+	if err := common.UnmarshalJsonStr(mapping, &parsed); err != nil || parsed == nil {
+		return errors.New(i18n.MsgChannelBatchMappingInvalid)
+	}
+	for _, value := range parsed {
+		if _, ok := value.(string); !ok {
+			return errors.New(i18n.MsgChannelBatchMappingValues)
+		}
+	}
+	return nil
+}
+
+// buildBatchUpdateFields 校验并归一化请求：返回列更新字段；err 为 i18n 键标记的
+// 具体失败原因（带参错误用 i18nError 包装）。校验顺序：ids 边界 → 逐字段值域 →
+// 生效字段数（03 文档 2.2）。
+func (r *ChannelBatchUpdateRequest) buildBatchUpdateFields() (model.ChannelBatchEditFields, error) {
+	var fields model.ChannelBatchEditFields
+	if len(r.Ids) == 0 {
+		return fields, errors.New(i18n.MsgInvalidParams)
+	}
+	if len(r.Ids) > MaxBatchEditChannels {
+		return fields, errors.New(i18n.MsgChannelBatchLimit)
+	}
+	// ids 元素须为正整数（03 文档 2.2.1），0 与负数均为非法渠道 ID
+	for _, id := range r.Ids {
+		if id <= 0 {
+			return fields, errors.New(i18n.MsgInvalidParams)
+		}
+	}
+
+	groupSegments, group := optionalCommaList(r.Group)
+	if group != nil {
+		if utf8.RuneCountInString(*group) > MaxBatchEditGroupLength {
+			return fields, errors.New(i18n.MsgChannelBatchGroupTooLong)
+		}
+		// 段归一化后逐段校验，杜绝带空格或空段的分组进入 abilities
+		for _, segment := range groupSegments {
+			if segment == "" {
+				return fields, errors.New(i18n.MsgChannelBatchGroupInvalid)
+			}
+		}
+	}
+	fields.Group = group
+
+	tag, err := optionalTrimmedString(r.Tag, MaxBatchEditTagLength, i18n.MsgChannelBatchTagTooLong)
+	if err != nil {
+		return fields, err
+	}
+	fields.Tag = tag
+
+	fields.Remark, err = optionalTrimmedString(r.Remark, MaxBatchEditTextLength, i18n.MsgChannelBatchRemarkTooLong)
+	if err != nil {
+		return fields, err
+	}
+
+	modelSegments, models := optionalCommaList(r.Models)
+	for _, name := range modelSegments {
+		if name == "" {
+			return fields, errors.New(i18n.MsgChannelBatchModelsInvalid)
+		}
+		// 按码点计数，与其余文本字段及 abilities.model 列宽一致（03 文档 2.2.4）
+		if utf8.RuneCountInString(name) > MaxBatchEditTextLength {
+			return fields, &i18nParamError{key: i18n.MsgChannelBatchModelTooLong, args: map[string]any{"Name": name}}
+		}
+	}
+	fields.Models = models
+
+	if r.ModelMapping != nil {
+		mapping := strings.TrimSpace(*r.ModelMapping)
+		if mapping == "" {
+			return fields, errors.New(i18n.MsgChannelBatchMappingEmpty)
+		}
+		if err := validateBatchModelMapping(mapping); err != nil {
+			return fields, err
+		}
+		fields.ModelMapping = common.GetPointer(mapping)
+	}
+
+	if r.Weight != nil {
+		if *r.Weight < 0 || int64(*r.Weight) > math.MaxUint32 {
+			return fields, errors.New(i18n.MsgChannelBatchWeightRange)
+		}
+		fields.Weight = common.GetPointer(uint(*r.Weight))
+	}
+
+	if r.Priority != nil {
+		// int64 全域由 DTO 类型精确保证，不经 float64 中转也不额外设界（03 文档 2.2.5），
+		// 与单渠道编辑同口径
+		fields.Priority = r.Priority
+	}
+
+	fields.TestModel, err = optionalTrimmedString(r.TestModel, MaxBatchEditTextLength, i18n.MsgChannelBatchTestModelLong)
+	if err != nil {
+		return fields, err
+	}
+
+	if r.AutoBan != nil {
+		if *r.AutoBan != 0 && *r.AutoBan != 1 {
+			return fields, errors.New(i18n.MsgChannelBatchAutoBanInvalid)
+		}
+		fields.AutoBan = common.GetPointer(*r.AutoBan)
+	}
+
+	if !fields.AnySet() {
+		return fields, errors.New(i18n.MsgChannelBatchNoFields)
+	}
+	return fields, nil
+}
+
+// Batch edit field limits shared by validation and audit (frontend mirrors them
+// in web/src/features/channels/lib/channel-batch-edit.ts).
+const (
+	MaxBatchEditChannels    = 200
+	MaxBatchEditGroupLength = 64
+	MaxBatchEditTagLength   = 191
+	MaxBatchEditTextLength  = 255
+)
+
+// channelBatchUpdateFailurePayload 批量编辑失败明细响应体（03 文档 2.3）：
+// reason 由失败环节的 i18n 键翻译而来，不含驱动层原始错误。
+type channelBatchUpdateFailurePayload struct {
+	Id     int    `json:"id"`
+	Reason string `json:"reason"`
+}
+
+// i18nParamError 携带模板参数的 i18n 错误，由 respondBatchUpdateError 统一翻译。
+type i18nParamError struct {
+	key  string
+	args map[string]any
+}
+
+func (e *i18nParamError) Error() string { return e.key }
+
+// respondBatchUpdateError 以请求语言翻译校验错误（err 为 i18n 键）。
+func respondBatchUpdateError(c *gin.Context, err error) {
+	if paramErr, ok := err.(*i18nParamError); ok {
+		common.ApiErrorI18n(c, paramErr.key, paramErr.args)
+		return
+	}
+	common.ApiErrorI18n(c, err.Error())
 }
 
 type PatchChannel struct {
@@ -1353,6 +1560,70 @@ func BatchSetChannelTag(c *gin.Context) {
 		"data":    len(channelBatch.Ids),
 	})
 	return
+}
+
+// BatchUpdateChannels 批量统一编辑勾选渠道的可编辑字段（空即跳过，事务全成全败）。
+func BatchUpdateChannels(c *gin.Context) {
+	var req ChannelBatchUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
+	fields, err := req.buildBatchUpdateFields()
+	if err != nil {
+		respondBatchUpdateError(c, err)
+		return
+	}
+	updatedIds, failure, err := model.BatchUpdateChannels(req.Ids, fields)
+	if err != nil {
+		// 事务失败明细需额外携带 data.failed（03 文档 2.3）：原始驱动错误只进服务端日志
+		if failure != nil {
+			common.SysError(fmt.Sprintf("channel batch update failed: channel_id=%d kind=%s err=%v",
+				failure.Id, failure.Kind, failure.Err))
+			reasonKey := i18n.MsgChannelBatchUpdateFailed
+			if failure.Kind == model.BatchFailureSyncAbilities {
+				reasonKey = i18n.MsgChannelBatchAbilitiesFailed
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": i18n.T(c, i18n.MsgChannelBatchFailed),
+				"data": gin.H{
+					"failed": []channelBatchUpdateFailurePayload{{
+						Id:     failure.Id,
+						Reason: i18n.T(c, reasonKey),
+					}},
+				},
+			})
+			return
+		}
+		common.ApiError(c, err)
+		return
+	}
+	// ids 全部已不存在时数据库无变化，视作无目标而非成功（03 文档 2.2.1）
+	if len(updatedIds) == 0 {
+		common.ApiErrorI18n(c, i18n.MsgChannelNotExists)
+		return
+	}
+	model.InitChannelCache()
+	if fields.AffectsAbilities() {
+		// 清理返回值无错误语义：零条数在渠道无绑定时为常态，失败已由该函数内部重试与
+		// SysError 承担，不阻断批量编辑结果（03 文档 2.1 处理流程 5）
+		service.ClearChannelAffinityRuntimeByChannelIDs(updatedIds)
+	}
+
+	// 审计的 updated_fields/values 由字段元数据表单源派生（03 文档 2.1 处理流程 6）：
+	// values 记录各生效字段的生效值（校验层已 trim 与归一化，与落库值一致，不截断）；
+	// channel_ids 记实际更新的渠道，与 count 同口径；
+	// updated_fields 以逗号连接串入审计，与模板 ${updated_fields} 的渲染形态一致
+	recordManageAudit(c, "channel.update_batch", map[string]interface{}{
+		"count":          len(updatedIds),
+		"channel_ids":    updatedIds,
+		"updated_fields": strings.Join(fields.EffectiveColumns(), ", "),
+		"values":         fields.ColumnValues(),
+	})
+	common.ApiSuccess(c, gin.H{
+		"count": len(updatedIds),
+	})
 }
 
 func GetTagModels(c *gin.Context) {
