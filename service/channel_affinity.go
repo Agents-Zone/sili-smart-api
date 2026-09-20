@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/cachex"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -1230,4 +1232,169 @@ func channelAffinityUsageCacheStatsLock(key string) *sync.Mutex {
 	_, _ = h.Write([]byte(key))
 	idx := h.Sum32() % uint32(len(channelAffinityUsageCacheStatsLocks))
 	return &channelAffinityUsageCacheStatsLocks[idx]
+}
+
+// ChannelAffinityBinding describes a channel and the tokens currently bound to it.
+type ChannelAffinityBinding struct {
+	ChannelID   int                    `json:"channel_id"`
+	ChannelName string                 `json:"channel_name"`
+	Tokens      []ChannelAffinityToken `json:"tokens"`
+}
+
+type ChannelAffinityToken struct {
+	TokenID   int    `json:"token_id"`
+	TokenName string `json:"token_name"`
+}
+
+// GetChannelAffinityBindings returns current valid channel affinity bindings from cache.
+func GetChannelAffinityBindings() ([]ChannelAffinityBinding, error) {
+	cache := getChannelAffinityCache()
+	keys, err := cache.Keys()
+	if err != nil {
+		common.SysError(fmt.Sprintf("channel affinity cache list keys failed: err=%v", err))
+		return nil, err
+	}
+	prefix := channelAffinityCacheNamespace + ":"
+	setting := operation_setting.GetChannelAffinitySetting()
+	if setting == nil {
+		return []ChannelAffinityBinding{}, nil
+	}
+	channelIDs := make(map[int]struct{})
+	tokenIDs := make(map[int]struct{})
+	pairs := make([]struct{ channelID, tokenID int }, 0, len(keys))
+	for _, fullKey := range keys {
+		if !strings.HasPrefix(fullKey, prefix) {
+			continue
+		}
+		suffix := strings.TrimPrefix(fullKey, prefix)
+		parts := strings.Split(suffix, ":")
+		if len(parts) < 2 {
+			continue
+		}
+		valid := false
+		for _, rule := range setting.Rules {
+			hasTokenIDKeySource := false
+			for _, source := range rule.KeySources {
+				if source.Type == "context_int" && source.Key == "token_id" {
+					hasTokenIDKeySource = true
+					break
+				}
+			}
+			if !hasTokenIDKeySource {
+				continue
+			}
+			idx := 0
+			if rule.IncludeRuleName {
+				if idx >= len(parts) || strings.TrimSpace(rule.Name) == "" || parts[idx] != rule.Name {
+					continue
+				}
+				idx++
+			}
+			if rule.IncludeModelName {
+				if idx >= len(parts)-1 {
+					continue
+				}
+				idx++
+			}
+			if rule.IncludeUsingGroup {
+				if idx >= len(parts)-1 {
+					continue
+				}
+				idx++
+			}
+			if idx != len(parts)-1 {
+				continue
+			}
+			tokenID, parseErr := strconv.Atoi(parts[len(parts)-1])
+			if parseErr != nil || tokenID <= 0 {
+				continue
+			}
+			valid = true
+			channelID, found, getErr := cache.Get(suffix)
+			if getErr != nil {
+				common.SysError(fmt.Sprintf("channel affinity cache get failed: key=%s, err=%v", fullKey, getErr))
+				return nil, getErr
+			}
+			if !found || channelID <= 0 {
+				break
+			}
+			channelIDs[channelID] = struct{}{}
+			tokenIDs[tokenID] = struct{}{}
+			pairs = append(pairs, struct{ channelID, tokenID int }{channelID, tokenID})
+			break
+		}
+		_ = valid
+	}
+	if len(pairs) == 0 {
+		return []ChannelAffinityBinding{}, nil
+	}
+	ids := make([]int, 0, len(channelIDs))
+	for id := range channelIDs {
+		ids = append(ids, id)
+	}
+	var channels []model.Channel
+	if err := model.DB.Select("id", "name").Where("id IN ?", ids).Find(&channels).Error; err != nil {
+		common.SysError(fmt.Sprintf("channel affinity bindings query channels failed: err=%v", err))
+		return nil, err
+	}
+	tids := make([]int, 0, len(tokenIDs))
+	for id := range tokenIDs {
+		tids = append(tids, id)
+	}
+	var tokens []model.Token
+	if err := model.DB.Select("id", "name").Where("id IN ?", tids).Find(&tokens).Error; err != nil {
+		common.SysError(fmt.Sprintf("channel affinity bindings query tokens failed: err=%v", err))
+		return nil, err
+	}
+	channelByID := make(map[int]model.Channel, len(channels))
+	for _, c := range channels {
+		channelByID[c.Id] = c
+	}
+	tokenByID := make(map[int]model.Token, len(tokens))
+	for _, tok := range tokens {
+		tokenByID[tok.Id] = tok
+	}
+	grouped := make(map[int]*ChannelAffinityBinding)
+	seen := make(map[int]map[int]struct{})
+	for _, p := range pairs {
+		c, ok := channelByID[p.channelID]
+		if !ok {
+			continue
+		}
+		tok, ok := tokenByID[p.tokenID]
+		if !ok {
+			continue
+		}
+		b := grouped[p.channelID]
+		if b == nil {
+			name := c.Name
+			if strings.TrimSpace(name) == "" {
+				name = "-"
+			}
+			b = &ChannelAffinityBinding{ChannelID: p.channelID, ChannelName: name}
+			grouped[p.channelID] = b
+			seen[p.channelID] = map[int]struct{}{}
+		}
+		if _, ok := seen[p.channelID][p.tokenID]; ok {
+			continue
+		}
+		name := tok.Name
+		if strings.TrimSpace(name) == "" {
+			name = "-"
+		}
+		b.Tokens = append(b.Tokens, ChannelAffinityToken{TokenID: p.tokenID, TokenName: name})
+		seen[p.channelID][p.tokenID] = struct{}{}
+	}
+	result := make([]ChannelAffinityBinding, 0, len(grouped))
+	for _, b := range grouped {
+		sort.Slice(b.Tokens, func(i, j int) bool { return b.Tokens[i].TokenID < b.Tokens[j].TokenID })
+		result = append(result, *b)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].ChannelName == result[j].ChannelName {
+			return result[i].ChannelID < result[j].ChannelID
+		}
+		return result[i].ChannelName < result[j].ChannelName
+	})
+	return result, nil
 }

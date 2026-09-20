@@ -7,7 +7,7 @@ sub_plans:
   - id: "01"
     name: "绑定明细查看"
     file: "01_绑定明细查看.md"
-    status: "pending"
+    status: "completed"
 
 execution_order:
   - "01"
