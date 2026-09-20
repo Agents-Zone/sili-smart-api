@@ -6,11 +6,13 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
@@ -83,6 +85,7 @@ func TestGetChannelAffinityBindingsHandlerEmpty(t *testing.T) {
 }
 
 func TestGetChannelAffinityBindingsHandlerFailure(t *testing.T) {
+	require.NoError(t, i18n.Init())
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	oldDB, oldMemory := model.DB, common.MemoryCacheEnabled
@@ -105,15 +108,27 @@ func TestGetChannelAffinityBindingsHandlerFailure(t *testing.T) {
 		*operation_setting.GetChannelAffinitySetting() = oldSetting
 		model.DB, common.MemoryCacheEnabled = oldDB, oldMemory
 	})
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodGet, "/api/option/channel_affinity_bindings", nil)
-	GetChannelAffinityBindings(c)
-	var payload struct {
-		Success bool   `json:"success"`
-		Message string `json:"message"`
+	for _, tc := range []struct{ language, message string }{
+		{"zh-CN", "渠道亲和性绑定读取失败"},
+		{"zh-TW", "渠道親和性綁定讀取失敗"},
+		{"en", "Failed to load channel affinity bindings"},
+	} {
+		t.Run(tc.language, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/option/channel_affinity_bindings", nil)
+			c.Request.Header.Set("Accept-Language", tc.language)
+			GetChannelAffinityBindings(c)
+			var payload struct {
+				Success bool                             `json:"success"`
+				Message string                           `json:"message"`
+				Data    []service.ChannelAffinityBinding `json:"data"`
+			}
+			require.NoError(t, common.Unmarshal(w.Body.Bytes(), &payload))
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.False(t, payload.Success)
+			assert.Equal(t, tc.message, payload.Message)
+			assert.Nil(t, payload.Data)
+		})
 	}
-	require.NoError(t, common.Unmarshal(w.Body.Bytes(), &payload))
-	require.False(t, payload.Success)
-	require.Equal(t, "渠道亲和性绑定读取失败", payload.Message)
 }

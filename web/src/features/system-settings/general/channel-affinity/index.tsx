@@ -59,7 +59,6 @@ function parseRules(jsonStr: string): AffinityRule[] {
     return []
   }
 }
-
 function RuleBadgeList(props: { items: string[] }) {
   return (
     <StatusBadgeList
@@ -786,4 +785,3 @@ export function ChannelAffinitySection(props: Props) {
     </>
   )
 }
-

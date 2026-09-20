@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
@@ -22,20 +24,13 @@ func GetChannelAffinityCacheStats(c *gin.Context) {
 func GetChannelAffinityBindings(c *gin.Context) {
 	bindings, err := service.GetChannelAffinityBindings()
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "渠道亲和性绑定读取失败",
-		})
+		common.ApiErrorI18n(c, i18n.MsgChannelAffinityBindingsReadFailed)
 		return
 	}
 	if bindings == nil {
 		bindings = []service.ChannelAffinityBinding{}
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data":    bindings,
-	})
+	common.ApiSuccess(c, bindings)
 }
 
 func ClearChannelAffinityCache(c *gin.Context) {

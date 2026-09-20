@@ -295,6 +295,9 @@ distributor.invalid_request_parse_model: "Invalid request, unable to parse model
 # Conversation messages
 conversation.not_found: "conversation not found"
 
+# Channel affinity messages
+channel_affinity.bindings_read_failed: "Failed to load channel affinity bindings"
+
 # Custom OAuth provider messages
 custom_oauth.not_found: "Custom OAuth provider not found"
 custom_oauth.slug_empty: "Slug cannot be empty"

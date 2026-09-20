@@ -349,6 +349,11 @@ const (
 	MsgConversationNotFound = "conversation.not_found"
 )
 
+// Channel affinity related messages
+const (
+	MsgChannelAffinityBindingsReadFailed = "channel_affinity.bindings_read_failed"
+)
+
 // Custom OAuth provider related messages
 const (
 	MsgCustomOAuthNotFound          = "custom_oauth.not_found"

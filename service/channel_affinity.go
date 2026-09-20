@@ -1267,49 +1267,11 @@ func GetChannelAffinityBindings() ([]ChannelAffinityBinding, error) {
 			continue
 		}
 		suffix := strings.TrimPrefix(fullKey, prefix)
-		parts := strings.Split(suffix, ":")
-		if len(parts) < 2 {
-			continue
-		}
-		valid := false
 		for _, rule := range setting.Rules {
-			hasTokenIDKeySource := false
-			for _, source := range rule.KeySources {
-				if source.Type == "context_int" && source.Key == "token_id" {
-					hasTokenIDKeySource = true
-					break
-				}
-			}
-			if !hasTokenIDKeySource {
+			tokenID, ok := parseChannelAffinityBindingTokenID(rule, suffix)
+			if !ok {
 				continue
 			}
-			idx := 0
-			if rule.IncludeRuleName {
-				if idx >= len(parts) || strings.TrimSpace(rule.Name) == "" || parts[idx] != rule.Name {
-					continue
-				}
-				idx++
-			}
-			if rule.IncludeModelName {
-				if idx >= len(parts)-1 {
-					continue
-				}
-				idx++
-			}
-			if rule.IncludeUsingGroup {
-				if idx >= len(parts)-1 {
-					continue
-				}
-				idx++
-			}
-			if idx != len(parts)-1 {
-				continue
-			}
-			tokenID, parseErr := strconv.Atoi(parts[len(parts)-1])
-			if parseErr != nil || tokenID <= 0 {
-				continue
-			}
-			valid = true
 			channelID, found, getErr := cache.Get(suffix)
 			if getErr != nil {
 				common.SysError(fmt.Sprintf("channel affinity cache get failed: key=%s, err=%v", fullKey, getErr))
@@ -1323,7 +1285,6 @@ func GetChannelAffinityBindings() ([]ChannelAffinityBinding, error) {
 			pairs = append(pairs, struct{ channelID, tokenID int }{channelID, tokenID})
 			break
 		}
-		_ = valid
 	}
 	if len(pairs) == 0 {
 		return []ChannelAffinityBinding{}, nil
@@ -1397,4 +1358,40 @@ func GetChannelAffinityBindings() ([]ChannelAffinityBinding, error) {
 		return result[i].ChannelName < result[j].ChannelName
 	})
 	return result, nil
+}
+
+func parseChannelAffinityBindingTokenID(rule operation_setting.ChannelAffinityRule, suffix string) (int, bool) {
+	if len(rule.KeySources) == 0 {
+		return 0, false
+	}
+	for _, source := range rule.KeySources {
+		if source.Type != "context_int" || source.Key != "token_id" {
+			return 0, false
+		}
+	}
+	remaining := suffix
+	if rule.IncludeRuleName {
+		name := strings.TrimSpace(rule.Name)
+		prefix := name + ":"
+		if name == "" || !strings.HasPrefix(remaining, prefix) {
+			return 0, false
+		}
+		remaining = strings.TrimPrefix(remaining, prefix)
+	}
+	parts := strings.Split(remaining, ":")
+	requiredParts := 1
+	if rule.IncludeModelName {
+		requiredParts++
+	}
+	if rule.IncludeUsingGroup {
+		requiredParts++
+	}
+	if len(parts) < requiredParts {
+		return 0, false
+	}
+	tokenID, err := strconv.Atoi(parts[len(parts)-1])
+	if err != nil || tokenID <= 0 {
+		return 0, false
+	}
+	return tokenID, true
 }

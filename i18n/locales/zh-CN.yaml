@@ -296,6 +296,9 @@ distributor.invalid_request_parse_model: "无效的请求，无法解析模型"
 # Conversation messages
 conversation.not_found: "会话不存在"
 
+# Channel affinity messages
+channel_affinity.bindings_read_failed: "渠道亲和性绑定读取失败"
+
 # Custom OAuth provider messages
 custom_oauth.not_found: "自定义 OAuth 提供商不存在"
 custom_oauth.slug_empty: "标识符不能为空"

@@ -20,7 +20,13 @@ func setupAffinityBindingsTest(t *testing.T) {
 	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Token{}))
 	prev := model.DB
 	model.DB = db
-	t.Cleanup(func() { model.DB = prev })
+	t.Cleanup(func() {
+		model.DB = prev
+		sqlDB, closeErr := db.DB()
+		if closeErr == nil {
+			_ = sqlDB.Close()
+		}
+	})
 	prevRedis, prevRDB := common.RedisEnabled, common.RDB
 	common.RedisEnabled, common.RDB = false, nil
 	resetAffinityCacheSingleton()
@@ -86,6 +92,61 @@ func TestGetChannelAffinityBindingsSkipsInvalidAndMissingRelations(t *testing.T)
 	assert.Equal(t, "-", got[0].ChannelName)
 	require.Len(t, got[0].Tokens, 1)
 	assert.Equal(t, "-", got[0].Tokens[0].TokenName)
+}
+
+func TestGetChannelAffinityBindingsAcceptsTokenOnlyKey(t *testing.T) {
+	setupAffinityBindingsTest(t)
+	setting := operation_setting.GetChannelAffinitySetting()
+	setting.Rules = []operation_setting.ChannelAffinityRule{{
+		KeySources: []operation_setting.ChannelAffinityKeySource{{Type: "context_int", Key: "token_id"}},
+	}}
+	require.NoError(t, model.DB.Create(&model.Channel{Id: 1, Name: "Alpha", Key: "k"}).Error)
+	require.NoError(t, model.DB.Create(&model.Token{Id: 101, Name: "tok", Key: "k101"}).Error)
+	require.NoError(t, getChannelAffinityCache().SetWithTTL("101", 1, time.Hour))
+
+	got, err := GetChannelAffinityBindings()
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, 101, got[0].Tokens[0].TokenID)
+}
+
+func TestGetChannelAffinityBindingsAcceptsColonInRuleName(t *testing.T) {
+	setupAffinityBindingsTest(t)
+	setting := operation_setting.GetChannelAffinitySetting()
+	setting.Rules = []operation_setting.ChannelAffinityRule{{
+		Name:            "rule:with:colon",
+		IncludeRuleName: true,
+		KeySources:      []operation_setting.ChannelAffinityKeySource{{Type: "context_int", Key: "token_id"}},
+	}}
+	require.NoError(t, model.DB.Create(&model.Channel{Id: 1, Name: "Alpha", Key: "k"}).Error)
+	require.NoError(t, model.DB.Create(&model.Token{Id: 101, Name: "tok", Key: "k101"}).Error)
+	require.NoError(t, getChannelAffinityCache().SetWithTTL("rule:with:colon:101", 1, time.Hour))
+
+	got, err := GetChannelAffinityBindings()
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, 101, got[0].Tokens[0].TokenID)
+}
+
+func TestGetChannelAffinityBindingsRequiresActualTokenIDSource(t *testing.T) {
+	setupAffinityBindingsTest(t)
+	setting := operation_setting.GetChannelAffinitySetting()
+	setting.Rules = []operation_setting.ChannelAffinityRule{{
+		Name:            "mixed",
+		IncludeRuleName: true,
+		KeySources: []operation_setting.ChannelAffinityKeySource{
+			{Type: "request_header", Key: "X-Affinity-Key"},
+			{Type: "context_int", Key: "token_id"},
+		},
+	}}
+	require.NoError(t, model.DB.Create(&model.Channel{Id: 1, Name: "Alpha", Key: "k"}).Error)
+	require.NoError(t, model.DB.Create(&model.Token{Id: 101, Name: "header", Key: "k101"}).Error)
+	require.NoError(t, model.DB.Create(&model.Token{Id: 202, Name: "context", Key: "k202"}).Error)
+	require.NoError(t, getChannelAffinityCache().SetWithTTL("mixed:101", 1, time.Hour))
+
+	got, err := GetChannelAffinityBindings()
+	require.NoError(t, err)
+	assert.Empty(t, got)
 }
 
 func TestGetChannelAffinityBindingsReturnsCacheErrorWithoutPartialData(t *testing.T) {

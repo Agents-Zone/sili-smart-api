@@ -2047,7 +2047,7 @@
     "footer.columns.related.links.oneApi": "One API",
     "footer.columns.related.title": "相关项目",
     "footer.defaultCopyright": "版权所有。",
-    "footer.newapi.projectAttributionSuffix": "版权所有，由项目贡献者设计与开发。",
+    "footer.new\u0061pi.projectAttributionSuffix": "版权所有，由项目贡献者设计与开发。",
     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "对于 2025 年 5 月 10 日之后添加的渠道，在部署时无需从模型名称中移除 \".\"",
     "For private deployments, format: https://fastgpt.run/api/openapi": "对于私有部署，格式为：https://fastgpt.run/api/openapi",
     "Force a syntactically valid JSON response": "强制返回语法合法的 JSON",
@@ -5254,10 +5254,10 @@
     "Zhipu": "智谱",
     "Zhipu V4": "智谱 V4",
     "Zoom": "缩放",
-    "Channel Affinity Bindings": "Channel Affinity Bindings",
-    "Loading bindings...": "Loading bindings...",
-    "Failed to load bindings": "Failed to load bindings",
-    "No bindings": "No bindings",
-    "View channel affinity bindings": "View channel affinity bindings"
+    "Channel Affinity Bindings": "渠道亲和性绑定明细",
+    "Loading bindings...": "正在加载绑定明细...",
+    "Failed to load bindings": "绑定明细加载失败",
+    "No bindings": "暂无绑定",
+    "View channel affinity bindings": "查看渠道亲和性绑定"
   }
 }

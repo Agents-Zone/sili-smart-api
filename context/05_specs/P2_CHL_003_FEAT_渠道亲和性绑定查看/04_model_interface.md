@@ -36,7 +36,7 @@ erDiagram
     }
 ```
 
-`AFFINITY_CACHE` 是逻辑运行时实体，不是数据库表。缓存键命名空间为 `new-api:channel_affinity:v1`，缓存值为渠道 ID。仅能从按 `token_id` 配置的规则键中解析 token_id 的条目进入本接口结果。
+`AFFINITY_CACHE` 是逻辑运行时实体，不是数据库表。缓存键命名空间为 `new-api:channel_affinity:v1`，缓存值为渠道 ID。仅能从全部键源均为 `context_int` 类型且键名为 `token_id` 的规则键中解析 token_id 的条目进入本接口结果。规则未启用规则名、模型名和分组名时，单段 token_id 键同样有效；键字段包含冒号时保持可逆解析。
 
 ## 3. 既有模型复用
 
