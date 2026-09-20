@@ -29,6 +29,7 @@ func TestGetChannelAffinityBindingsHandlerSuccess(t *testing.T) {
 	require.NoError(t, db.Create(&model.Token{Id: 101, UserId: 1, Name: "生产令牌"}).Error)
 	service.ClearChannelAffinityCacheAll()
 	t.Cleanup(func() {
+		service.ClearChannelAffinityRuntimeByChannelIDs([]int{1})
 		service.ClearChannelAffinityCacheAll()
 		*operation_setting.GetChannelAffinitySetting() = oldSetting
 		model.DB, model.LOG_DB, common.MemoryCacheEnabled, common.RedisEnabled = oldDB, oldLogDB, oldMemory, oldRedis
@@ -99,6 +100,8 @@ func TestGetChannelAffinityBindingsHandlerFailure(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, sqlDB.Close())
 	t.Cleanup(func() {
+		service.ClearChannelAffinityRuntimeByChannelIDs([]int{1})
+		service.ClearChannelAffinityCacheAll()
 		*operation_setting.GetChannelAffinitySetting() = oldSetting
 		model.DB, common.MemoryCacheEnabled = oldDB, oldMemory
 	})
