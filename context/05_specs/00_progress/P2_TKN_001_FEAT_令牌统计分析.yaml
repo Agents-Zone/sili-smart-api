@@ -1,0 +1,62 @@
+feature_id: P2_TKN_001_FEAT_令牌统计分析
+module_code: TKN
+phase: P2
+type: FEAT
+root_base: null
+base_on: null
+change_group: null
+change_history: []
+dependencies: []
+feature_name: 令牌统计分析
+creator: lixuetao
+created_at: '2026-10-03T07:07:16Z'
+updated_at: '2026-10-03T09:09:02Z'
+stages:
+  specs:
+    status: completed
+    started_at: '2026-10-03T07:40:10Z'
+    completed_at: '2026-10-03T07:40:10Z'
+    check_owner: lixuetao
+  interface:
+    status: completed
+    started_at: '2026-10-03T07:40:10Z'
+    completed_at: '2026-10-03T08:00:23Z'
+    check_owner: lixuetao
+  dev_plan:
+    status: completed
+    started_at: '2026-10-03T08:00:23Z'
+    completed_at: '2026-10-03T09:09:02Z'
+    check_owner: lixuetao
+  dev_exec:
+    status: in_progress
+    started_at: '2026-10-03T09:09:02Z'
+    completed_at: null
+    check_owner: null
+rollback_history:
+- timestamp: '2026-10-03T07:40:10Z'
+  type: advance
+  from_stage: specs
+  to_stage: specs
+  reason: null
+  check_owner: lixuetao
+  affected_stages:
+  - specs
+  - interface
+- timestamp: '2026-10-03T08:00:23Z'
+  type: advance
+  from_stage: interface
+  to_stage: interface
+  reason: null
+  check_owner: lixuetao
+  affected_stages:
+  - interface
+  - dev_plan
+- timestamp: '2026-10-03T09:09:02Z'
+  type: advance
+  from_stage: dev_plan
+  to_stage: dev_plan
+  reason: null
+  check_owner: lixuetao
+  affected_stages:
+  - dev_plan
+  - dev_exec
