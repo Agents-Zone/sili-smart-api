@@ -20,7 +20,7 @@ sub_plans:
   - id: "01"
     name: "令牌统计"
     file: "01_令牌统计.md"
-    status: "pending"
+    status: "completed"
     input_files:
       - "../01_功能需求规格说明书.md"
       - "../03_api_interface.md"

@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "feature_id": "P2_TKN_001_FEAT_令牌统计分析",
+  "subplans": {
+    "01": {
+      "base_sha": "6a0d780205c51f5817e297eb486f82eba99a14c3",
+      "plan_digest": "17eba99e3327e8d11ba7c195172a42aae8747641bc3cceca9368fd607f2179c9",
+      "input_digests": {
+        "../01_功能需求规格说明书.md": "b37d7d44f9a8af5b89d516850605ac013d8abeb671f8fd1587c0b20f23d7fc57",
+        "../03_api_interface.md": "46ee368141a914287454967756899d1b6692c11b8a7936b50e34cb99f8777f55",
+        "../04_model_interface.md": "b63c46652f6c609ad59ff4d336bcd89e7531e72df050993356d682402e972cf7"
+      },
+      "tasks": {
+        "T1": {
+          "key": "P2_TKN_001_FEAT_令牌统计分析/01/T1",
+          "status": "verified",
+          "base_sha": "6a0d780205c51f5817e297eb486f82eba99a14c3",
+          "head_sha": "00ae09dfcd835c770f7226391800399c823dd592",
+          "verification": {
+            "path": "execution-evidence/01-T1-00ae09df.md",
+            "digest": "908399f4f3b499ee61632c97af9189881a68d0dea644daaf555d2240290bf57e",
+            "head_sha": "00ae09dfcd835c770f7226391800399c823dd592",
+            "recorded_at": "2026-10-03T11:39:46Z",
+            "deferred_reason": null
+          }
+        },
+        "T2": {
+          "key": "P2_TKN_001_FEAT_令牌统计分析/01/T2",
+          "status": "verified",
+          "base_sha": "00ae09dfcd835c770f7226391800399c823dd592",
+          "head_sha": "d9074529227f245168c8557f8b905ff7b74c63a2",
+          "verification": {
+            "path": "execution-evidence/01-T2-d907452.md",
+            "digest": "326811acde7eb8a579836284cd1799af10368ee074e84e3b91a2ceeb6af3db32",
+            "head_sha": "d9074529227f245168c8557f8b905ff7b74c63a2",
+            "recorded_at": "2026-10-03T11:43:58Z",
+            "deferred_reason": null
+          }
+        },
+        "T3": {
+          "key": "P2_TKN_001_FEAT_令牌统计分析/01/T3",
+          "status": "verified",
+          "base_sha": "d9074529227f245168c8557f8b905ff7b74c63a2",
+          "head_sha": "58d7ff079726ac07c344e8ce4353806516d329e3",
+          "verification": {
+            "path": "execution-evidence/01-T3-58d7ff0.md",
+            "digest": "f102e7fff25b2f16e6f5da5db3da5c36ee1e234d306dd5508c6bccfea463f829",
+            "head_sha": "58d7ff079726ac07c344e8ce4353806516d329e3",
+            "recorded_at": "2026-10-03T11:52:55Z",
+            "deferred_reason": null
+          }
+        },
+        "T4": {
+          "key": "P2_TKN_001_FEAT_令牌统计分析/01/T4",
+          "status": "verified",
+          "base_sha": "58d7ff079726ac07c344e8ce4353806516d329e3",
+          "head_sha": "b0c94555928f191332b7f7d0b8103012d1fae3d3",
+          "verification": {
+            "path": "execution-evidence/01-T4-b0c9455.md",
+            "digest": "c4b239a950c25ba61d05441f9f840b62312c20d5813efa8845c792b39cb07ea6",
+            "head_sha": "b0c94555928f191332b7f7d0b8103012d1fae3d3",
+            "recorded_at": "2026-10-03T12:00:51Z",
+            "deferred_reason": null
+          }
+        }
+      },
+      "review": {
+        "path": "execution-evidence/01-review-b0c9455.md",
+        "digest": "382ea8e1124ce81de3d53ae333ad8f77575e245aea4d78948e8a08b44b27eecd",
+        "head_sha": "b0c94555928f191332b7f7d0b8103012d1fae3d3",
+        "base_sha": "6a0d780205c51f5817e297eb486f82eba99a14c3",
+        "passed": true,
+        "recorded_at": "2026-10-03T12:08:04Z"
+      },
+      "review_failures": 0
+    }
+  },
+  "updated_at": "2026-10-03T12:08:04Z"
+}
