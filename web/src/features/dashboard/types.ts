@@ -251,6 +251,26 @@ export interface ProcessedUserChartData {
   spec_user_trend: VChartSpec
 }
 
+export interface TokenQuotaDataItem {
+  token_id: number
+  token_name: string
+  created_at: number
+  count?: number
+  quota?: number
+  token_used?: number
+}
+
+export interface TokenChartsFilters {
+  timeGranularity: TimeGranularity
+  selectedRange: number
+  topTokenLimit: number
+}
+
+export interface ProcessedTokenChartData {
+  spec_token_rank: VChartSpec
+  spec_token_trend: VChartSpec
+}
+
 // ============================================================================
 // Announcement Types
 // ============================================================================

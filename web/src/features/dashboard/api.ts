@@ -21,6 +21,7 @@ import { api } from '@/lib/api'
 import type {
   FlowQuotaDataItem,
   QuotaDataItem,
+  TokenQuotaDataItem,
   UptimeGroupResult,
 } from './types'
 
@@ -63,6 +64,22 @@ export async function getUserQuotaDataByUsers(params: {
     '/api/data/users',
     { params }
   )
+  return res.data
+}
+
+export async function getTokenQuotaDataByTokens(params: {
+  start_timestamp: number
+  end_timestamp: number
+}): Promise<{
+  success: boolean
+  data?: TokenQuotaDataItem[]
+  message?: string
+}> {
+  const res = await api.get<{
+    success: boolean
+    data?: TokenQuotaDataItem[]
+    message?: string
+  }>('/api/data/tokens', { params })
   return res.data
 }
 

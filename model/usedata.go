@@ -181,3 +181,60 @@ func GetAllQuotaDates(startTime int64, endTime int64, username string) (quotaDat
 	err = DB.Table("quota_data").Select("model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used, created_at").Where("created_at >= ? and created_at <= ?", startTime, endTime).Group("model_name, created_at").Find(&quotaDatas).Error
 	return quotaDatas, err
 }
+
+// TokenQuotaData 按令牌维度的小时级聚合投影，名称关联查询后回填
+type TokenQuotaData struct {
+	TokenID   int    `json:"token_id"`
+	TokenName string `json:"token_name"`
+	CreatedAt int64  `json:"created_at"`
+	Count     int    `json:"count"`
+	Quota     int    `json:"quota"`
+	TokenUsed int    `json:"token_used"`
+}
+
+func GetQuotaDataGroupByToken(startTime int64, endTime int64) ([]*TokenQuotaData, error) {
+	rows := make([]*TokenQuotaData, 0)
+	err := DB.Table("quota_data").
+		Select("token_id, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
+		Where("created_at >= ? and created_at <= ?", startTime, endTime).
+		Group("token_id, created_at").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	tokenIDSet := make(map[int]struct{})
+	tokenIDs := make([]int, 0)
+	for _, row := range rows {
+		if row.TokenID == 0 {
+			continue
+		}
+		if _, ok := tokenIDSet[row.TokenID]; ok {
+			continue
+		}
+		tokenIDSet[row.TokenID] = struct{}{}
+		tokenIDs = append(tokenIDs, row.TokenID)
+	}
+	if len(tokenIDs) == 0 {
+		return rows, nil
+	}
+
+	var tokens []struct {
+		Id   int    `gorm:"column:id"`
+		Name string `gorm:"column:name"`
+	}
+	if err := DB.Model(&Token{}).Select("id, name").Where("id IN ?", tokenIDs).Find(&tokens).Error; err != nil {
+		return nil, err
+	}
+	tokenNameByID := make(map[int]string, len(tokens))
+	for _, token := range tokens {
+		tokenNameByID[token.Id] = token.Name
+	}
+	// 已删除或空名称令牌保持空串，由前端回退显示 #token_id
+	for _, row := range rows {
+		if name := tokenNameByID[row.TokenID]; name != "" {
+			row.TokenName = name
+		}
+	}
+	return rows, nil
+}
