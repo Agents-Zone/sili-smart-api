@@ -3,8 +3,8 @@ spec_kind: "business"
 spec_kind_basis: "ID 类型段 FEAT 与进度 type 一致；feature_progress kind 命令返回 business（source: baseline）"
 name: "令牌统计分析"
 created_at: "2026-10-03"
-finalized: false
-closeout_result: null
+finalized: true
+closeout_result: "本地合并 feature/P2_TKN_001 至 main（合并提交 f6169ce4），合并后后端测试与构建验证通过；回执见 ../closeout-P2_TKN_001-20261003.md"
 
 design_inputs:
   api:
