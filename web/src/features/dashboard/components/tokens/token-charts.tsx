@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQuery } from '@tanstack/react-query'
 import { VChart } from '@visactor/react-vchart'
 import { KeyRound, Loader2 } from 'lucide-react'
-import { useEffect, useMemo, useState, useRef, useCallback } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { IconBadge } from '@/components/ui/icon-badge'
@@ -30,6 +30,7 @@ import { getTokenQuotaDataByTokens } from '@/features/dashboard/api'
 import {
   TIME_GRANULARITY_OPTIONS,
   TIME_RANGE_PRESETS,
+  TOP_N_LIMIT_OPTIONS,
 } from '@/features/dashboard/constants'
 import {
   getDefaultDays,
@@ -64,8 +65,6 @@ const TOKEN_CHARTS: {
   },
 ]
 
-const TOP_TOKEN_LIMIT_OPTIONS = [5, 10, 20, 50]
-
 interface TokenChartsProps {
   filters: TokenChartsFilters
   onFiltersChange: (filters: TokenChartsFilters) => void
@@ -75,9 +74,6 @@ export function TokenCharts(props: TokenChartsProps) {
   const { t } = useTranslation()
   const { resolvedTheme } = useTheme()
   const [themeReady, setThemeReady] = useState(false)
-  const themeManagerRef = useRef<
-    (typeof import('@visactor/vchart'))['ThemeManager'] | null
-  >(null)
 
   // The selection is owned by the dashboard parent so it persists across
   // sub-section switches; the rolling window is derived from the chosen range.
@@ -129,7 +125,6 @@ export function TokenCharts(props: TokenChartsProps) {
         )
       }
       const ThemeManager = await themeManagerPromise
-      themeManagerRef.current = ThemeManager
       ThemeManager.setCurrentTheme(resolvedTheme === 'dark' ? 'dark' : 'light')
       setThemeReady(true)
     }
@@ -204,7 +199,7 @@ export function TokenCharts(props: TokenChartsProps) {
             <span className='text-muted-foreground px-2 text-xs font-medium whitespace-nowrap'>
               {t('Top Tokens')}
             </span>
-            {TOP_TOKEN_LIMIT_OPTIONS.map((limit) => (
+            {TOP_N_LIMIT_OPTIONS.map((limit) => (
               <TabsTrigger
                 key={limit}
                 value={String(limit)}

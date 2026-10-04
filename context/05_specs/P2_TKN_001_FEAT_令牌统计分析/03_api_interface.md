@@ -119,7 +119,7 @@ GET /api/data/tokens?start_timestamp=1759276800&end_timestamp=1759363200
 1. Controller 解析并校验 start_timestamp、end_timestamp（非法或跨度超限按上表返回错误）。
 2. Model 层查询 quota_data 表：`WHERE created_at >= ? AND created_at <= ?`，按 `token_id, created_at` 分组，聚合 `sum(count) as count, sum(quota) as quota, sum(token_used) as token_used`。仅分组字段由既有 `GetQuotaDataGroupByUser` 的 `username` 变为 `token_id`，查询形态与索引利用不变（[需求：§5.1.4 业务规则]）。
 3. 汇总结果中的去重 token_id（含 0），关联 tokens 表 `SELECT id, name FROM tokens WHERE id IN ?` 补全名称。tokens 为 GORM 软删除模型，默认查询自动过滤已删除行，名称解析不到即保持空字符串，交由前端回退（与既有 `fillFlowTokenNames` 同一模式）。
-4. 经 `common.ApiSuccess(c, data)` 返回聚合记录列表。
+4. 组装 `success` / `message` / `data` 响应（`c.JSON`，与本文件既有看板 handler 风格一致）返回聚合记录列表。
 
 金额换算说明：接口只返回 quota 原始值，按系统汇率换算为展示金额的逻辑在前端完成（`renderQuotaCompat`），与用户统计一致（§1.2 业务目标 2、§4.1.2 显示字段）。
 

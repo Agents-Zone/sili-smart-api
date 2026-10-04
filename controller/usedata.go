@@ -10,6 +10,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const maxQuotaDataSpanSeconds = 2592000
+
 func parseFlowQuotaTimeRange(c *gin.Context) (int64, int64, bool) {
 	startTimestamp, err := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	if err != nil || startTimestamp <= 0 {
@@ -26,6 +28,15 @@ func parseFlowQuotaTimeRange(c *gin.Context) (int64, int64, bool) {
 		return 0, 0, false
 	}
 	return startTimestamp, endTimestamp, true
+}
+
+// checkQuotaDataSpan 校验时间跨度不超过 1 个月，超限时写出失败响应并返回 false
+func checkQuotaDataSpan(c *gin.Context, startTimestamp, endTimestamp int64) bool {
+	if endTimestamp-startTimestamp > maxQuotaDataSpanSeconds {
+		common.ApiErrorMsg(c, "时间跨度不能超过 1 个月")
+		return false
+	}
+	return true
 }
 
 func GetAllQuotaDates(c *gin.Context) {
@@ -65,11 +76,7 @@ func GetUserQuotaDates(c *gin.Context) {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	// 判断时间跨度是否超过 1 个月
-	if endTimestamp-startTimestamp > 2592000 {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "时间跨度不能超过 1 个月",
-		})
+	if !checkQuotaDataSpan(c, startTimestamp, endTimestamp) {
 		return
 	}
 	dates, err := model.GetQuotaDataByUserId(userId, startTimestamp, endTimestamp)
@@ -110,11 +117,7 @@ func GetUserFlowQuotaDates(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if endTimestamp-startTimestamp > 2592000 {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "时间跨度不能超过 1 个月",
-		})
+	if !checkQuotaDataSpan(c, startTimestamp, endTimestamp) {
 		return
 	}
 	dates, err := model.GetFlowQuotaData(startTimestamp, endTimestamp, "", userId, common.RoleCommonUser)
@@ -135,8 +138,7 @@ func GetQuotaDatesByToken(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if endTimestamp-startTimestamp > 2592000 {
-		common.ApiErrorMsg(c, "时间跨度不能超过 1 个月")
+	if !checkQuotaDataSpan(c, startTimestamp, endTimestamp) {
 		return
 	}
 	dates, err := model.GetQuotaDataGroupByToken(startTimestamp, endTimestamp)

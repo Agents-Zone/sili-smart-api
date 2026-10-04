@@ -50,6 +50,8 @@ export const TIME_RANGE_PRESETS = [
   { label: '29 Days', days: 29 },
 ] as const
 
+export const TOP_N_LIMIT_OPTIONS = [5, 10, 20, 50] as const
+
 export const CONSUMPTION_DISTRIBUTION_CHART_OPTIONS = [
   { value: 'bar', labelKey: 'Bar Chart' },
   { value: 'area', labelKey: 'Area Chart' },

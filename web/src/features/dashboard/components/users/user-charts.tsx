@@ -30,6 +30,7 @@ import { getUserQuotaDataByUsers } from '@/features/dashboard/api'
 import {
   TIME_GRANULARITY_OPTIONS,
   TIME_RANGE_PRESETS,
+  TOP_N_LIMIT_OPTIONS,
 } from '@/features/dashboard/constants'
 import {
   getDefaultDays,
@@ -63,8 +64,6 @@ const USER_CHARTS: {
     specKey: 'spec_user_trend',
   },
 ]
-
-const TOP_USER_LIMIT_OPTIONS = [5, 10, 20, 50]
 
 interface UserChartsProps {
   filters: UserChartsFilters
@@ -204,7 +203,7 @@ export function UserCharts(props: UserChartsProps) {
             <span className='text-muted-foreground px-2 text-xs font-medium whitespace-nowrap'>
               {t('Top Users')}
             </span>
-            {TOP_USER_LIMIT_OPTIONS.map((limit) => (
+            {TOP_N_LIMIT_OPTIONS.map((limit) => (
               <TabsTrigger
                 key={limit}
                 value={String(limit)}
