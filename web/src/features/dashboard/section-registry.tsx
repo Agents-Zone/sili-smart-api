@@ -55,7 +55,13 @@ const DASHBOARD_SECTIONS = [
 
 export type DashboardSectionId = (typeof DASHBOARD_SECTIONS)[number]['id']
 
-const ADMIN_ONLY_SECTIONS = new Set<string>(['users', 'tokens'])
+// Derived from the registry's adminOnly flags so visibility knowledge has a
+// single source of truth.
+export const ADMIN_ONLY_SECTIONS: ReadonlySet<DashboardSectionId> = new Set(
+  DASHBOARD_SECTIONS.flatMap((section) =>
+    'adminOnly' in section && section.adminOnly ? [section.id] : []
+  )
+)
 
 const dashboardRegistry = createSectionRegistry<
   DashboardSectionId,
@@ -78,6 +84,6 @@ export function getDashboardSectionNavItems(
   const all = dashboardRegistry.getSectionNavItems(t)
   if (options?.isAdmin) return all
   return all.filter(
-    (_, idx) => !ADMIN_ONLY_SECTIONS.has(DASHBOARD_SECTIONS[idx].id)
+    (_, idx) => !('adminOnly' in DASHBOARD_SECTIONS[idx] && DASHBOARD_SECTIONS[idx].adminOnly)
   )
 }

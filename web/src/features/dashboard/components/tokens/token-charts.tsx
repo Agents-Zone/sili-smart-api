@@ -7,7 +7,7 @@ published by the Free Software Foundation, either version 3 of the
 License, or (at your option) any later version.
 
 This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
+but WITHOUT ANY WARRANTY; without even implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 GNU Affero General Public License for more details.
 
@@ -17,36 +17,23 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
-import { VChart } from '@visactor/react-vchart'
-import { KeyRound, Loader2 } from 'lucide-react'
-import { useEffect, useMemo, useState, useCallback } from 'react'
+import { KeyRound } from 'lucide-react'
+import { useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { IconBadge } from '@/components/ui/icon-badge'
-import { Skeleton } from '@/components/ui/skeleton'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { useTheme } from '@/context/theme-provider'
 import { getTokenQuotaDataByTokens } from '@/features/dashboard/api'
-import {
-  TIME_GRANULARITY_OPTIONS,
-  TIME_RANGE_PRESETS,
-  TOP_N_LIMIT_OPTIONS,
-} from '@/features/dashboard/constants'
+import { TopNChartsSection } from '@/features/dashboard/components/ui/topn-charts'
 import {
   getDefaultDays,
   saveGranularity,
   processTokenChartData,
 } from '@/features/dashboard/lib'
+import { useTopNTimeRange } from '@/features/dashboard/lib/use-topn-time-range'
 import type {
   ProcessedTokenChartData,
-  TokenChartsFilters,
+  TopNChartsFilters,
 } from '@/features/dashboard/types'
-import { getRollingDateRange, type TimeGranularity } from '@/lib/time'
-import { VCHART_OPTION } from '@/lib/vchart'
-
-let themeManagerPromise: Promise<
-  (typeof import('@visactor/vchart'))['ThemeManager']
-> | null = null
+import type { TimeGranularity } from '@/lib/time'
 
 const TOKEN_CHARTS: {
   value: string
@@ -66,29 +53,21 @@ const TOKEN_CHARTS: {
 ]
 
 interface TokenChartsProps {
-  filters: TokenChartsFilters
-  onFiltersChange: (filters: TokenChartsFilters) => void
+  filters: TopNChartsFilters
+  onFiltersChange: (filters: TopNChartsFilters) => void
 }
 
 export function TokenCharts(props: TokenChartsProps) {
   const { t } = useTranslation()
-  const { resolvedTheme } = useTheme()
-  const [themeReady, setThemeReady] = useState(false)
 
   // The selection is owned by the dashboard parent so it persists across
   // sub-section switches; the rolling window is derived from the chosen range.
-  const timeGranularity = props.filters.timeGranularity
   const selectedRange = props.filters.selectedRange
-  const topTokenLimit = props.filters.topTokenLimit
+  const timeGranularity = props.filters.timeGranularity
+  const topTokenLimit = props.filters.topLimit
   const onFiltersChange = props.onFiltersChange
 
-  const timeRange = useMemo(() => {
-    const { start, end } = getRollingDateRange(selectedRange)
-    return {
-      start_timestamp: Math.floor(start.getTime() / 1000),
-      end_timestamp: Math.floor(end.getTime() / 1000),
-    }
-  }, [selectedRange])
+  const timeRange = useTopNTimeRange(selectedRange)
 
   const handleRangeChange = useCallback(
     (days: number) => {
@@ -111,25 +90,10 @@ export function TokenCharts(props: TokenChartsProps) {
 
   const handleTopTokenLimitChange = useCallback(
     (limit: number) => {
-      onFiltersChange({ ...props.filters, topTokenLimit: limit })
+      onFiltersChange({ ...props.filters, topLimit: limit })
     },
     [onFiltersChange, props.filters]
   )
-
-  useEffect(() => {
-    const updateTheme = async () => {
-      setThemeReady(false)
-      if (!themeManagerPromise) {
-        themeManagerPromise = import('@visactor/vchart').then(
-          (m) => m.ThemeManager
-        )
-      }
-      const ThemeManager = await themeManagerPromise
-      ThemeManager.setCurrentTheme(resolvedTheme === 'dark' ? 'dark' : 'light')
-      setThemeReady(true)
-    }
-    updateTheme()
-  }, [resolvedTheme])
 
   const { data: tokenData, isLoading } = useQuery({
     queryKey: ['dashboard', 'token-quota', timeRange],
@@ -150,110 +114,22 @@ export function TokenCharts(props: TokenChartsProps) {
   )
 
   return (
-    <div className='space-y-3'>
-      <div className='flex items-center gap-1.5 overflow-x-auto pb-1 sm:gap-2'>
-        <Tabs
-          value={String(selectedRange)}
-          onValueChange={(value) => handleRangeChange(Number(value))}
-          className='shrink-0'
-        >
-          <TabsList>
-            {TIME_RANGE_PRESETS.map((preset) => (
-              <TabsTrigger
-                key={preset.days}
-                value={String(preset.days)}
-                className='px-2.5 text-xs'
-              >
-                {t(preset.label)}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </Tabs>
-
-        <Tabs
-          value={timeGranularity}
-          onValueChange={(value) =>
-            handleGranularityChange(value as TimeGranularity)
-          }
-          className='shrink-0'
-        >
-          <TabsList>
-            {TIME_GRANULARITY_OPTIONS.map((opt) => (
-              <TabsTrigger
-                key={opt.value}
-                value={opt.value}
-                className='px-2.5 text-xs'
-              >
-                {t(opt.label)}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </Tabs>
-
-        <Tabs
-          value={String(topTokenLimit)}
-          onValueChange={(value) => handleTopTokenLimitChange(Number(value))}
-          className='shrink-0'
-        >
-          <TabsList>
-            <span className='text-muted-foreground px-2 text-xs font-medium whitespace-nowrap'>
-              {t('Top Tokens')}
-            </span>
-            {TOP_N_LIMIT_OPTIONS.map((limit) => (
-              <TabsTrigger
-                key={limit}
-                value={String(limit)}
-                className='px-2.5 text-xs'
-              >
-                {t('Top {{count}}', { count: limit })}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </Tabs>
-
-        {isLoading && (
-          <Loader2 className='text-muted-foreground size-4 animate-spin' />
-        )}
-      </div>
-
-      <div className='grid gap-3'>
-        {TOKEN_CHARTS.map((chart) => {
-          const spec = chartData[chart.specKey]
-
-          return (
-            <div
-              key={chart.value}
-              className='overflow-hidden rounded-lg border'
-            >
-              <div className='flex w-full items-center gap-2 border-b px-3 py-2 sm:px-5 sm:py-3'>
-                <IconBadge tone='info' size='sm'>
-                  <KeyRound />
-                </IconBadge>
-                <div className='text-sm font-semibold'>{t(chart.labelKey)}</div>
-              </div>
-
-              <div className='h-[300px] p-1.5 sm:h-96 sm:p-2'>
-                {isLoading ? (
-                  <Skeleton className='h-full w-full' />
-                ) : (
-                  themeReady &&
-                  spec && (
-                    <VChart
-                      key={`token-${chart.value}-${topTokenLimit}-${resolvedTheme}`}
-                      spec={{
-                        ...spec,
-                        theme: resolvedTheme === 'dark' ? 'dark' : 'light',
-                        background: 'transparent',
-                      }}
-                      option={VCHART_OPTION}
-                    />
-                  )
-                )}
-              </div>
-            </div>
-          )
-        })}
-      </div>
-    </div>
+    <TopNChartsSection
+      icon={KeyRound}
+      chartKeyPrefix='token'
+      charts={TOKEN_CHARTS.map((chart) => ({
+        value: chart.value,
+        labelKey: chart.labelKey,
+        spec: chartData[chart.specKey],
+      }))}
+      isLoading={isLoading}
+      selectedRange={selectedRange}
+      timeGranularity={timeGranularity}
+      topLimit={topTokenLimit}
+      topLimitLabelKey='Top Tokens'
+      onRangeChange={handleRangeChange}
+      onGranularityChange={handleGranularityChange}
+      onTopLimitChange={handleTopTokenLimitChange}
+    />
   )
 }

@@ -143,6 +143,7 @@ func GetQuotaDatesByToken(c *gin.Context) {
 	}
 	dates, err := model.GetQuotaDataGroupByToken(startTimestamp, endTimestamp)
 	if err != nil {
+		common.SysError("failed to get token quota data: " + err.Error())
 		common.ApiError(c, err)
 		return
 	}

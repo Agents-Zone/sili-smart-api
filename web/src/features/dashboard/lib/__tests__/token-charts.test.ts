@@ -71,6 +71,23 @@ describe('processTokenChartData rank', () => {
     item(3, 'C', DAY, 100),
   ]
 
+  test('distinct token_ids sharing a name stay separate series', () => {
+    const sameName = [
+      item(1, 'dup', DAY, 100),
+      item(2, 'dup', DAY, 50),
+      item(3, 'other', DAY, 10),
+    ]
+    const { spec_token_rank } = processTokenChartData(sameName, 'day', t)
+    const values = spec_token_rank.data[0].values
+    assert.equal(values.length, 3)
+    assert.deepEqual(
+      values.map((v: { Token: string }) => v.Token),
+      ['dup', 'dup #2', 'other']
+    )
+    assert.equal(values[0].rawQuota, 100)
+    assert.equal(values[1].rawQuota, 50)
+  })
+
   test('sorts by aggregated quota desc and truncates to limit', () => {
     const { spec_token_rank } = processTokenChartData(rows, 'day', t, 2)
     const values = spec_token_rank.data[0].values
@@ -137,9 +154,7 @@ describe('processTokenChartData trend', () => {
     ]
     const { spec_token_trend } = processTokenChartData(rows, 'day', t, 2)
     const values = spec_token_trend.data[0].values
-    const times = Array.from(
-      new Set(values.map((v: { Time: string }) => v.Time))
-    )
+    const times = [...new Set(values.map((v: { Time: string }) => v.Time))]
     assert.equal(times.length, 2)
     for (const time of times) {
       const b = values.find(
@@ -154,10 +169,10 @@ describe('processTokenChartData trend', () => {
   test('only includes top N series in trend values', () => {
     const rows = [item(1, 'A', DAY, 100), item(2, 'B', DAY, 50)]
     const { spec_token_trend } = processTokenChartData(rows, 'day', t, 1)
-    const tokens = new Set(
+    const tokens = [...new Set(
       spec_token_trend.data[0].values.map((v: { Token: string }) => v.Token)
-    )
-    assert.deepEqual(Array.from(tokens), ['A'])
+    )]
+    assert.deepEqual(tokens, ['A'])
   })
 })
 

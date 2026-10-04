@@ -51,12 +51,12 @@ import {
   DASHBOARD_DEFAULT_SECTION,
   DASHBOARD_SECTION_IDS,
 } from './section-registry'
+import { isSectionAdminOnly } from './lib/section-access'
 import type {
   DashboardChartPreferences,
   DashboardFilters,
   QuotaDataItem,
-  TokenChartsFilters,
-  UserChartsFilters,
+  TopNChartsFilters,
 } from './types'
 
 const route = getRouteApi('/_authenticated/dashboard/$section')
@@ -216,23 +216,23 @@ export function Dashboard() {
   const [modelFilters, setModelFilters] = useState<DashboardFilters>(() =>
     buildDefaultDashboardFilters(getSavedChartPreferences())
   )
-  const [userChartsFilters, setUserChartsFilters] = useState<UserChartsFilters>(
+  const [userChartsFilters, setUserChartsFilters] = useState<TopNChartsFilters>(
     () => {
       const granularity = getSavedGranularity()
       return {
         timeGranularity: granularity,
         selectedRange: getDefaultDays(granularity),
-        topUserLimit: 10,
+        topLimit: 10,
       }
     }
   )
   const [tokenChartsFilters, setTokenChartsFilters] =
-    useState<TokenChartsFilters>(() => {
+    useState<TopNChartsFilters>(() => {
       const granularity = getSavedGranularity()
       return {
         timeGranularity: granularity,
         selectedRange: getDefaultDays(granularity),
-        topTokenLimit: 10,
+        topLimit: 10,
       }
     })
   const [flowSensitiveVisible, setFlowSensitiveVisible] = useState(true)
@@ -267,9 +267,7 @@ export function Dashboard() {
   const visibleSections = useMemo(
     () =>
       DASHBOARD_SECTION_IDS.filter(
-        (section) =>
-          section !== 'overview' &&
-          ((section !== 'users' && section !== 'tokens') || isAdmin)
+        (section) => section !== 'overview' && (!isSectionAdminOnly(section) || isAdmin)
       ),
     [isAdmin]
   )

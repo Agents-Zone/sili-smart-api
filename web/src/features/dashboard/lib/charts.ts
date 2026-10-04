@@ -26,6 +26,11 @@ import type {
   ProcessedUserChartData,
   TokenQuotaDataItem,
 } from '@/features/dashboard/types'
+import {
+  buildTokenChartSpecs,
+  buildUserChartSpecs,
+  type TopNRecord,
+} from './topn-charts'
 import { getCurrencyDisplay } from '@/lib/currency'
 import { formatChartTime, type TimeGranularity } from '@/lib/time'
 
@@ -690,19 +695,6 @@ export function processChartData(
   }
 }
 
-const USER_COLORS = [
-  '#5B8FF9',
-  '#5AD8A6',
-  '#F6BD16',
-  '#E8684A',
-  '#6DC8EC',
-  '#9270CA',
-  '#FF9D4D',
-  '#269A99',
-  '#FF99C3',
-  '#5D7092',
-]
-
 export function processUserChartData(
   data: QuotaDataItem[],
   timeGranularity: TimeGranularity = 'day',
@@ -710,249 +702,13 @@ export function processUserChartData(
   limit = 10
 ): ProcessedUserChartData {
   const tt: TFunction = t ?? ((x) => x)
-  const { config } = getCurrencyDisplay()
-  const quotaPerUnit = config.quotaPerUnit
-
-  const formatVal = (raw: number) => renderQuotaCompat(raw, 2)
-
-  const emptyResult: ProcessedUserChartData = {
-    spec_user_rank: {
-      type: 'bar',
-      data: [{ id: 'userRankData', values: [] }],
-      xField: 'rawQuota',
-      yField: 'User',
-      seriesField: 'User',
-      direction: 'horizontal',
-      title: {
-        visible: true,
-        text: tt('User Consumption Ranking'),
-        subtext: tt('No data available'),
-      },
-      legends: { visible: false },
-      color: { type: 'ordinal', range: USER_COLORS },
-      background: { fill: 'transparent' },
-    },
-    spec_user_trend: {
-      type: 'area',
-      data: [{ id: 'userTrendData', values: [] }],
-      xField: 'Time',
-      yField: 'rawQuota',
-      seriesField: 'User',
-      title: {
-        visible: true,
-        text: tt('User Consumption Trend'),
-        subtext: tt('No data available'),
-      },
-      legends: { visible: true, selectMode: 'single' },
-      color: { type: 'ordinal', range: USER_COLORS },
-      point: { visible: false },
-      background: { fill: 'transparent' },
-    },
-  }
-
-  if (!data || data.length === 0) return emptyResult
-
-  const userQuotaTotal = new Map<string, number>()
-  data.forEach((item) => {
-    const username = item.username || 'unknown'
-    const prev = userQuotaTotal.get(username) || 0
-    userQuotaTotal.set(username, prev + (Number(item.quota) || 0))
-  })
-
-  const sorted = Array.from(userQuotaTotal.entries()).sort(
-    (a, b) => b[1] - a[1]
-  )
-  const topUsers = sorted.slice(0, limit).map(([u]) => u)
-  const topUserSet = new Set(topUsers)
-  const totalQuota = sorted.slice(0, limit).reduce((s, [, q]) => s + q, 0)
-
-  const rankValues = sorted.slice(0, limit).map(([username, quota]) => ({
-    User: username,
-    rawQuota: quota,
-    Usage: Number((quota / quotaPerUnit).toFixed(4)),
+  const records: TopNRecord[] = (data ?? []).map((item) => ({
+    seriesId: item.username || 'unknown',
+    label: item.username || 'unknown',
+    createdAt: Number(item.created_at),
+    quota: Number(item.quota) || 0,
   }))
-
-  const userColorMap = topUsers.reduce<Record<string, string>>(
-    (acc, user, i) => {
-      acc[user] = USER_COLORS[i % USER_COLORS.length]
-      return acc
-    },
-    {}
-  )
-
-  const timeUserMap = new Map<string, Map<string, number>>()
-  const allTimePoints = new Set<string>()
-
-  data.forEach((item) => {
-    const ts = Number(item.created_at)
-    const timeKey = formatChartTime(ts, timeGranularity)
-    allTimePoints.add(timeKey)
-    const user = item.username || 'unknown'
-    if (!topUserSet.has(user)) return
-    if (!timeUserMap.has(timeKey)) timeUserMap.set(timeKey, new Map())
-    const map = timeUserMap.get(timeKey)!
-    map.set(user, (map.get(user) || 0) + (Number(item.quota) || 0))
-  })
-
-  const sortedTimePoints = Array.from(allTimePoints).sort()
-  const trendValues: Array<{
-    Time: string
-    User: string
-    rawQuota: number
-    Usage: number
-  }> = []
-
-  sortedTimePoints.forEach((time) => {
-    topUsers.forEach((user) => {
-      const q = timeUserMap.get(time)?.get(user) || 0
-      trendValues.push({
-        Time: time,
-        User: user,
-        rawQuota: q,
-        Usage: Number((q / quotaPerUnit).toFixed(4)),
-      })
-    })
-  })
-
-  return {
-    spec_user_rank: {
-      type: 'bar',
-      data: [{ id: 'userRankData', values: rankValues }],
-      xField: 'rawQuota',
-      yField: 'User',
-      seriesField: 'User',
-      direction: 'horizontal',
-      title: {
-        visible: true,
-        text: tt('User Consumption Ranking'),
-        subtext: `${tt('Total:')} ${formatVal(totalQuota)}`,
-      },
-      legends: { visible: false },
-      bar: {
-        state: { hover: { stroke: '#000', lineWidth: 1 } },
-      },
-      label: {
-        visible: true,
-        position: 'outside',
-        formatMethod: (value: number) => formatVal(value),
-        style: { fontSize: 11 },
-      },
-      axes: [
-        { orient: 'left', type: 'band' },
-        { orient: 'bottom', type: 'linear', visible: false },
-      ],
-      tooltip: {
-        mark: {
-          content: [
-            {
-              key: (datum: Record<string, unknown>) => datum?.User,
-              value: (datum: Record<string, unknown>) =>
-                formatVal(Number(datum?.rawQuota) || 0),
-            },
-          ],
-          updateContent: (
-            array: Array<{
-              key: string
-              value: string | number
-              datum?: Record<string, unknown>
-            }>
-          ) => {
-            for (let i = 0; i < array.length; i++) {
-              const rawQuota = array[i].datum?.rawQuota
-              const value =
-                rawQuota === undefined ? array[i].value : Number(rawQuota)
-              array[i].value = formatVal(Number(value) || 0)
-            }
-            return array
-          },
-        },
-      },
-      color: { specified: userColorMap },
-      background: { fill: 'transparent' },
-      animation: true,
-    },
-    spec_user_trend: {
-      type: 'area',
-      data: [{ id: 'userTrendData', values: trendValues }],
-      xField: 'Time',
-      yField: 'rawQuota',
-      seriesField: 'User',
-      stack: false,
-      title: {
-        visible: true,
-        text: tt('User Consumption Trend'),
-        subtext: `${tt('Total:')} ${formatVal(totalQuota)}`,
-      },
-      legends: { visible: true, selectMode: 'single' },
-      axes: [
-        { orient: 'bottom', type: 'band' },
-        {
-          orient: 'left',
-          type: 'linear',
-          label: {
-            formatMethod: (value: number) => formatVal(value),
-          },
-        },
-      ],
-      tooltip: {
-        mark: {
-          content: [
-            {
-              key: (datum: Record<string, unknown>) => datum?.User,
-              value: (datum: Record<string, unknown>) =>
-                formatVal(Number(datum?.rawQuota) || 0),
-            },
-          ],
-        },
-        dimension: {
-          content: [
-            {
-              key: (datum: Record<string, unknown>) => datum?.User,
-              value: (datum: Record<string, unknown>) =>
-                Number(datum?.rawQuota) || 0,
-            },
-          ],
-          updateContent: (
-            array: Array<{
-              key: string
-              value: string | number
-            }>
-          ) => {
-            array.sort(
-              (a, b) => (Number(b.value) || 0) - (Number(a.value) || 0)
-            )
-            let sum = 0
-            for (let i = 0; i < array.length; i++) {
-              const v = Number(array[i].value) || 0
-              sum += v
-              array[i].value = formatVal(v)
-            }
-            array.unshift({
-              key: tt('Total:'),
-              value: formatVal(sum),
-            })
-            return array
-          },
-        },
-      },
-      area: {
-        style: {
-          fillOpacity: 0.15,
-          curveType: 'monotone',
-        },
-      },
-      line: {
-        style: {
-          lineWidth: 2,
-          curveType: 'monotone',
-        },
-      },
-      point: { visible: false },
-      color: { specified: userColorMap },
-      background: { fill: 'transparent' },
-      animation: true,
-    },
-  }
+  return buildUserChartSpecs(records, timeGranularity, tt, limit)
 }
 
 export function resolveTokenLabel(
@@ -963,6 +719,13 @@ export function resolveTokenLabel(
   return item.token_name || `#${item.token_id}`
 }
 
+// Series identity for token charts: tokens are grouped by token_id, not by
+// display label, so distinct tokens sharing a name stay separate series.
+interface TokenSeries {
+  tokenId: number
+  label: string
+}
+
 export function processTokenChartData(
   data: TokenQuotaDataItem[],
   timeGranularity: TimeGranularity = 'day',
@@ -970,247 +733,29 @@ export function processTokenChartData(
   limit = 10
 ): ProcessedTokenChartData {
   const tt: TFunction = t ?? ((x) => x)
-  const { config } = getCurrencyDisplay()
-  const quotaPerUnit = config.quotaPerUnit
 
-  const formatVal = (raw: number) => renderQuotaCompat(raw, 2)
-
-  const emptyResult: ProcessedTokenChartData = {
-    spec_token_rank: {
-      type: 'bar',
-      data: [{ id: 'tokenRankData', values: [] }],
-      xField: 'rawQuota',
-      yField: 'Token',
-      seriesField: 'Token',
-      direction: 'horizontal',
-      title: {
-        visible: true,
-        text: tt('Token Consumption Ranking'),
-        subtext: tt('No data available'),
-      },
-      legends: { visible: false },
-      color: { type: 'ordinal', range: USER_COLORS },
-      background: { fill: 'transparent' },
-    },
-    spec_token_trend: {
-      type: 'area',
-      data: [{ id: 'tokenTrendData', values: [] }],
-      xField: 'Time',
-      yField: 'rawQuota',
-      seriesField: 'Token',
-      title: {
-        visible: true,
-        text: tt('Token Consumption Trend'),
-        subtext: tt('No data available'),
-      },
-      legends: { visible: true, selectMode: 'single' },
-      color: { type: 'ordinal', range: USER_COLORS },
-      point: { visible: false },
-      background: { fill: 'transparent' },
-    },
-  }
-
-  if (!data || data.length === 0) return emptyResult
-
-  const tokenQuotaTotal = new Map<string, number>()
-  data.forEach((item) => {
-    const label = resolveTokenLabel(item, tt)
-    const prev = tokenQuotaTotal.get(label) || 0
-    tokenQuotaTotal.set(label, prev + (Number(item.quota) || 0))
+  // Group by token_id (spec §4.1.4 rule 1). Labels may collide across
+  // token_ids; duplicate display labels get a "#id" suffix to stay readable.
+  const seriesByToken = new Map<number, TokenSeries>()
+  const labelCounts = new Map<string, number>()
+  const records: TopNRecord[] = (data ?? []).map((item) => {
+    if (!seriesByToken.has(item.token_id)) {
+      const baseLabel = resolveTokenLabel(item, tt)
+      const seen = labelCounts.get(baseLabel) || 0
+      labelCounts.set(baseLabel, seen + 1)
+      const label = seen > 0 ? `${baseLabel} #${item.token_id}` : baseLabel
+      seriesByToken.set(item.token_id, { tokenId: item.token_id, label })
+    }
+    const series = seriesByToken.get(item.token_id) ?? {
+      tokenId: item.token_id,
+      label: resolveTokenLabel(item, tt),
+    }
+    return {
+      seriesId: String(item.token_id),
+      label: series.label,
+      createdAt: Number(item.created_at),
+      quota: Number(item.quota) || 0,
+    }
   })
-
-  const sorted = Array.from(tokenQuotaTotal.entries()).sort(
-    (a, b) => b[1] - a[1]
-  )
-  const topTokens = sorted.slice(0, limit).map(([label]) => label)
-  const topTokenSet = new Set(topTokens)
-  const totalQuota = sorted.slice(0, limit).reduce((s, [, q]) => s + q, 0)
-
-  const rankValues = sorted.slice(0, limit).map(([label, quota]) => ({
-    Token: label,
-    rawQuota: quota,
-    Usage: Number((quota / quotaPerUnit).toFixed(4)),
-  }))
-
-  const tokenColorMap = topTokens.reduce<Record<string, string>>(
-    (acc, label, i) => {
-      acc[label] = USER_COLORS[i % USER_COLORS.length]
-      return acc
-    },
-    {}
-  )
-
-  const timeTokenMap = new Map<string, Map<string, number>>()
-  const allTimePoints = new Set<string>()
-
-  data.forEach((item) => {
-    const ts = Number(item.created_at)
-    const timeKey = formatChartTime(ts, timeGranularity)
-    allTimePoints.add(timeKey)
-    const label = resolveTokenLabel(item, tt)
-    if (!topTokenSet.has(label)) return
-    if (!timeTokenMap.has(timeKey)) timeTokenMap.set(timeKey, new Map())
-    const map = timeTokenMap.get(timeKey)!
-    map.set(label, (map.get(label) || 0) + (Number(item.quota) || 0))
-  })
-
-  const sortedTimePoints = Array.from(allTimePoints).sort()
-  const trendValues: Array<{
-    Time: string
-    Token: string
-    rawQuota: number
-    Usage: number
-  }> = []
-
-  sortedTimePoints.forEach((time) => {
-    topTokens.forEach((label) => {
-      const q = timeTokenMap.get(time)?.get(label) || 0
-      trendValues.push({
-        Time: time,
-        Token: label,
-        rawQuota: q,
-        Usage: Number((q / quotaPerUnit).toFixed(4)),
-      })
-    })
-  })
-
-  return {
-    spec_token_rank: {
-      type: 'bar',
-      data: [{ id: 'tokenRankData', values: rankValues }],
-      xField: 'rawQuota',
-      yField: 'Token',
-      seriesField: 'Token',
-      direction: 'horizontal',
-      title: {
-        visible: true,
-        text: tt('Token Consumption Ranking'),
-        subtext: `${tt('Total:')} ${formatVal(totalQuota)}`,
-      },
-      legends: { visible: false },
-      bar: {
-        state: { hover: { stroke: '#000', lineWidth: 1 } },
-      },
-      label: {
-        visible: true,
-        position: 'outside',
-        formatMethod: (value: number) => formatVal(value),
-        style: { fontSize: 11 },
-      },
-      axes: [
-        { orient: 'left', type: 'band' },
-        { orient: 'bottom', type: 'linear', visible: false },
-      ],
-      tooltip: {
-        mark: {
-          content: [
-            {
-              key: (datum: Record<string, unknown>) => datum?.Token,
-              value: (datum: Record<string, unknown>) =>
-                formatVal(Number(datum?.rawQuota) || 0),
-            },
-          ],
-          updateContent: (
-            array: Array<{
-              key: string
-              value: string | number
-              datum?: Record<string, unknown>
-            }>
-          ) => {
-            for (let i = 0; i < array.length; i++) {
-              const rawQuota = array[i].datum?.rawQuota
-              const value =
-                rawQuota === undefined ? array[i].value : Number(rawQuota)
-              array[i].value = formatVal(Number(value) || 0)
-            }
-            return array
-          },
-        },
-      },
-      color: { specified: tokenColorMap },
-      background: { fill: 'transparent' },
-      animation: true,
-    },
-    spec_token_trend: {
-      type: 'area',
-      data: [{ id: 'tokenTrendData', values: trendValues }],
-      xField: 'Time',
-      yField: 'rawQuota',
-      seriesField: 'Token',
-      stack: false,
-      title: {
-        visible: true,
-        text: tt('Token Consumption Trend'),
-        subtext: `${tt('Total:')} ${formatVal(totalQuota)}`,
-      },
-      legends: { visible: true, selectMode: 'single' },
-      axes: [
-        { orient: 'bottom', type: 'band' },
-        {
-          orient: 'left',
-          type: 'linear',
-          label: {
-            formatMethod: (value: number) => formatVal(value),
-          },
-        },
-      ],
-      tooltip: {
-        mark: {
-          content: [
-            {
-              key: (datum: Record<string, unknown>) => datum?.Token,
-              value: (datum: Record<string, unknown>) =>
-                formatVal(Number(datum?.rawQuota) || 0),
-            },
-          ],
-        },
-        dimension: {
-          content: [
-            {
-              key: (datum: Record<string, unknown>) => datum?.Token,
-              value: (datum: Record<string, unknown>) =>
-                Number(datum?.rawQuota) || 0,
-            },
-          ],
-          updateContent: (
-            array: Array<{
-              key: string
-              value: string | number
-            }>
-          ) => {
-            array.sort(
-              (a, b) => (Number(b.value) || 0) - (Number(a.value) || 0)
-            )
-            let sum = 0
-            for (let i = 0; i < array.length; i++) {
-              const v = Number(array[i].value) || 0
-              sum += v
-              array[i].value = formatVal(v)
-            }
-            array.unshift({
-              key: tt('Total:'),
-              value: formatVal(sum),
-            })
-            return array
-          },
-        },
-      },
-      area: {
-        style: {
-          fillOpacity: 0.15,
-          curveType: 'monotone',
-        },
-      },
-      line: {
-        style: {
-          lineWidth: 2,
-          curveType: 'monotone',
-        },
-      },
-      point: { visible: false },
-      color: { specified: tokenColorMap },
-      background: { fill: 'transparent' },
-      animation: true,
-    },
-  }
+  return buildTokenChartSpecs(records, timeGranularity, tt, limit)
 }
