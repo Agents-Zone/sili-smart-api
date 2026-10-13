@@ -48,3 +48,21 @@ func TestShouldDisableWithCustomChineseKeyword(t *testing.T) {
 	err := types.NewErrorWithStatusCode(fmt.Errorf("上游返回: 账户余额不足，请充值后重试"), types.ErrorCodeBadResponse, 402)
 	require.True(t, ShouldDisableChannel(err))
 }
+
+// 线上事故回归：管理员从消费/错误日志复制带 status_code 前缀的完整错误文案
+// （如 "status_code=429, [1113][余额不足或无可用资源包,请充值。]"）作为关键词，
+// 关键词匹配输入必须与日志展示口径一致，否则照抄日志的关键词永不命中。
+func TestShouldDisableKeywordCopiedFromLoggedErrorText(t *testing.T) {
+	common.AutomaticDisableChannelEnabled = true
+	t.Cleanup(func() { common.AutomaticDisableChannelEnabled = false })
+
+	orig := operation_setting.AutomaticDisableKeywords
+	operation_setting.AutomaticDisableKeywordsFromString("status_code=429, [1113][余额不足或无可用资源包,请充值。]")
+	t.Cleanup(func() { operation_setting.AutomaticDisableKeywords = orig })
+
+	// 线上真实错误：err.Error() 为消息本体，日志展示为 ErrorWithStatusCode（带 status_code 前缀）
+	err := types.NewErrorWithStatusCode(
+		fmt.Errorf("[1113][余额不足或无可用资源包,请充值。][2026101314090897923053b79b4f90]"),
+		types.ErrorCodeBadResponse, 429)
+	require.True(t, ShouldDisableChannel(err))
+}

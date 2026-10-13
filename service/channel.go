@@ -59,7 +59,9 @@ func ShouldDisableChannel(err *types.NewAPIError) bool {
 		return true
 	}
 
-	lowerMessage := strings.ToLower(err.Error())
+	// 匹配输入用 ErrorWithStatusCode，与日志/错误日志展示口径一致，
+	// 管理员照抄日志文案（含 status_code=xxx 前缀）配置的关键词才能命中
+	lowerMessage := strings.ToLower(err.ErrorWithStatusCode())
 	search, _ := AcSearch(lowerMessage, operation_setting.AutomaticDisableKeywords, true)
 	return search
 }
