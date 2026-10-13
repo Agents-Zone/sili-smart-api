@@ -75,6 +75,37 @@ func ClearChannelAffinityCache(c *gin.Context) {
 	})
 }
 
+// DeleteChannelAffinityBinding deletes one affinity binding by its cache key
+// suffix (returned by the bindings listing). Authorization is provided by the
+// parent option route's RootAuth middleware.
+func DeleteChannelAffinityBinding(c *gin.Context) {
+	keySuffix := strings.TrimSpace(c.Query("key_suffix"))
+	if keySuffix == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "缺少参数：key_suffix",
+		})
+		return
+	}
+
+	deleted, err := service.ClearChannelAffinityBindingByKeySuffix(keySuffix)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data": gin.H{
+			"deleted": deleted,
+		},
+	})
+}
+
 func GetChannelAffinityUsageCacheStats(c *gin.Context) {
 	ruleName := strings.TrimSpace(c.Query("rule_name"))
 	usingGroup := strings.TrimSpace(c.Query("using_group"))

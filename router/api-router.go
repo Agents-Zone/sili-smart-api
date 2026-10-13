@@ -196,6 +196,7 @@ func SetApiRouter(router *gin.Engine) {
 			optionRoute.GET("/channel_affinity_cache", controller.GetChannelAffinityCacheStats)
 			optionRoute.GET("/channel_affinity_bindings", controller.GetChannelAffinityBindings)
 			optionRoute.DELETE("/channel_affinity_cache", controller.ClearChannelAffinityCache)
+			optionRoute.DELETE("/channel_affinity_bindings", controller.DeleteChannelAffinityBinding)
 			optionRoute.POST("/rest_model_ratio", controller.ResetModelRatio)
 			optionRoute.GET("/waffo-pancake/catalog", controller.ListWaffoPancakeCatalog)
 			optionRoute.POST("/waffo-pancake/pair", controller.CreateWaffoPancakePair)

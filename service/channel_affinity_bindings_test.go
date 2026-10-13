@@ -75,7 +75,15 @@ func TestGetChannelAffinityBindingsAggregatesAndSorts(t *testing.T) {
 	require.NoError(t, c.SetWithTTL("r:103", 2, time.Hour))
 	got, err := GetChannelAffinityBindings()
 	require.NoError(t, err)
-	assert.Equal(t, []ChannelAffinityBinding{{ChannelID: 1, ChannelName: "Alpha", Tokens: []ChannelAffinityToken{{TokenID: 101, TokenName: "z"}, {TokenID: 102, TokenName: "a"}}}, {ChannelID: 2, ChannelName: "Beta", Tokens: []ChannelAffinityToken{{TokenID: 103, TokenName: "b"}}}}, got)
+	assert.Equal(t, []ChannelAffinityBinding{
+		{ChannelID: 1, ChannelName: "Alpha", Tokens: []ChannelAffinityToken{
+			{TokenID: 101, TokenName: "z", KeySuffix: "r:101"},
+			{TokenID: 102, TokenName: "a", KeySuffix: "r:102"},
+		}},
+		{ChannelID: 2, ChannelName: "Beta", Tokens: []ChannelAffinityToken{
+			{TokenID: 103, TokenName: "b", KeySuffix: "r:103"},
+		}},
+	}, got)
 }
 
 func TestGetChannelAffinityBindingsSkipsInvalidAndMissingRelations(t *testing.T) {
@@ -165,4 +173,33 @@ func TestGetChannelAffinityBindingsReturnsCacheErrorWithoutPartialData(t *testin
 	got, err = GetChannelAffinityBindings()
 	require.Error(t, err)
 	assert.Nil(t, got)
+}
+
+func TestGetChannelAffinityBindingsParsesModelAndGroupDimensions(t *testing.T) {
+	setupAffinityBindingsTest(t)
+	require.NoError(t, model.DB.Create(&model.Channel{Id: 1, Name: "Alpha", Key: "k"}).Error)
+	require.NoError(t, model.DB.Create(&model.Token{Id: 101, Name: "tok", Key: "k101"}).Error)
+	c := getChannelAffinityCache()
+	// 规则 m 启用模型名，g 同时启用模型与分组；同一 token 形成 3 条独立绑定
+	require.NoError(t, c.SetWithTTL("m:gpt-4:101", 1, time.Hour))
+	require.NoError(t, c.SetWithTTL("m:gpt-3.5:101", 1, time.Hour))
+	require.NoError(t, c.SetWithTTL("g:gpt-4:default:101", 1, time.Hour))
+
+	got, err := GetChannelAffinityBindings()
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	tokens := got[0].Tokens
+	require.Len(t, tokens, 3)
+	// 同 token 多条绑定按 KeySuffix 字典序排列
+	assert.Equal(t, ChannelAffinityToken{TokenID: 101, TokenName: "tok", ModelName: "gpt-4", UsingGroup: "default", KeySuffix: "g:gpt-4:default:101"}, tokens[0])
+	assert.Equal(t, ChannelAffinityToken{TokenID: 101, TokenName: "tok", ModelName: "gpt-3.5", KeySuffix: "m:gpt-3.5:101"}, tokens[1])
+	assert.Equal(t, ChannelAffinityToken{TokenID: 101, TokenName: "tok", ModelName: "gpt-4", KeySuffix: "m:gpt-4:101"}, tokens[2])
+
+	// 键后缀精确可定位：按返回的 KeySuffix 删除仅清单条
+	deleted, err := ClearChannelAffinityBindingByKeySuffix("m:gpt-4:101")
+	require.NoError(t, err)
+	assert.Equal(t, 1, deleted)
+	got, err = GetChannelAffinityBindings()
+	require.NoError(t, err)
+	require.Len(t, got[0].Tokens, 2)
 }

@@ -53,6 +53,15 @@ export async function clearRuleCache(ruleName: string): Promise<ApiResponse> {
   })
   return res.data
 }
+
+export async function clearBindingCache(
+  keySuffix: string
+): Promise<ApiResponse> {
+  const res = await api.delete('/api/option/channel_affinity_bindings', {
+    params: { key_suffix: keySuffix },
+  })
+  return res.data
+}
 export async function getAffinityUsageCache(params: {
   rule_name: string
   using_group: string

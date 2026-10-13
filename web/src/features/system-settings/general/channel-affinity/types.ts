@@ -64,6 +64,9 @@ export interface ChannelAffinitySettings {
 export interface ChannelAffinityToken {
   token_id: number
   token_name: string
+  model_name?: string
+  using_group?: string
+  key_suffix: string
 }
 
 export interface ChannelAffinityBinding {

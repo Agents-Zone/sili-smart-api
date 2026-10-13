@@ -17,12 +17,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { Edit, FileText, Plus, RefreshCw, Trash2, X } from 'lucide-react'
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { StaticDataTable } from '@/components/data-table'
-import { Dialog } from '@/components/dialog'
 import { JsonCodeEditor } from '@/components/json-code-editor'
 import { StatusBadge, StatusBadgeList } from '@/components/status-badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -42,6 +41,7 @@ import { SettingsPageActionsPortal } from '../../components/settings-page-contex
 import { SettingsSection } from '../../components/settings-section'
 import { useUpdateOption } from '../../hooks/use-update-option'
 import { getCacheStats, clearAllCache, clearRuleCache } from './api'
+import { ChannelAffinityConfirmDialog } from './channel-affinity-confirm-dialog'
 import { RULE_TEMPLATES, cloneTemplate, makeUniqueName } from './constants'
 import { RuleEditorDialog } from './rule-editor-dialog'
 import { BindingDetailsDialog } from './binding-details-dialog'
@@ -74,43 +74,6 @@ function RuleBadgeList(props: { items: string[] }) {
         />
       )}
     />
-  )
-}
-
-function ChannelAffinityConfirmDialog(props: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  title: ReactNode
-  desc: ReactNode
-  handleConfirm: () => void
-  destructive?: boolean
-}) {
-  const { t } = useTranslation()
-
-  return (
-    <Dialog
-      open={props.open}
-      onOpenChange={props.onOpenChange}
-      title={props.title}
-      contentClassName='sm:max-w-md'
-      contentHeight='auto'
-      bodyClassName='flex items-start'
-      footer={
-        <>
-          <Button variant='outline' onClick={() => props.onOpenChange(false)}>
-            {t('Cancel')}
-          </Button>
-          <Button
-            variant={props.destructive ? 'destructive' : 'default'}
-            onClick={props.handleConfirm}
-          >
-            {t('Continue')}
-          </Button>
-        </>
-      }
-    >
-      <div className='text-muted-foreground text-sm'>{props.desc}</div>
-    </Dialog>
   )
 }
 
@@ -741,7 +704,11 @@ export function ChannelAffinitySection(props: Props) {
         )}
       </SettingsSection>
 
-      <BindingDetailsDialog open={bindingDetailsOpen} onOpenChange={setBindingDetailsOpen} />
+      <BindingDetailsDialog
+        open={bindingDetailsOpen}
+        onOpenChange={setBindingDetailsOpen}
+        onCacheCleared={refreshCache}
+      />
 
       <RuleEditorDialog
         open={ruleEditorOpen}

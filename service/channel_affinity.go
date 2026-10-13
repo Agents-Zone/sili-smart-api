@@ -1248,16 +1248,22 @@ func channelAffinityUsageCacheStatsLock(key string) *sync.Mutex {
 	return &channelAffinityUsageCacheStatsLocks[idx]
 }
 
-// ChannelAffinityBinding describes a channel and the tokens currently bound to it.
+// ChannelAffinityBinding describes a channel and the token bindings currently on it.
 type ChannelAffinityBinding struct {
 	ChannelID   int                    `json:"channel_id"`
 	ChannelName string                 `json:"channel_name"`
 	Tokens      []ChannelAffinityToken `json:"tokens"`
 }
 
+// ChannelAffinityToken is one affinity cache entry: a token (optionally under a
+// model/group scope) bound to the parent channel. KeySuffix is the cache key
+// suffix and the exact handle for single-entry deletion.
 type ChannelAffinityToken struct {
-	TokenID   int    `json:"token_id"`
-	TokenName string `json:"token_name"`
+	TokenID    int    `json:"token_id"`
+	TokenName  string `json:"token_name"`
+	ModelName  string `json:"model_name,omitempty"`
+	UsingGroup string `json:"using_group,omitempty"`
+	KeySuffix  string `json:"key_suffix"`
 }
 
 // GetChannelAffinityBindings returns current valid channel affinity bindings from cache.
@@ -1275,14 +1281,18 @@ func GetChannelAffinityBindings() ([]ChannelAffinityBinding, error) {
 	}
 	channelIDs := make(map[int]struct{})
 	tokenIDs := make(map[int]struct{})
-	pairs := make([]struct{ channelID, tokenID int }, 0, len(keys))
+	type bindingPair struct {
+		channelID int
+		token     ChannelAffinityToken
+	}
+	pairs := make([]bindingPair, 0, len(keys))
 	for _, fullKey := range keys {
 		if !strings.HasPrefix(fullKey, prefix) {
 			continue
 		}
 		suffix := strings.TrimPrefix(fullKey, prefix)
 		for _, rule := range setting.Rules {
-			tokenID, ok := parseChannelAffinityBindingTokenID(rule, suffix)
+			token, ok := parseChannelAffinityBindingToken(rule, suffix)
 			if !ok {
 				continue
 			}
@@ -1295,8 +1305,9 @@ func GetChannelAffinityBindings() ([]ChannelAffinityBinding, error) {
 				break
 			}
 			channelIDs[channelID] = struct{}{}
-			tokenIDs[tokenID] = struct{}{}
-			pairs = append(pairs, struct{ channelID, tokenID int }{channelID, tokenID})
+			tokenIDs[token.TokenID] = struct{}{}
+			token.KeySuffix = suffix
+			pairs = append(pairs, bindingPair{channelID: channelID, token: token})
 			break
 		}
 	}
@@ -1330,13 +1341,12 @@ func GetChannelAffinityBindings() ([]ChannelAffinityBinding, error) {
 		tokenByID[tok.Id] = tok
 	}
 	grouped := make(map[int]*ChannelAffinityBinding)
-	seen := make(map[int]map[int]struct{})
 	for _, p := range pairs {
 		c, ok := channelByID[p.channelID]
 		if !ok {
 			continue
 		}
-		tok, ok := tokenByID[p.tokenID]
+		tok, ok := tokenByID[p.token.TokenID]
 		if !ok {
 			continue
 		}
@@ -1348,21 +1358,22 @@ func GetChannelAffinityBindings() ([]ChannelAffinityBinding, error) {
 			}
 			b = &ChannelAffinityBinding{ChannelID: p.channelID, ChannelName: name}
 			grouped[p.channelID] = b
-			seen[p.channelID] = map[int]struct{}{}
-		}
-		if _, ok := seen[p.channelID][p.tokenID]; ok {
-			continue
 		}
 		name := tok.Name
 		if strings.TrimSpace(name) == "" {
 			name = "-"
 		}
-		b.Tokens = append(b.Tokens, ChannelAffinityToken{TokenID: p.tokenID, TokenName: name})
-		seen[p.channelID][p.tokenID] = struct{}{}
+		p.token.TokenName = name
+		b.Tokens = append(b.Tokens, p.token)
 	}
 	result := make([]ChannelAffinityBinding, 0, len(grouped))
 	for _, b := range grouped {
-		sort.Slice(b.Tokens, func(i, j int) bool { return b.Tokens[i].TokenID < b.Tokens[j].TokenID })
+		sort.Slice(b.Tokens, func(i, j int) bool {
+			if b.Tokens[i].TokenID != b.Tokens[j].TokenID {
+				return b.Tokens[i].TokenID < b.Tokens[j].TokenID
+			}
+			return b.Tokens[i].KeySuffix < b.Tokens[j].KeySuffix
+		})
 		result = append(result, *b)
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -1374,13 +1385,46 @@ func GetChannelAffinityBindings() ([]ChannelAffinityBinding, error) {
 	return result, nil
 }
 
-func parseChannelAffinityBindingTokenID(rule operation_setting.ChannelAffinityRule, suffix string) (int, bool) {
+// ClearChannelAffinityBindingByKeySuffix 按缓存键后缀删除单条亲和绑定，
+// 同步清理该键的最近绑定记录与渠道占用索引；键不存在时幂等返回 0。
+// keySuffix 须为明细接口返回的原始键后缀（可带命名空间前缀），以 token_id 结尾。
+func ClearChannelAffinityBindingByKeySuffix(keySuffix string) (int, error) {
+	suffix := strings.TrimSpace(keySuffix)
+	suffix = strings.TrimPrefix(suffix, channelAffinityCacheNamespace+":")
+	if suffix == "" || strings.ContainsAny(suffix, " \t\r\n") {
+		return 0, fmt.Errorf("key_suffix 不能为空")
+	}
+	parts := strings.Split(suffix, ":")
+	if tokenID, err := strconv.Atoi(parts[len(parts)-1]); err != nil || tokenID <= 0 {
+		return 0, fmt.Errorf("key_suffix 必须以 token_id 结尾")
+	}
+	cache := getChannelAffinityCache()
+	channelID, found, err := cache.Get(suffix)
+	if err != nil {
+		return 0, err
+	}
+	if !found || channelID <= 0 {
+		return 0, nil
+	}
+	removed, err := clearChannelAffinityBinding(suffix, channelID, "")
+	if err != nil {
+		return 0, err
+	}
+	if removed {
+		return 1, nil
+	}
+	return 0, nil
+}
+
+// parseChannelAffinityBindingToken 解析绑定键为令牌维度；模型/分组段仅用于展示，
+// 值含冒号且两段同时启用时切分为近似值，精确删除以明细返回的 KeySuffix 为准。
+func parseChannelAffinityBindingToken(rule operation_setting.ChannelAffinityRule, suffix string) (ChannelAffinityToken, bool) {
 	if len(rule.KeySources) == 0 {
-		return 0, false
+		return ChannelAffinityToken{}, false
 	}
 	for _, source := range rule.KeySources {
 		if source.Type != "context_int" || source.Key != "token_id" {
-			return 0, false
+			return ChannelAffinityToken{}, false
 		}
 	}
 	remaining := suffix
@@ -1388,7 +1432,7 @@ func parseChannelAffinityBindingTokenID(rule operation_setting.ChannelAffinityRu
 		name := strings.TrimSpace(rule.Name)
 		prefix := name + ":"
 		if name == "" || !strings.HasPrefix(remaining, prefix) {
-			return 0, false
+			return ChannelAffinityToken{}, false
 		}
 		remaining = strings.TrimPrefix(remaining, prefix)
 	}
@@ -1401,11 +1445,24 @@ func parseChannelAffinityBindingTokenID(rule operation_setting.ChannelAffinityRu
 		requiredParts++
 	}
 	if len(parts) < requiredParts {
-		return 0, false
+		return ChannelAffinityToken{}, false
 	}
 	tokenID, err := strconv.Atoi(parts[len(parts)-1])
 	if err != nil || tokenID <= 0 {
-		return 0, false
+		return ChannelAffinityToken{}, false
 	}
-	return tokenID, true
+	token := ChannelAffinityToken{TokenID: tokenID}
+	middle := parts[:len(parts)-1]
+	switch {
+	case rule.IncludeModelName && rule.IncludeUsingGroup:
+		if len(middle) >= 2 {
+			token.ModelName = middle[0]
+			token.UsingGroup = strings.Join(middle[1:], ":")
+		}
+	case rule.IncludeModelName:
+		token.ModelName = strings.Join(middle, ":")
+	case rule.IncludeUsingGroup:
+		token.UsingGroup = strings.Join(middle, ":")
+	}
+	return token, true
 }
