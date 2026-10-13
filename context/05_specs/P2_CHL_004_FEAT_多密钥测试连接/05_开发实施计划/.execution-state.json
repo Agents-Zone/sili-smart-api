@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "feature_id": "P2_CHL_004_FEAT_多密钥测试连接",
+  "subplans": {
+    "01": {
+      "base_sha": "44d64fa8f0dc1ce4e035b5c4c641eaf1d7ccbe5f",
+      "plan_digest": "52dacb8f0e86c68b841c505467f6dbab39320a88c220041c372a187a8cb03d6e",
+      "input_digests": {
+        "../01_功能需求规格说明书.md": "ad809f0447df8a7b2be90ccc622a5cfa12b827f8043f7412292861d1c2c5babd",
+        "../03_api_interface.md": "3d7a83716c5aafd2b0db0576eb8bc614c1a56cc69c101fbf47adaa3e4f43b39f",
+        "../04_model_interface.md": "c217a33b8173bed1146fce1a5dccea056c47a2b0f745ced8fd1729f0669dec5a"
+      },
+      "tasks": {
+        "T1": {
+          "key": "P2_CHL_004_FEAT_多密钥测试连接/01/T1",
+          "status": "verified",
+          "base_sha": "44d64fa8f0dc1ce4e035b5c4c641eaf1d7ccbe5f",
+          "head_sha": "70a3bf0c95dfa94b58adc3e59762181b479d5573",
+          "verification": {
+            "path": "execution-evidence/01_T1_70a3bf0c.txt",
+            "digest": "0d4b35fc3723b7f64726c22aeab1f2c04c2ae0d697798087b0fb2c2ec3330baa",
+            "head_sha": "70a3bf0c95dfa94b58adc3e59762181b479d5573",
+            "recorded_at": "2026-10-13T14:03:44Z",
+            "deferred_reason": null
+          }
+        },
+        "T2": {
+          "key": "P2_CHL_004_FEAT_多密钥测试连接/01/T2",
+          "status": "verified",
+          "base_sha": "70a3bf0c95dfa94b58adc3e59762181b479d5573",
+          "head_sha": "20dcfb1dbdf760f7029928f679a59bb2f7c63931",
+          "verification": {
+            "path": "execution-evidence/01_T2_20dcfb1d.txt",
+            "digest": "598ef648624bbacdabca61770019c1cc8ded810df2bb6e3994306ff8283f886a",
+            "head_sha": "20dcfb1dbdf760f7029928f679a59bb2f7c63931",
+            "recorded_at": "2026-10-13T14:34:26Z",
+            "deferred_reason": null
+          }
+        },
+        "T3": {
+          "key": "P2_CHL_004_FEAT_多密钥测试连接/01/T3",
+          "status": "verified",
+          "base_sha": "20dcfb1dbdf760f7029928f679a59bb2f7c63931",
+          "head_sha": "0ff23d34ff2cbf8c6709798054347c225c2416b7",
+          "verification": {
+            "path": "execution-evidence/01_T3_0ff23d34.txt",
+            "digest": "9f04e0465fe9b4fbc2f50d90210d950e5d09850d391cd4459288d37905baa74d",
+            "head_sha": "0ff23d34ff2cbf8c6709798054347c225c2416b7",
+            "recorded_at": "2026-10-13T14:49:18Z",
+            "deferred_reason": null
+          }
+        }
+      },
+      "review": {
+        "path": "execution-evidence/01_review_0ff23d34.txt",
+        "digest": "e87242ea1308551a471172f367e447460eb052bee407fb7b210dea0253631d2d",
+        "head_sha": "0ff23d34ff2cbf8c6709798054347c225c2416b7",
+        "base_sha": "44d64fa8f0dc1ce4e035b5c4c641eaf1d7ccbe5f",
+        "passed": true,
+        "recorded_at": "2026-10-13T14:52:17Z"
+      },
+      "review_failures": 0
+    }
+  },
+  "updated_at": "2026-10-13T14:52:17Z"
+}

@@ -1,0 +1,17 @@
+# P2_CHL_004/01 多密钥测试连接 最终代码评审报告
+
+裁决：通过。无 Critical、无 Important。
+
+## 评审范围
+- SUBPLAN_BASE_SHA: 44d64fa8f0dc1ce4e035b5c4c641eaf1d7ccbe5f
+- HEAD_SHA: 0ff23d34ff2cbf8c6709798054347c225c2416b7
+- 任务：T1 构造函数（70a3bf0c）、T2 接口与路由（20dcfb1d）、T3 前端与 i18n（0ff23d34），全部 verified，无 deferred
+
+## 做得好的地方
+后端方案取巧且正确：克隆渠道并关闭 IsMultiKey，让 GetNextEnabledKey 走单密钥分支直连指定密钥，绕过随机/轮询调度是语言结构保证的，不靠流程约束。聚焦核实：SetupContextForSelectedChannel（middleware/distributor.go:489）直接用传入的 channel 指针选钥、不从缓存重取，克隆视图有效；IsMultiKey=false 时 GetNextEnabledKey 直接返回 Key，无锁、无 SaveChannelInfo；testChannel 全链路无自动禁用路径；TestChannelKey 与 TestChannel 先例逐段对齐，仅按规格移除 UpdateResponseTime 并固定参数。T1 测试 9 场景、T2 测试 7 场景断言值与计划核心断言全部对齐，额外的 disabled_key、cached_keys 场景正确覆盖 BR2 与 GetKeys 缓存优先路径；success 夹具补 MultiKeySize: 2 属夹具自洽性修正（省略时 keyIndex=1 >= 0 直接拒绝，场景无法成立），断言未动。前端按钮结构、权限禁用、loading、toast 口径、index+1 展示与 7 项 BR 及先例逐一吻合，7 个 locale 键齐全。接口与 03 §4.1 契约（路径、双上界、响应结构、密钥明文不出现）核对一致；模型侧 not_applicable 与无 DDL 的 diff 相符。
+
+## 无法从 diff 定论的事项
+成功与上游失败路径需真实上游，单测按设计未覆盖，密钥直连正确性由 T1 断言加 testChannel 既有生产链路间接保证；弹框实际点击行为（loading、toast、弹框保持打开）为计划标注的手动验收项，建议交接验收时执行。
+
+## 低价值建议（口头，不落盘、不产生修复任务）
+弹框翻页时 testingKeyIndex 未复位，测试进行中翻到新页，同序号行会短暂显示无关的 loading；只读探测无实际危害。

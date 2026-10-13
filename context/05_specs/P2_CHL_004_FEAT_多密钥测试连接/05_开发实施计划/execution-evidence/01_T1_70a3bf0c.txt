@@ -1,0 +1,30 @@
+=== RUN   TestBuildSingleKeyTestChannel
+=== RUN   TestBuildSingleKeyTestChannel/success
+=== RUN   TestBuildSingleKeyTestChannel/success_disabled_key
+=== RUN   TestBuildSingleKeyTestChannel/success_with_cached_keys
+=== RUN   TestBuildSingleKeyTestChannel/not_multi_key
+=== RUN   TestBuildSingleKeyTestChannel/index_out_of_range_negative
+=== RUN   TestBuildSingleKeyTestChannel/index_out_of_range_equal_len
+=== RUN   TestBuildSingleKeyTestChannel/keys_shorter_than_size
+=== RUN   TestBuildSingleKeyTestChannel/size_shorter_than_keys
+=== RUN   TestBuildSingleKeyTestChannel/nil_channel
+--- PASS: TestBuildSingleKeyTestChannel (0.00s)
+    --- PASS: TestBuildSingleKeyTestChannel/success (0.00s)
+    --- PASS: TestBuildSingleKeyTestChannel/success_disabled_key (0.00s)
+    --- PASS: TestBuildSingleKeyTestChannel/success_with_cached_keys (0.00s)
+    --- PASS: TestBuildSingleKeyTestChannel/not_multi_key (0.00s)
+    --- PASS: TestBuildSingleKeyTestChannel/index_out_of_range_negative (0.00s)
+    --- PASS: TestBuildSingleKeyTestChannel/index_out_of_range_equal_len (0.00s)
+    --- PASS: TestBuildSingleKeyTestChannel/keys_shorter_than_size (0.00s)
+    --- PASS: TestBuildSingleKeyTestChannel/size_shorter_than_keys (0.00s)
+    --- PASS: TestBuildSingleKeyTestChannel/nil_channel (0.00s)
+PASS
+ok  	github.com/QuantumNous/new-api/controller	(cached)
+
+--- 控制器验证记录 ---
+命令: go test ./controller/ -run TestBuildSingleKeyTestChannel -v
+退出码: 0
+测试计数: 9 通过 / 0 失败 / 0 跳过
+实现者汇报补充: controller 包全量回归 ok；go vet ./controller/ 通过
+控制器自检: 核心断言存在性通过（函数名/场景/预期文案齐备）；BR1-BR4 落地证据齐备；文件清单与计划一致（channel-test.go + channel_test_key_test.go）
+夹具偏差裁决: success 场景补 MultiKeySize: 2，因计划字面夹具（省略该字段默认 0）与双上界校验自相矛盾，运行时钩子强制 MultiKeySize==len(keys)，属夹具修正，断言预期值未动
