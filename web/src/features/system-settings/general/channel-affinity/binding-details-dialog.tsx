@@ -21,13 +21,13 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { Dialog } from '@/components/dialog'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Button } from '@/components/ui/button'
 
 import {
   clearBindingCache,
   getChannelAffinityBindings,
 } from './api'
-import { ChannelAffinityConfirmDialog } from './channel-affinity-confirm-dialog'
 import type { ChannelAffinityBinding, ChannelAffinityToken } from './types'
 
 interface Props {
@@ -39,6 +39,14 @@ interface Props {
 interface ClearTarget {
   binding: ChannelAffinityBinding
   token: ChannelAffinityToken
+}
+
+// 绑定行与清除确认共用的令牌维度展示：模型名、分组仅在规则启用对应维度时出现
+function tokenDimensionLabel(token: ChannelAffinityToken): string {
+  const parts = [`${token.token_name || '-'}（${token.token_id}）`]
+  if (token.model_name) parts.push(token.model_name)
+  if (token.using_group) parts.push(token.using_group)
+  return parts.join(' · ')
 }
 
 export function BindingDetailsDialog(props: Props) {
@@ -67,7 +75,7 @@ export function BindingDetailsDialog(props: Props) {
     mutationFn: (keySuffix: string) => clearBindingCache(keySuffix),
     onSuccess: async (res) => {
       if (!res.success) {
-        toast.error(res.message || t('Failed to clear'))
+        toast.error(t('Failed to clear'))
         return
       }
       toast.success(t('Cleared'))
@@ -123,9 +131,7 @@ export function BindingDetailsDialog(props: Props) {
                       key={token.key_suffix}
                       className='flex items-center justify-between gap-2'
                     >
-                      <span>{`${token.token_name || '-'}（${token.token_id}）${
-                        token.model_name ? ` · ${token.model_name}` : ''
-                      }`}</span>
+                      <span>{tokenDimensionLabel(token)}</span>
                       <Button
                         variant='ghost'
                         size='icon'
@@ -147,20 +153,22 @@ export function BindingDetailsDialog(props: Props) {
         )}
       </Dialog>
 
-      <ChannelAffinityConfirmDialog
+      <ConfirmDialog
         open={clearTarget !== null}
         onOpenChange={(v) => !v && setClearTarget(null)}
         title={t('Confirm clearing this binding')}
-        desc={`${t('Token')}: ${clearTarget?.token.token_name || '-'}（${
-          clearTarget?.token.token_id ?? '-'
-        }）${clearTarget?.token.model_name ? ` · ${clearTarget?.token.model_name}` : ''} · ${t(
-          'Channel'
-        )}: ${clearTarget?.binding.channel_name || '-'}`}
+        desc={
+          clearTarget
+            ? `${t('Token')}: ${tokenDimensionLabel(clearTarget.token)} · ${t(
+                'Channel'
+              )}: ${clearTarget.binding.channel_name || '-'}`
+            : ''
+        }
         handleConfirm={() =>
           clearTarget && clearMutation.mutate(clearTarget.token.key_suffix)
         }
         destructive
-        confirmDisabled={clearMutation.isPending}
+        isLoading={clearMutation.isPending}
       />
     </>
   )

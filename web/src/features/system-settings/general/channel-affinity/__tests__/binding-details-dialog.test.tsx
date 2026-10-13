@@ -515,3 +515,237 @@ test(
     api.defaults.adapter = original
   }
 )
+
+const groupDimensionRows = [
+  {
+    channel_id: 1,
+    channel_name: '主渠道',
+    tokens: [
+      {
+        token_id: 201,
+        token_name: '分组令牌',
+        using_group: 'vip',
+        key_suffix: 'rule:vip:201',
+      },
+      {
+        token_id: 202,
+        token_name: '完整维度令牌',
+        model_name: 'gpt-4',
+        using_group: 'svip',
+        key_suffix: 'rule:gpt-4:svip:202',
+      },
+    ],
+  },
+]
+
+test(
+  'showsGroupDimensionInRowsAndConfirmDialog',
+  { concurrency: false },
+  async () => {
+    const original = api.defaults.adapter
+    api.defaults.adapter = async (config) => ({
+      data: {
+        success: true,
+        data: groupDimensionRows,
+      },
+      status: 200,
+      statusText: 'OK',
+      headers: {},
+      config,
+    })
+    const { host, root } = await render()
+
+    await waitForText('分组令牌（201） · vip')
+    await waitForText('完整维度令牌（202） · gpt-4 · svip')
+
+    await act(async () => queryClearButtons()[0].click())
+    const confirmText = document.body.textContent ?? ''
+    assert.ok(
+      confirmText.includes('分组令牌（201） · vip'),
+      '确认弹窗应展示分组维度，与被删行一致'
+    )
+
+    await act(async () => root.unmount())
+    host.remove()
+    api.defaults.adapter = original
+  }
+)
+
+test(
+  'keepsDialogOpenWhenDeleteFailsWithBusinessError',
+  { concurrency: false },
+  async () => {
+    const original = api.defaults.adapter
+    let cacheClearedCalls = 0
+    api.defaults.adapter = async (config) => {
+      const url = String(config.url ?? '')
+      if (
+        config.method === 'delete' &&
+        url.includes('channel_affinity_bindings')
+      ) {
+        return {
+          data: { success: false, message: '清除失败' },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config,
+        }
+      }
+      return {
+        data: {
+          success: true,
+          data:
+            config.method === 'get' &&
+            url.includes('channel_affinity_bindings')
+              ? bindingRows.both
+              : undefined,
+        },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config,
+      }
+    }
+    const { host, root } = await render(true, () => {
+      cacheClearedCalls++
+    })
+
+    await waitFor(() => queryClearButtons().length === 4, 'binding rows')
+    await act(async () => queryClearButtons()[0].click())
+    await act(async () => findButtonByText('Continue').click())
+    await act(async () => {
+      await flushPromises()
+    })
+
+    assert.equal(
+      (document.body.textContent ?? '').includes(
+        'Confirm clearing this binding'
+      ),
+      true,
+      '业务失败后确认弹窗应保持打开，等待重试或取消'
+    )
+    assert.equal(queryClearButtons().length, 4, '失败后绑定行应保持不变')
+    assert.equal(cacheClearedCalls, 0, '失败后不应通知父级刷新缓存统计')
+
+    await act(async () => root.unmount())
+    host.remove()
+    api.defaults.adapter = original
+  }
+)
+
+test(
+  'keepsDialogOpenWhenDeleteRequestRejects',
+  { concurrency: false },
+  async () => {
+    const original = api.defaults.adapter
+    let cacheClearedCalls = 0
+    api.defaults.adapter = async (config) => {
+      const url = String(config.url ?? '')
+      if (
+        config.method === 'delete' &&
+        url.includes('channel_affinity_bindings')
+      ) {
+        throw new Error('network down')
+      }
+      return {
+        data: {
+          success: true,
+          data:
+            config.method === 'get' &&
+            url.includes('channel_affinity_bindings')
+              ? bindingRows.both
+              : undefined,
+        },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config,
+      }
+    }
+    const { host, root } = await render(true, () => {
+      cacheClearedCalls++
+    })
+
+    await waitFor(() => queryClearButtons().length === 4, 'binding rows')
+    await act(async () => queryClearButtons()[0].click())
+    await act(async () => findButtonByText('Continue').click())
+    await act(async () => {
+      await flushPromises()
+    })
+
+    assert.equal(
+      (document.body.textContent ?? '').includes(
+        'Confirm clearing this binding'
+      ),
+      true,
+      '网络失败后确认弹窗应保持打开'
+    )
+    assert.equal(queryClearButtons().length, 4, '失败后绑定行应保持不变')
+    assert.equal(cacheClearedCalls, 0, '失败后不应通知父级刷新缓存统计')
+
+    await act(async () => root.unmount())
+    host.remove()
+    api.defaults.adapter = original
+  }
+)
+
+test(
+  'disablesConfirmWhileDeletePending',
+  { concurrency: false },
+  async () => {
+    const original = api.defaults.adapter
+    const pending = deferred<unknown>()
+    let cleared = false
+    api.defaults.adapter = ((config) => {
+      const url = String(config.url ?? '')
+      if (
+        config.method === 'delete' &&
+        url.includes('channel_affinity_bindings')
+      ) {
+        return pending.promise
+      }
+      return Promise.resolve({
+        data: {
+          success: true,
+          data: cleared ? bindingRows.remaining : bindingRows.both,
+        },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config,
+      })
+    }) as typeof api.defaults.adapter
+    const { host, root } = await render()
+
+    await waitFor(() => queryClearButtons().length === 4, 'binding rows')
+    await act(async () => queryClearButtons()[0].click())
+    await act(async () => findButtonByText('Continue').click())
+    // React Query 的 pending 状态经通知器批处理广播，等一个宏任务时间片
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    assert.equal(
+      findButtonByText('Continue').disabled,
+      true,
+      '清除进行中确认按钮应禁用，防重复提交'
+    )
+
+    cleared = true
+    pending.resolve({
+      data: { success: true, data: { deleted: 1 } },
+      status: 200,
+      statusText: 'OK',
+      headers: {},
+      config: {},
+    } as never)
+    await act(async () => {
+      await pending.promise
+      await flushPromises()
+    })
+    await waitFor(() => queryClearButtons().length === 3, 'refreshed rows')
+
+    await act(async () => root.unmount())
+    host.remove()
+    api.defaults.adapter = original
+  }
+)

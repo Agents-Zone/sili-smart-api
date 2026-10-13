@@ -889,6 +889,31 @@ func EditTagChannels(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	// 路由相关列（models/group/weight/priority/tag）变更后按渠道三批同清亲和运行时
+	// （CHL_001 5.2.2 第7条），条件与 model.EditChannelByTag 的生效字段同口径；
+	// 清理失败由函数内部重试与 SysError 承担，不阻断编辑结果
+	routeChanged := (channelTag.Models != nil && *channelTag.Models != "") ||
+		(channelTag.Groups != nil && *channelTag.Groups != "") ||
+		channelTag.Priority != nil || channelTag.Weight != nil ||
+		(channelTag.NewTag != nil && *channelTag.NewTag != channelTag.Tag)
+	if routeChanged {
+		updatedTag := channelTag.Tag
+		if channelTag.NewTag != nil && *channelTag.NewTag != channelTag.Tag {
+			updatedTag = *channelTag.NewTag
+		}
+		channels, err := model.GetChannelsByTag(updatedTag, false, false)
+		if err != nil {
+			common.SysError(fmt.Sprintf("channel affinity cleanup after tag edit failed to load channels: tag=%s, error=%v", updatedTag, err))
+		} else {
+			ids := make([]int, 0, len(channels))
+			for _, ch := range channels {
+				ids = append(ids, ch.Id)
+			}
+			if len(ids) > 0 {
+				service.ClearChannelAffinityRuntimeByChannelIDs(ids)
+			}
+		}
+	}
 	recordManageAudit(c, "channel.tag_edit", map[string]interface{}{
 		"tag": channelTag.Tag,
 	})
@@ -1296,6 +1321,14 @@ func UpdateChannel(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	// 路由相关列（models/group/weight/priority/tag）变更后按渠道三批同清亲和运行时
+	// （CHL_001 5.2.2 第7条），与批量编辑同口径；Update 后 channel 已重读为提交值，
+	// 与编辑前快照 originChannel 逐列比较；清理失败由函数内部重试与 SysError 承担
+	if channel.Group != originChannel.Group || channel.Models != originChannel.Models ||
+		!equalStringPtr(channel.Tag, originChannel.Tag) ||
+		!equalPtr(channel.Weight, originChannel.Weight) || !equalPtr(channel.Priority, originChannel.Priority) {
+		service.ClearChannelAffinityRuntimeByChannelIDs([]int{channel.Id})
+	}
 	if proxyChanged {
 		service.InvalidateProxyClient(originProxy)
 	}
@@ -1389,8 +1422,8 @@ func isManageableChannelStatus(status int) bool {
 	return status == common.ChannelStatusEnabled || status == common.ChannelStatusManuallyDisabled
 }
 
-// equalStringPtr 比较两个 *string 是否相等（均为 nil 视为相等）。
-func equalStringPtr(a, b *string) bool {
+// equalPtr 比较两个可比较类型指针是否指向相等值（均为 nil 视为相等）。
+func equalPtr[T comparable](a, b *T) bool {
 	if a == nil && b == nil {
 		return true
 	}
@@ -1398,6 +1431,11 @@ func equalStringPtr(a, b *string) bool {
 		return false
 	}
 	return *a == *b
+}
+
+// equalStringPtr 比较两个 *string 是否相等（均为 nil 视为相等）。
+func equalStringPtr(a, b *string) bool {
+	return equalPtr(a, b)
 }
 
 type fetchModelsRequest struct {

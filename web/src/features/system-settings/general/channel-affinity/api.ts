@@ -14,7 +14,7 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
-import { api } from '@/lib/api'
+import { api, type ApiRequestConfig } from '@/lib/api'
 
 import type { CacheStats, ChannelAffinityBinding } from './types'
 
@@ -57,9 +57,12 @@ export async function clearRuleCache(ruleName: string): Promise<ApiResponse> {
 export async function clearBindingCache(
   keySuffix: string
 ): Promise<ApiResponse> {
+  // 错误提示由调用方 mutation 统一展示，跳过全局拦截器 toast
   const res = await api.delete('/api/option/channel_affinity_bindings', {
     params: { key_suffix: keySuffix },
-  })
+    skipBusinessError: true,
+    skipErrorHandler: true,
+  } as ApiRequestConfig)
   return res.data
 }
 export async function getAffinityUsageCache(params: {

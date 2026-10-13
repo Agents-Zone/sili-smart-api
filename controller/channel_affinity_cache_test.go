@@ -175,7 +175,7 @@ func TestDeleteChannelAffinityBindingByKeySuffixRejectsInvalidParam(t *testing.T
 
 	for _, query := range []string{"", "key_suffix=", "key_suffix=clear-test:gpt-4", "key_suffix=clear-test:gpt-4:abc"} {
 		w := callDeleteChannelAffinityBinding(t, query)
-		assert.Equal(t, http.StatusBadRequest, w.Code, query)
+		assert.Equal(t, http.StatusOK, w.Code, query)
 		var payload struct {
 			Success bool `json:"success"`
 		}

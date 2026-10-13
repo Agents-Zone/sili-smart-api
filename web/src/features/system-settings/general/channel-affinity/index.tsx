@@ -23,6 +23,7 @@ import { toast } from 'sonner'
 
 import { StaticDataTable } from '@/components/data-table'
 import { JsonCodeEditor } from '@/components/json-code-editor'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { StatusBadge, StatusBadgeList } from '@/components/status-badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -41,7 +42,6 @@ import { SettingsPageActionsPortal } from '../../components/settings-page-contex
 import { SettingsSection } from '../../components/settings-section'
 import { useUpdateOption } from '../../hooks/use-update-option'
 import { getCacheStats, clearAllCache, clearRuleCache } from './api'
-import { ChannelAffinityConfirmDialog } from './channel-affinity-confirm-dialog'
 import { RULE_TEMPLATES, cloneTemplate, makeUniqueName } from './constants'
 import { RuleEditorDialog } from './rule-editor-dialog'
 import { BindingDetailsDialog } from './binding-details-dialog'
@@ -718,7 +718,7 @@ export function ChannelAffinitySection(props: Props) {
         templateKey={ruleTemplateKey}
       />
 
-      <ChannelAffinityConfirmDialog
+      <ConfirmDialog
         open={clearAllDialogOpen}
         onOpenChange={setClearAllDialogOpen}
         title={t('Confirm clearing all channel affinity cache')}
@@ -730,7 +730,7 @@ export function ChannelAffinitySection(props: Props) {
       />
 
       {clearRuleName !== null && (
-        <ChannelAffinityConfirmDialog
+        <ConfirmDialog
           open
           onOpenChange={(v) => !v && setClearRuleName(null)}
           title={t('Confirm clearing cache for this rule')}
@@ -740,7 +740,7 @@ export function ChannelAffinitySection(props: Props) {
         />
       )}
 
-      <ChannelAffinityConfirmDialog
+      <ConfirmDialog
         open={fillTemplateDialogOpen}
         onOpenChange={setFillTemplateDialogOpen}
         title={t('Fill Codex CLI / Claude CLI Templates')}

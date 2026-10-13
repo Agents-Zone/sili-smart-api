@@ -210,9 +210,9 @@
 
 | 场景 | HTTP 状态 | 响应 |
 |------|----------|------|
-| 缺少 all 且缺 rule_name | 400 | `success:false` + 缺参提示 |
-| rule_name 未匹配到规则 | 400 | `success:false` + 未知规则名 |
-| 规则未启用 include_rule_name | 400 | `success:false` + 无法按规则清空 |
+| 缺少 all 且缺 rule_name | 200 | `success:false` + 缺参提示 |
+| rule_name 未匹配到规则 | 200 | `success:false` + 未知规则名 |
+| 规则未启用 include_rule_name | 200 | `success:false` + 无法按规则清空 |
 | 反向索引/最近绑定记录清理失败 | 200 | 正向清空成功返回，失败记 SysError（重试一次后） |
 
 ### 3.4 查询亲和键上游缓存命中统计（无变更）
@@ -266,7 +266,7 @@
 
 ## 5. 错误码与异常汇总
 
-本 Feature 无新增错误码枚举。管理接口错误沿用规则文件 §2.2 的两类形态：主流程业务错误（HTTP 200 + `success:false` + message）与参数校验错误（HTTP 400 + message），与现有 option/缓存接口一致。
+本 Feature 无新增错误码枚举。管理接口错误统一沿用规则文件 §2.2 的主流程错误形态：HTTP 200 + `success:false` + message。
 
 运行时异常（无 HTTP 暴露）按 SSOT 5.1.5 / 5.2.5 / 5.3.5 落地为服务端日志：
 

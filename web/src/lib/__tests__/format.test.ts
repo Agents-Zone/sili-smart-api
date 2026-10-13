@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { formatTokensInM } from './format'
+import { formatTokensInM } from '../format'
 
 describe('formatTokensInM', () => {
   test('formats zero', () => {

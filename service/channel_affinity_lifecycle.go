@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -49,17 +50,31 @@ func clearChannelAffinityBinding(suffix string, channelID int, keyFP string) (bo
 		if err != nil {
 			return false, err
 		}
-		candidates := append(exclusiveKeyFingerprintsFromSuffix(suffix), affinityFingerprint(suffix))
-		for _, candidate := range candidates {
+		// 候选指纹按后缀逐段回退推导：同渠道存在亲和值构成后缀包含关系的其它键时
+		// 可有多个候选同时命中，命中即止会误移他键成员（占用低估计导致独占误判
+		// 空闲）；多命中时无法判定归属，保守跳过占用移除并声明，残留随 TTL 收敛
+		ambiguous := false
+		for _, candidate := range append(exclusiveKeyFingerprintsFromSuffix(suffix), affinityFingerprint(suffix)) {
+			if candidate == "" {
+				continue
+			}
 			for _, member := range members {
 				if candidate == member {
-					keyFP = candidate
+					if keyFP == "" {
+						keyFP = candidate
+					} else {
+						ambiguous = true
+					}
 					break
 				}
 			}
-			if keyFP != "" {
+			if ambiguous {
 				break
 			}
+		}
+		if ambiguous {
+			common.SysError(fmt.Sprintf("channel affinity binding clear skipped occupancy removal: ambiguous fingerprint candidates, channel=%d key=%s", channelID, suffix))
+			keyFP = ""
 		}
 	}
 	if common.RedisEnabled && common.RDB != nil {

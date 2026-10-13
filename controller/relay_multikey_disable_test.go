@@ -44,14 +44,17 @@ func TestProcessChannelErrorDisablesMultiKeyChannelKey(t *testing.T) {
 	setupRelayErrorDB(t)
 
 	// 开启自动禁用 + 配置中文关键词
-	common.AutomaticDisableChannelEnabled = true
+	origDisable := common.AutomaticDisableChannelEnabled
 	origKeywords := operation_setting.AutomaticDisableKeywords
+	origErrorLog := constant.ErrorLogEnabled
+	common.AutomaticDisableChannelEnabled = true
 	operation_setting.AutomaticDisableKeywordsFromString("余额不足")
-	t.Cleanup(func() {
-		common.AutomaticDisableChannelEnabled = false
-		operation_setting.AutomaticDisableKeywords = origKeywords
-	})
 	constant.ErrorLogEnabled = false
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled = origDisable
+		operation_setting.AutomaticDisableKeywords = origKeywords
+		constant.ErrorLogEnabled = origErrorLog
+	})
 
 	autoBan := 1
 	ch := &model.Channel{

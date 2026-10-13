@@ -130,7 +130,7 @@
 
 **服务端处理流程：**
 
-1. 校验 `key_suffix`：去空格、去命名空间前缀后须非空且不含空白字符，最后一段须为正整数 token_id；不满足返回 HTTP 400。
+1. 校验 `key_suffix`：去空格、去命名空间前缀后须非空且不含空白字符，最后一段须为正整数 token_id；不满足返回 HTTP 200 与 `success:false`。
 2. 读取该键当前绑定的渠道 ID；键不存在或值非法时幂等返回 `deleted:0`。
 3. 调用内部单键清理路径（Redis 模式为 Lua 原子脚本）：仅当键仍指向读取到的渠道时删除正向绑定，并同步清理该键的最近绑定记录与渠道占用索引成员。
 4. 返回统一成功响应与实际删除数。
@@ -139,8 +139,8 @@
 
 | 场景 | HTTP 状态 | 响应 |
 |---|---:|---|
-| `key_suffix` 缺失 | 400 | `{"success":false,"message":"缺少参数：key_suffix"}` |
-| `key_suffix` 非法（空、含空白、不以 token_id 结尾） | 400 | `{"success":false,"message":"key_suffix 必须以 token_id 结尾"}` 等 |
+| `key_suffix` 缺失 | 200 | `{"success":false,"message":"缺少参数：key_suffix"}` |
+| `key_suffix` 非法（空、含空白、不以 token_id 结尾） | 200 | `{"success":false,"message":"key_suffix 必须以 token_id 结尾"}` 等 |
 
 `key_suffix` 使用查询接口返回的原值即可精确定位，含冒号的规则名、模型名、分组值不影响定位；前端无需自行拼接键。
 
@@ -172,7 +172,7 @@
 |---|---|
 | 页面功能覆盖 | 缓存数量点击、加载、数据、空状态、错误、关闭、单条绑定清除均由 GET 与 DELETE(key_suffix) 接口支撑 |
 | 方法规范 | GET 仅查询；DELETE 仅删单条绑定，复用内部单键清理路径 |
-| 响应格式 | 遵循 `{success,message,data}`；非法参数返回 HTTP 400 |
+| 响应格式 | 遵循 `{success,message,data}`；非法参数返回 HTTP 200 与 `success:false`（规则文件 §2.2 主流程错误口径） |
 | 权限 | RootAuth，仅根管理员 |
 | 排序与聚合 | 渠道名称升序；同渠道按 token_id 升序、同令牌按键后缀升序；渠道单行聚合，一键一行 |
 | 数据边界 | 查询忽略过期、无法解析、渠道不存在、令牌不存在的条目；删除仅影响目标键 |

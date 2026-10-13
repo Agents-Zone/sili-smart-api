@@ -1302,10 +1302,12 @@ func exclusiveKeyFingerprintsFromSuffix(suffix string) []string {
 	return fps
 }
 
-// removeExclusiveOccupancyBySuffix 成员级移除：候选指纹中第一个存在于该渠道条目
-// 内的即命中并移除（命中即止），不整体删除渠道条目，避免误删其它规则同渠道的
-// 键指纹（04 文档 §6.2）。推导失败的键（无候选段或条目内无命中）跳过并 SysLog
-// 声明，残留依赖 TTL 收敛（SSOT 5.2.5）。
+// removeExclusiveOccupancyBySuffix 成员级移除：候选指纹中唯一存在于该渠道条目
+// 内的才命中并移除，不整体删除渠道条目，避免误删其它规则同渠道的键指纹
+// （04 文档 §6.2）。多候选同时命中时无法判定归属（后缀包含关系的亲和值可推导
+// 出彼此的候选指纹），误移会使占用低估计、独占误判空闲，保守跳过并 SysError
+// 声明；推导失败的键（无候选段或条目内无命中）跳过并 SysLog 声明，残留依赖
+// TTL 收敛（SSOT 5.2.5）。
 func removeExclusiveOccupancyBySuffix(channelID int, suffix string) {
 	fps := exclusiveKeyFingerprintsFromSuffix(suffix)
 	if len(fps) == 0 {
@@ -1321,18 +1323,26 @@ func removeExclusiveOccupancyBySuffix(channelID int, suffix string) {
 	for _, fp := range members {
 		memberSet[fp] = struct{}{}
 	}
+	located := ""
 	for _, fp := range fps {
 		if _, hit := memberSet[fp]; !hit {
 			continue
 		}
-		if err := retryOnce(func() error {
-			return occupancyRemoveKeyFP(channelID, fp)
-		}); err != nil {
-			common.SysError(fmt.Sprintf("channel affinity occupancy remove on clear failed: channel=%d key=%s err=%v", channelID, suffix, err))
+		if located != "" {
+			common.SysError(fmt.Sprintf("channel affinity clear skip: ambiguous fingerprint candidates, channel=%d key=%s", channelID, suffix))
+			return
 		}
+		located = fp
+	}
+	if located == "" {
+		common.SysLog(fmt.Sprintf("channel affinity clear skip: fingerprint not located in occupancy, channel=%d key=%s", channelID, suffix))
 		return
 	}
-	common.SysLog(fmt.Sprintf("channel affinity clear skip: fingerprint not located in occupancy, channel=%d key=%s", channelID, suffix))
+	if err := retryOnce(func() error {
+		return occupancyRemoveKeyFP(channelID, located)
+	}); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity occupancy remove on clear failed: channel=%d key=%s err=%v", channelID, suffix, err))
+	}
 }
 
 // clearExclusiveRuntimeByForwardKeys 按正向缓存键回放清理 occupancy 与 lastBind
