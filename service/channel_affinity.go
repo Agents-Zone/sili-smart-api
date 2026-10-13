@@ -650,7 +650,8 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 		if found {
 			if rule.ExclusiveBind {
 				meta, _ := getChannelAffinityMeta(c)
-				if disabled, releaseErr := releaseDisabledAffinityBinding(meta, channelID); releaseErr != nil {
+				disabled, boundChannel, releaseErr := releaseDisabledAffinityBinding(meta, channelID)
+				if releaseErr != nil {
 					common.SysError(fmt.Sprintf("channel affinity disabled binding release failed: channel=%d err=%v", channelID, releaseErr))
 					// 保留命中结果，让分发器返回不可用，避免存储故障触发随机切换。
 					return channelID, true
@@ -662,7 +663,7 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 				// 直接 503，且每个后续请求重复同一判定，直到正向 TTL 过期或
 				// 手动清缓存（生产观察：换组后原分组持续 503）。渠道仍在分组
 				// 仅模型映射被移除的场景不在此拆绑定（亲和键跨模型共享）。
-				if !exclusiveBoundChannelInRequestGroup(c, usingGroup, channelID) {
+				if !exclusiveBoundChannelInRequestGroup(c, usingGroup, boundChannel) {
 					suffix := strings.TrimPrefix(meta.CacheKey, channelAffinityCacheNamespace+":")
 					if _, clearErr := clearChannelAffinityBinding(suffix, channelID, meta.KeyFingerprint); clearErr != nil {
 						common.SysError(fmt.Sprintf("channel affinity group-mismatch binding release failed: channel=%d err=%v", channelID, clearErr))

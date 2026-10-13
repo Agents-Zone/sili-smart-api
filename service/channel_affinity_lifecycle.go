@@ -112,21 +112,22 @@ func clearChannelAffinityBinding(suffix string, channelID int, keyFP string) (bo
 
 // releaseDisabledAffinityBinding 在确认手动禁用、自动禁用或删除后释放旧绑定。
 // 返回 true 表示需重新获取绑定，即使并发请求已经完成了释放或重绑。
-func releaseDisabledAffinityBinding(meta channelAffinityMeta, channelID int) (bool, error) {
+// 已查询的渠道对象随结果返回，供调用方复用，避免独占命中热路径重复查询。
+func releaseDisabledAffinityBinding(meta channelAffinityMeta, channelID int) (bool, *model.Channel, error) {
 	channel, err := model.CacheGetChannel(channelID)
 	if err != nil || channel == nil {
 		// 缓存缺失须由数据库确认；连接故障等错误不能当作渠道已删除。
 		channel, err = model.GetChannelById(channelID, false)
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return false, err
+			return false, nil, err
 		}
 	}
 	if channel != nil && err == nil && channel.Status != common.ChannelStatusManuallyDisabled && channel.Status != common.ChannelStatusAutoDisabled {
-		return false, nil
+		return false, channel, nil
 	}
 	suffix := strings.TrimPrefix(meta.CacheKey, channelAffinityCacheNamespace+":")
 	_, err = clearChannelAffinityBinding(suffix, channelID, meta.KeyFingerprint)
-	return true, err
+	return true, nil, err
 }
 
 // renewExclusiveAffinityBinding 只续期仍存在且渠道一致的绑定，防止旧请求复活旧绑定。

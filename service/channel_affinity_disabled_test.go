@@ -66,7 +66,7 @@ func TestExclusiveAffinityRebindsDisabledChannel(t *testing.T) {
 				assert.Equal(t, 0, channelMemberCount(t, 921))
 				assert.Equal(t, id, forwardBinding(t, "disabled"))
 				// 另一请求仍携带旧渠道快照，延迟释放应保留已经建立的新绑定。
-				disabled, err := releaseDisabledAffinityBinding(oldMeta, 921)
+				disabled, _, err := releaseDisabledAffinityBinding(oldMeta, 921)
 				require.NoError(t, err)
 				assert.True(t, disabled)
 				assert.Equal(t, id, forwardBinding(t, "disabled"))

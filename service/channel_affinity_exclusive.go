@@ -887,10 +887,9 @@ func exclusivePickRandom(ids []int) int {
 // （渠道被移动到其它分组时为 false）。仅判断分组归属：渠道仍在分组但某模型
 // 映射被移除时保留绑定（亲和键跨模型共享，拆绑定会破坏其它模型的亲和），
 // 由 distributor 既有 503 分支处理；auto 分组下渠道归属任一展开分组即可。
-func exclusiveBoundChannelInRequestGroup(c *gin.Context, usingGroup string, channelID int) bool {
-	channel, err := model.CacheGetChannel(channelID)
-	if err != nil || channel == nil {
-		// 查询失败或渠道缺失不在此拆绑定：删除/禁用场景由
+func exclusiveBoundChannelInRequestGroup(c *gin.Context, usingGroup string, channel *model.Channel) bool {
+	if channel == nil {
+		// 渠道缺失不在此拆绑定：删除/禁用场景由
 		// releaseDisabledAffinityBinding 释放。
 		return true
 	}

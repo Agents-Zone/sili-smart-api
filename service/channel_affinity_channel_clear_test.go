@@ -132,7 +132,7 @@ func TestExclusiveAffinityLookupFailurePreservesBinding(t *testing.T) {
 	require.NoError(t, model.DB.Callback().Query().Before("gorm:query").Register("affinity_query_error", func(db *gorm.DB) { db.AddError(expected) }))
 	t.Cleanup(func() { model.DB.Callback().Query().Remove("affinity_query_error") })
 	_, meta := raceHitCtx("lookup-error", 921)
-	released, err := releaseDisabledAffinityBinding(meta, 921)
+	released, _, err := releaseDisabledAffinityBinding(meta, 921)
 	assert.ErrorIs(t, err, expected)
 	assert.False(t, released)
 	assert.Equal(t, 921, forwardBinding(t, "lookup-error"))
