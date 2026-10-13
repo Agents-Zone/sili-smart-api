@@ -886,6 +886,14 @@ func TestChannel(c *gin.Context) {
 		requestCtx = c.Request.Context()
 	}
 	result := testChannel(requestCtx, channel, testUserID, testModel, endpointType, isStream)
+	writeChannelTestResult(c, channel, tik, result, true)
+}
+
+// writeChannelTestResult 按渠道级测试的响应契约输出结果：localErr 表示
+// 未发出请求，time 为 0；上游失败附带 error_code；成功仅含实测耗时。
+// updateResponseTime 控制是否异步更新渠道响应时间，单密钥测试传 false
+// 保持零写回。
+func writeChannelTestResult(c *gin.Context, channel *model.Channel, tik time.Time, result testResult, updateResponseTime bool) {
 	if result.localErr != nil {
 		resp := gin.H{
 			"success": false,
@@ -898,9 +906,10 @@ func TestChannel(c *gin.Context) {
 		c.JSON(http.StatusOK, resp)
 		return
 	}
-	tok := time.Now()
-	milliseconds := tok.Sub(tik).Milliseconds()
-	go channel.UpdateResponseTime(milliseconds)
+	milliseconds := time.Since(tik).Milliseconds()
+	if updateResponseTime {
+		go channel.UpdateResponseTime(milliseconds)
+	}
 	consumedTime := float64(milliseconds) / 1000.0
 	if result.newAPIError != nil {
 		c.JSON(http.StatusOK, gin.H{
@@ -982,35 +991,7 @@ func TestChannelKey(c *gin.Context) {
 	// 无任何 query 参数：testModel 传空由链路按渠道 test_model → 模型列表第一个 →
 	// gpt-4o-mini 兜底，固定非流式
 	result := testChannel(requestCtx, view, testUserID, "", "", false)
-	if result.localErr != nil {
-		resp := gin.H{
-			"success": false,
-			"message": result.localErr.Error(),
-			"time":    0.0,
-		}
-		if result.newAPIError != nil {
-			resp["error_code"] = result.newAPIError.GetErrorCode()
-		}
-		c.JSON(http.StatusOK, resp)
-		return
-	}
-	tok := time.Now()
-	milliseconds := tok.Sub(tik).Milliseconds()
-	consumedTime := float64(milliseconds) / 1000.0
-	if result.newAPIError != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success":    false,
-			"message":    result.newAPIError.Error(),
-			"time":       consumedTime,
-			"error_code": result.newAPIError.GetErrorCode(),
-		})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"time":    consumedTime,
-	})
+	writeChannelTestResult(c, view, tik, result, false)
 }
 
 // channelTestSummary records the outcome of one channel test cycle so the

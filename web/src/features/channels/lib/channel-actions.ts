@@ -117,6 +117,40 @@ function getChannelTestLabel(options?: {
   return i18next.t('Channel')
 }
 
+function notifyChannelTestResult(
+  target: string,
+  response: ChannelTestResponse
+): void {
+  if (response.success) {
+    const duration = formatChannelTestDuration(
+      getChannelTestResponseTime(response)
+    )
+    toast.success(
+      i18next.t('{{target}} test succeeded', { target }),
+      duration
+        ? {
+            description: i18next.t('Response time: {{duration}}', {
+              duration,
+            }),
+          }
+        : undefined
+    )
+    return
+  }
+  notifyChannelTestError(target, response.message, response.error_code)
+}
+
+function notifyChannelTestError(
+  target: string,
+  message?: string,
+  errorCode?: string
+): void {
+  const errorMsg = message || i18next.t(ERROR_MESSAGES.TEST_FAILED)
+  toast.error(i18next.t('{{target}} test failed', { target }), {
+    description: errorCode ? `${errorMsg} (${errorCode})` : errorMsg,
+  })
+}
+
 // ============================================================================
 // Single Channel Actions
 // ============================================================================
@@ -305,31 +339,15 @@ export async function handleTestChannel(
   try {
     const response = await testChannel(id, payload)
     const responseTime = getChannelTestResponseTime(response)
-    const duration = formatChannelTestDuration(responseTime)
     const target = getChannelTestLabel(options)
+    if (!options?.silent) {
+      notifyChannelTestResult(target, response)
+    }
     if (response.success) {
-      if (!options?.silent) {
-        toast.success(
-          i18next.t('{{target}} test succeeded', { target }),
-          duration
-            ? {
-                description: i18next.t('Response time: {{duration}}', {
-                  duration,
-                }),
-              }
-            : undefined
-        )
-      }
       onTestComplete?.(true, responseTime)
     } else {
-      const errorMsg = response.message || i18next.t(ERROR_MESSAGES.TEST_FAILED)
-      if (!options?.silent) {
-        toast.error(i18next.t('{{target}} test failed', { target }), {
-          description: response.error_code
-            ? `${errorMsg} (${response.error_code})`
-            : errorMsg,
-        })
-      }
+      const errorMsg =
+        response.message || i18next.t(ERROR_MESSAGES.TEST_FAILED)
       onTestComplete?.(false, responseTime, errorMsg, response.error_code)
     }
   } catch (_error: unknown) {
@@ -338,9 +356,7 @@ export async function handleTestChannel(
       err?.response?.data?.message || i18next.t(ERROR_MESSAGES.TEST_FAILED)
     const target = getChannelTestLabel(options)
     if (!options?.silent) {
-      toast.error(i18next.t('{{target}} test failed', { target }), {
-        description: errorMsg,
-      })
+      notifyChannelTestError(target, errorMsg)
     }
     onTestComplete?.(false, undefined, errorMsg)
   }
@@ -357,35 +373,10 @@ export async function handleTestChannelKey(
 
   try {
     const response = await testChannelKey(channelId, keyIndex)
-    if (response.success) {
-      const duration = formatChannelTestDuration(
-        getChannelTestResponseTime(response)
-      )
-      toast.success(
-        i18next.t('{{target}} test succeeded', { target }),
-        duration
-          ? {
-              description: i18next.t('Response time: {{duration}}', {
-                duration,
-              }),
-            }
-          : undefined
-      )
-    } else {
-      const errorMsg = response.message || i18next.t(ERROR_MESSAGES.TEST_FAILED)
-      toast.error(i18next.t('{{target}} test failed', { target }), {
-        description: response.error_code
-          ? `${errorMsg} (${response.error_code})`
-          : errorMsg,
-      })
-    }
+    notifyChannelTestResult(target, response)
   } catch (_error: unknown) {
     const err = _error as { response?: { data?: { message?: string } } }
-    const errorMsg =
-      err?.response?.data?.message || i18next.t(ERROR_MESSAGES.TEST_FAILED)
-    toast.error(i18next.t('{{target}} test failed', { target }), {
-      description: errorMsg,
-    })
+    notifyChannelTestError(target, err?.response?.data?.message)
   }
 }
 

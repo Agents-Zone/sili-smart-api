@@ -136,6 +136,8 @@ export function MultiKeyManageDialog({
 
       if (response.success && response.data) {
         setKeys(response.data.keys || [])
+        // 列表数据已替换：在途密钥测试的 loading 态不再对应新行，随之失效
+        setTestingKeyIndex(null)
         setTotal(response.data.total || 0)
         setCurrentPage(response.data.page || 1)
         setPageSize(response.data.page_size || 10)
