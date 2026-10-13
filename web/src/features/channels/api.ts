@@ -238,6 +238,20 @@ export async function testChannel(
 }
 
 /**
+ * Test connectivity of a specific key in a multi-key channel
+ */
+export async function testChannelKey(
+  channelId: number,
+  keyIndex: number
+): Promise<ChannelTestResponse> {
+  const res = await api.get(
+    `/api/channel/test/${channelId}/${keyIndex}`,
+    channelActionConfig()
+  )
+  return res.data
+}
+
+/**
  * Update channel balance
  */
 export async function updateChannelBalance(

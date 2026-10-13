@@ -16,30 +16,66 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { Gauge, Loader2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 
 import type { MultiKeyConfirmAction } from '../../types'
 
 type MultiKeyTableRowActionsProps = {
   keyIndex: number
   status: number
+  canTest: boolean
+  testingKeyIndex: number | null
   canDelete: boolean
+  onTest: (keyIndex: number) => void
   onAction: (action: MultiKeyConfirmAction) => void
 }
 
 export function MultiKeyTableRowActions({
   keyIndex,
   status,
+  canTest,
+  testingKeyIndex,
   canDelete,
+  onTest,
   onAction,
 }: MultiKeyTableRowActionsProps) {
   const { t } = useTranslation()
   const isEnabled = status === 1
+  const isTesting = testingKeyIndex === keyIndex
 
   return (
-    <div className='flex justify-end gap-2'>
+    <div className='flex items-center justify-end gap-2'>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              variant='ghost'
+              size='icon-sm'
+              onClick={() => onTest(keyIndex)}
+              disabled={!canTest || isTesting}
+              aria-label={t('Test Connection')}
+              title={
+                canTest ? undefined : t('No permission to perform this action')
+              }
+            />
+          }
+        >
+          {isTesting ? (
+            <Loader2 className='size-4 animate-spin' />
+          ) : (
+            <Gauge className='size-4' />
+          )}
+        </TooltipTrigger>
+        <TooltipContent>{t('Test Connection')}</TooltipContent>
+      </Tooltip>
       {isEnabled ? (
         <Button
           variant='outline'

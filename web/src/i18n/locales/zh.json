@@ -2434,6 +2434,7 @@
     "Keep-alive Ping": "保持连接心跳",
     "Keeps compatible responses more repeatable": "让兼容模型的回复更可复现",
     "Key": "密钥",
+    "Key #{{index}}": "密钥 #{{index}}",
     "Key Fingerprint": "Key 指纹",
     "Key Sources": "Key 来源",
     "Key Summary": "Key 摘要",

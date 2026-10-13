@@ -2434,6 +2434,7 @@
     "Keep-alive Ping": "Ping de maintien de connexion",
     "Keeps compatible responses more repeatable": "Rend les réponses compatibles plus reproductibles",
     "Key": "Clé",
+    "Key #{{index}}": "Clé #{{index}}",
     "Key Fingerprint": "Empreinte de clé",
     "Key Sources": "Sources de clé",
     "Key Summary": "Résumé de clé",
