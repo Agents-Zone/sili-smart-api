@@ -657,6 +657,20 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 				} else if disabled {
 					return acquireExclusiveBinding(c, meta, usingGroup, modelName)
 				}
+				// 渠道启用但已离开请求分组（如被移动到其它分组）：清旧绑定并
+				// 从当前分组候选集重绑。否则 distributor 独占分支分组校验失败
+				// 直接 503，且每个后续请求重复同一判定，直到正向 TTL 过期或
+				// 手动清缓存（生产观察：换组后原分组持续 503）。渠道仍在分组
+				// 仅模型映射被移除的场景不在此拆绑定（亲和键跨模型共享）。
+				if !exclusiveBoundChannelInRequestGroup(c, usingGroup, channelID) {
+					suffix := strings.TrimPrefix(meta.CacheKey, channelAffinityCacheNamespace+":")
+					if _, clearErr := clearChannelAffinityBinding(suffix, channelID, meta.KeyFingerprint); clearErr != nil {
+						common.SysError(fmt.Sprintf("channel affinity group-mismatch binding release failed: channel=%d err=%v", channelID, clearErr))
+						// 与禁用释放失败同口径：保留命中结果，避免存储故障触发随机切换。
+						return channelID, true
+					}
+					return acquireExclusiveBinding(c, meta, usingGroup, modelName)
+				}
 			}
 			// 命中渠道记为首次占位渠道：后续失败切换迁移时从该渠道条目
 			// 移除本键指纹（SSOT 5.2.2 第2条），终态失败也据此回滚。

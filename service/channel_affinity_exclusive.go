@@ -883,6 +883,43 @@ func exclusivePickRandom(ids []int) int {
 	return ids[common.GetRandomInt(len(ids))]
 }
 
+// exclusiveBoundChannelInRequestGroup 报告独占命中渠道当前是否仍归属请求分组
+// （渠道被移动到其它分组时为 false）。仅判断分组归属：渠道仍在分组但某模型
+// 映射被移除时保留绑定（亲和键跨模型共享，拆绑定会破坏其它模型的亲和），
+// 由 distributor 既有 503 分支处理；auto 分组下渠道归属任一展开分组即可。
+func exclusiveBoundChannelInRequestGroup(c *gin.Context, usingGroup string, channelID int) bool {
+	channel, err := model.CacheGetChannel(channelID)
+	if err != nil || channel == nil {
+		// 查询失败或渠道缺失不在此拆绑定：删除/禁用场景由
+		// releaseDisabledAffinityBinding 释放。
+		return true
+	}
+	channelGroups := channel.GetGroups()
+	if len(channelGroups) == 0 {
+		return false
+	}
+	if usingGroup != "auto" {
+		for _, g := range channelGroups {
+			if g == usingGroup {
+				return true
+			}
+		}
+		return false
+	}
+	userGroup := ""
+	if c != nil {
+		userGroup = common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+	}
+	for _, g := range GetRequestAutoGroups(c, userGroup) {
+		for _, cg := range channelGroups {
+			if g == cg {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // exclusiveCandidateChannels 取候选集：普通分组单次查询；auto 分组经
 // GetRequestAutoGroups 展开为多分组并集（每分组一次查询后合并去重），
 // 用户分组取 context（与 distributor 的 auto 展开语义一致）。

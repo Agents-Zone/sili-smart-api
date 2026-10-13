@@ -129,8 +129,9 @@ func Distribute() func(c *gin.Context) {
 					}
 					if !affinityUsable {
 						if service.IsExclusiveChannelAffinity(c) {
-							// 禁用后的重绑由亲和选路统一处理。其余不可用状态保留绑定，
-							// 包括模型/分组不匹配及选路后发生的禁用，等待后续请求重新检查。
+							// 禁用、删除与换组的重绑由亲和选路统一处理。其余不可用状态
+							// （渠道仍在分组但模型映射被移除、选路后才发生的禁用等）保留
+							// 绑定并返回错误，等待后续请求重新检查。
 							abortWithOpenAiMessage(c, http.StatusServiceUnavailable, i18n.T(c, i18n.MsgDistributorNoAvailableChannel, map[string]any{"Group": usingGroup, "Model": modelRequest.Model}), types.ErrorCodeModelNotFound)
 							return
 						}
