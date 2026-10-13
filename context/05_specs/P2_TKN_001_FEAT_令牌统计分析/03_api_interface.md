@@ -88,8 +88,8 @@ GET /api/data/tokens?start_timestamp=1759276800&end_timestamp=1759363200
 | token_name | string | 令牌名称，按 token_id 关联 tokens 表取得；令牌已删除（软删除）或名称为空时返回空字符串，由前端回退显示 `#token_id`；token_id 为 0 时恒为空字符串，前端显示「无令牌消费」 | §4.1.4 规则2、§4.1.2 显示字段 |
 | created_at | integer (int64) | 聚合时间点，Unix 秒级时间戳，按小时对齐（quota_data 写入时已归一到整点，`created_at - created_at % 3600`） | §5.1.1（小时级聚合记录） |
 | count | integer | 该令牌在该小时的请求次数合计（sum） | §5.1.2 步骤2 |
-| quota | integer | 该令牌在该小时的消费配额合计（sum），前端按系统汇率换算金额展示 | §5.1.2 步骤2、§4.1.2 显示字段 |
-| token_used | integer | 该令牌在该小时的 token 用量合计（sum） | §5.1.2 步骤2 |
+| quota | integer | 该令牌在该小时的消费配额合计（sum） | §5.1.2 步骤2 |
+| token_used | integer | 该令牌在该小时的 token 用量合计（sum），令牌统计页签的排行与趋势以该字段为指标口径，前端换算为 M（百万）单位展示 | §5.1.2 步骤2、§4.1.2 显示字段 |
 
 分页：无。聚合记录全量返回（时间窗口最大 29 天 × 每小时一行，量级受时间跨度校验约束），排行与趋势由前端基于同一份结果计算，Top N 截取在前端完成（规格 §4.1.4 规则1、§4.1.3 切换 Top 数量不重新请求接口）。
 
@@ -121,7 +121,7 @@ GET /api/data/tokens?start_timestamp=1759276800&end_timestamp=1759363200
 3. 汇总结果中的去重 token_id（含 0），关联 tokens 表 `SELECT id, name FROM tokens WHERE id IN ?` 补全名称。tokens 为 GORM 软删除模型，默认查询自动过滤已删除行，名称解析不到即保持空字符串，交由前端回退（与既有 `fillFlowTokenNames` 同一模式）。
 4. 组装 `success` / `message` / `data` 响应（`c.JSON`，与本文件既有看板 handler 风格一致）返回聚合记录列表。
 
-金额换算说明：接口只返回 quota 原始值，按系统汇率换算为展示金额的逻辑在前端完成（`renderQuotaCompat`），与用户统计一致（§1.2 业务目标 2、§4.1.2 显示字段）。
+口径说明：接口返回 quota 原始值与 token_used 原始值，均不做换算。令牌统计页签以 token_used 为指标口径，前端换算为 M（百万）单位展示（`formatTokensInM`）；quota 字段供其他消费场景使用（§1.2 业务目标 2、§4.1.2 显示字段）。
 
 ### 1.5 实现落点（供开发计划引用）
 

@@ -29,6 +29,7 @@ import type {
 import {
   buildTokenChartSpecs,
   buildUserChartSpecs,
+  renderQuotaCompat,
   type TopNRecord,
 } from './topn-charts'
 import { getCurrencyDisplay } from '@/lib/currency'
@@ -55,20 +56,6 @@ export function getDashboardChartColors(domainLength: number): string[] {
   return scheme.scheme.filter(
     (color): color is string => typeof color === 'string'
   )
-}
-
-function renderQuotaCompat(rawQuota: number, digits = 4): string {
-  const { config, meta } = getCurrencyDisplay()
-  if (meta.kind === 'tokens') return rawQuota.toLocaleString()
-  const usd = rawQuota / config.quotaPerUnit
-  const rate = 'exchangeRate' in meta ? meta.exchangeRate : 1
-  const symbol = 'symbol' in meta ? meta.symbol : '$'
-  const value = usd * rate
-  const fixed = value.toFixed(digits)
-  if (parseFloat(fixed) === 0 && rawQuota > 0 && value > 0) {
-    return symbol + Math.pow(10, -digits).toFixed(digits)
-  }
-  return symbol + fixed
 }
 
 /**
@@ -706,7 +693,7 @@ export function processUserChartData(
     seriesId: item.username || 'unknown',
     label: item.username || 'unknown',
     createdAt: Number(item.created_at),
-    quota: Number(item.quota) || 0,
+    value: Number(item.quota) || 0,
   }))
   return buildUserChartSpecs(records, timeGranularity, tt, limit)
 }
@@ -754,7 +741,7 @@ export function processTokenChartData(
       seriesId: String(item.token_id),
       label: series.label,
       createdAt: Number(item.created_at),
-      quota: Number(item.quota) || 0,
+      value: Number(item.token_used) || 0,
     }
   })
   return buildTokenChartSpecs(records, timeGranularity, tt, limit)

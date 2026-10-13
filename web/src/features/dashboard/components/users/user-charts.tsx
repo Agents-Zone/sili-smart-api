@@ -29,16 +29,13 @@ import {
   processUserChartData,
 } from '@/features/dashboard/lib'
 import { useTopNTimeRange } from '@/features/dashboard/lib/use-topn-time-range'
-import type {
-  ProcessedUserChartData,
-  TopNChartsFilters,
-} from '@/features/dashboard/types'
+import type { TopNChartsFilters } from '@/features/dashboard/types'
 import type { TimeGranularity } from '@/lib/time'
 
 const USER_CHARTS: {
   value: string
   labelKey: string
-  specKey: keyof ProcessedUserChartData
+  specKey: 'spec_user_rank' | 'spec_user_trend'
 }[] = [
   {
     value: 'rank',
@@ -121,6 +118,10 @@ export function UserCharts(props: UserChartsProps) {
         value: chart.value,
         labelKey: chart.labelKey,
         spec: chartData[chart.specKey],
+        barCount:
+          chart.specKey === 'spec_user_rank'
+            ? chartData.rankBarCount
+            : undefined,
       }))}
       isLoading={isLoading}
       selectedRange={selectedRange}

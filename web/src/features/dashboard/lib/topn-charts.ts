@@ -24,18 +24,19 @@ import type {
 } from '../types'
 import { USER_COLORS } from './chart-colors'
 import { getCurrencyDisplay } from '@/lib/currency'
+import { formatTokensInM } from '@/lib/format'
 import { formatChartTime, type TimeGranularity } from '@/lib/time'
 
 type TFn = TFunction | ((key: string) => string)
 
-// A record in the aggregated quota stream fed into a Top-N ranking + trend
-// pair: which series it belongs to (by stable id), how to show that series,
-// the hour-bucketed timestamp and the consumed quota.
+// A record in the aggregated stream fed into a Top-N ranking + trend pair:
+// which series it belongs to (by stable id), how to show that series, the
+// hour-bucketed timestamp and the metric value (quota or token count).
 export interface TopNRecord {
   seriesId: string
   label: string
   createdAt: number
-  quota: number
+  value: number
 }
 
 export interface TopNSeries {
@@ -51,9 +52,11 @@ interface TopNChartOptions {
   trendTitleKey: string
   limit: number
   t: TFn
+  // Metric display formatting shared by labels, axes, tooltips and totals.
+  formatValue: (raw: number) => string
 }
 
-function renderQuotaCompat(rawQuota: number, digits = 4): string {
+export function renderQuotaCompat(rawQuota: number, digits = 4): string {
   const { config, meta } = getCurrencyDisplay()
   if (meta.kind === 'tokens') return rawQuota.toLocaleString()
   const usd = rawQuota / config.quotaPerUnit
@@ -76,22 +79,25 @@ export function buildTopNChartSpecs(
   records: TopNRecord[],
   timeGranularity: TimeGranularity,
   options: TopNChartOptions
-): { rank: Record<string, unknown>; trend: Record<string, unknown> } {
+): {
+  rank: Record<string, unknown>
+  trend: Record<string, unknown>
+  rankBarCount: number
+} {
   const tt = options.t
   const limit = options.limit
   const seriesField = options.seriesField
-  const { config } = getCurrencyDisplay()
-  const quotaPerUnit = config.quotaPerUnit
-  const formatVal = (raw: number) => renderQuotaCompat(raw, 2)
+  const formatVal = options.formatValue
 
   const emptySubtext = tt('No data available')
 
   if (!records || records.length === 0) {
     return {
+      rankBarCount: 0,
       rank: {
         type: 'bar',
         data: [{ id: `${options.dataIdPrefix}RankData`, values: [] }],
-        xField: 'rawQuota',
+        xField: 'value',
         yField: seriesField,
         seriesField,
         direction: 'horizontal',
@@ -108,7 +114,7 @@ export function buildTopNChartSpecs(
         type: 'area',
         data: [{ id: `${options.dataIdPrefix}TrendData`, values: [] }],
         xField: 'Time',
-        yField: 'rawQuota',
+        yField: 'value',
         seriesField,
         title: {
           visible: true,
@@ -123,18 +129,18 @@ export function buildTopNChartSpecs(
     }
   }
 
-  const seriesQuotaTotal = new Map<string, number>()
+  const seriesTotal = new Map<string, number>()
   records.forEach((record) => {
-    seriesQuotaTotal.set(
+    seriesTotal.set(
       record.seriesId,
-      (seriesQuotaTotal.get(record.seriesId) || 0) + (Number(record.quota) || 0)
+      (seriesTotal.get(record.seriesId) || 0) + (Number(record.value) || 0)
     )
   })
 
-  const sorted = [...seriesQuotaTotal.entries()].sort((a, b) => b[1] - a[1])
+  const sorted = [...seriesTotal.entries()].sort((a, b) => b[1] - a[1])
   const topIds = sorted.slice(0, limit).map(([id]) => id)
   const topIdSet = new Set(topIds)
-  const totalQuota = sorted.slice(0, limit).reduce((s, [, q]) => s + q, 0)
+  const totalValue = sorted.slice(0, limit).reduce((s, [, v]) => s + v, 0)
 
   const labelById = new Map<string, string>()
   records.forEach((record) => {
@@ -146,10 +152,9 @@ export function buildTopNChartSpecs(
   const labelOf = (id: string): string =>
     labelById.get(id) ?? id
 
-  const rankValues = sorted.slice(0, limit).map(([id, quota]) => ({
+  const rankValues = sorted.slice(0, limit).map(([id, value]) => ({
     [seriesField]: labelOf(id),
-    rawQuota: quota,
-    Usage: Number((quota / quotaPerUnit).toFixed(4)),
+    value,
   }))
 
   const colorMap = topIds.reduce<Record<string, string>>(
@@ -171,30 +176,30 @@ export function buildTopNChartSpecs(
     timeSeriesMap.set(timeKey, map)
     map.set(
       record.seriesId,
-      (map.get(record.seriesId) || 0) + (Number(record.quota) || 0)
+      (map.get(record.seriesId) || 0) + (Number(record.value) || 0)
     )
   })
 
   const sortedTimePoints = [...allTimePoints].sort()
   const trendValues = sortedTimePoints.flatMap((time) =>
     topIds.map((id) => {
-      const q = timeSeriesMap.get(time)?.get(id) || 0
+      const v = timeSeriesMap.get(time)?.get(id) || 0
       return {
         Time: time,
         [seriesField]: labelOf(id),
-        rawQuota: q,
-        Usage: Number((q / quotaPerUnit).toFixed(4)),
+        value: v,
       }
     })
   )
 
-  const totalSubtext = `${tt('Total:')} ${formatVal(totalQuota)}`
+  const totalSubtext = `${tt('Total:')} ${formatVal(totalValue)}`
 
   return {
+    rankBarCount: rankValues.length,
     rank: {
       type: 'bar',
       data: [{ id: `${options.dataIdPrefix}RankData`, values: rankValues }],
-      xField: 'rawQuota',
+      xField: 'value',
       yField: seriesField,
       seriesField,
       direction: 'horizontal',
@@ -223,7 +228,7 @@ export function buildTopNChartSpecs(
             {
               key: (datum: Record<string, unknown>) => datum?.[seriesField],
               value: (datum: Record<string, unknown>) =>
-                formatVal(Number(datum?.rawQuota) || 0),
+                formatVal(Number(datum?.value) || 0),
             },
           ],
           updateContent: (
@@ -234,10 +239,10 @@ export function buildTopNChartSpecs(
             }>
           ) => {
             for (let i = 0; i < array.length; i++) {
-              const rawQuota = array[i].datum?.rawQuota
-              const value =
-                rawQuota === undefined ? array[i].value : Number(rawQuota)
-              array[i].value = formatVal(Number(value) || 0)
+              const value = array[i].datum?.value
+              const raw =
+                value === undefined ? array[i].value : Number(value)
+              array[i].value = formatVal(Number(raw) || 0)
             }
             return array
           },
@@ -251,7 +256,7 @@ export function buildTopNChartSpecs(
       type: 'area',
       data: [{ id: `${options.dataIdPrefix}TrendData`, values: trendValues }],
       xField: 'Time',
-      yField: 'rawQuota',
+      yField: 'value',
       seriesField,
       stack: false,
       title: {
@@ -276,7 +281,7 @@ export function buildTopNChartSpecs(
             {
               key: (datum: Record<string, unknown>) => datum?.[seriesField],
               value: (datum: Record<string, unknown>) =>
-                formatVal(Number(datum?.rawQuota) || 0),
+                formatVal(Number(datum?.value) || 0),
             },
           ],
         },
@@ -285,7 +290,7 @@ export function buildTopNChartSpecs(
             {
               key: (datum: Record<string, unknown>) => datum?.[seriesField],
               value: (datum: Record<string, unknown>) =>
-                Number(datum?.rawQuota) || 0,
+                Number(datum?.value) || 0,
             },
           ],
           updateContent: (
@@ -339,15 +344,24 @@ export function buildUserChartSpecs(
   t: TFn,
   limit: number
 ): ProcessedUserChartData {
-  const { rank, trend } = buildTopNChartSpecs(records, timeGranularity, {
-    dataIdPrefix: 'user',
-    seriesField: 'User',
-    rankTitleKey: 'User Consumption Ranking',
-    trendTitleKey: 'User Consumption Trend',
-    limit,
-    t,
-  })
-  return { spec_user_rank: rank, spec_user_trend: trend }
+  const { rank, trend, rankBarCount } = buildTopNChartSpecs(
+    records,
+    timeGranularity,
+    {
+      dataIdPrefix: 'user',
+      seriesField: 'User',
+      rankTitleKey: 'User Consumption Ranking',
+      trendTitleKey: 'User Consumption Trend',
+      limit,
+      t,
+      formatValue: (raw) => renderQuotaCompat(raw, 2),
+    }
+  )
+  return {
+    spec_user_rank: rank,
+    spec_user_trend: trend,
+    rankBarCount,
+  }
 }
 
 export function buildTokenChartSpecs(
@@ -356,13 +370,22 @@ export function buildTokenChartSpecs(
   t: TFn,
   limit: number
 ): ProcessedTokenChartData {
-  const { rank, trend } = buildTopNChartSpecs(records, timeGranularity, {
-    dataIdPrefix: 'token',
-    seriesField: 'Token',
-    rankTitleKey: 'Token Consumption Ranking',
-    trendTitleKey: 'Token Consumption Trend',
-    limit,
-    t,
-  })
-  return { spec_token_rank: rank, spec_token_trend: trend }
+  const { rank, trend, rankBarCount } = buildTopNChartSpecs(
+    records,
+    timeGranularity,
+    {
+      dataIdPrefix: 'token',
+      seriesField: 'Token',
+      rankTitleKey: 'Token Usage Ranking',
+      trendTitleKey: 'Token Usage Trend',
+      limit,
+      t,
+      formatValue: formatTokensInM,
+    }
+  )
+  return {
+    spec_token_rank: rank,
+    spec_token_trend: trend,
+    rankBarCount,
+  }
 }

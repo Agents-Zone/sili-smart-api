@@ -7,7 +7,7 @@ published by the Free Software Foundation, either version 3 of the
 License, or (at your option) any later version.
 
 This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
+but WITHOUT ANY WARRANTY; without even implied warranties of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 GNU Affero General Public License for more details.
 
@@ -31,9 +31,14 @@ function item(
   tokenId: number,
   tokenName: string,
   createdAt: number,
-  quota?: number
+  tokenUsed?: number
 ): TokenQuotaDataItem {
-  return { token_id: tokenId, token_name: tokenName, created_at: createdAt, quota }
+  return {
+    token_id: tokenId,
+    token_name: tokenName,
+    created_at: createdAt,
+    token_used: tokenUsed,
+  }
 }
 
 describe('resolveTokenLabel', () => {
@@ -63,19 +68,19 @@ describe('resolveTokenLabel', () => {
 })
 
 describe('processTokenChartData rank', () => {
-  // A aggregates to 300 across two time records; B 200; C 100.
+  // A aggregates to 300K across two time records; B 200K; C 100K.
   const rows: TokenQuotaDataItem[] = [
-    item(1, 'A', DAY, 100),
-    item(1, 'A', DAY * 2, 200),
-    item(2, 'B', DAY, 200),
-    item(3, 'C', DAY, 100),
+    item(1, 'A', DAY, 100_000),
+    item(1, 'A', DAY * 2, 200_000),
+    item(2, 'B', DAY, 200_000),
+    item(3, 'C', DAY, 100_000),
   ]
 
   test('distinct token_ids sharing a name stay separate series', () => {
     const sameName = [
-      item(1, 'dup', DAY, 100),
-      item(2, 'dup', DAY, 50),
-      item(3, 'other', DAY, 10),
+      item(1, 'dup', DAY, 100_000),
+      item(2, 'dup', DAY, 50_000),
+      item(3, 'other', DAY, 10_000),
     ]
     const { spec_token_rank } = processTokenChartData(sameName, 'day', t)
     const values = spec_token_rank.data[0].values
@@ -84,54 +89,61 @@ describe('processTokenChartData rank', () => {
       values.map((v: { Token: string }) => v.Token),
       ['dup', 'dup #2', 'other']
     )
-    assert.equal(values[0].rawQuota, 100)
-    assert.equal(values[1].rawQuota, 50)
+    assert.equal(values[0].value, 100_000)
+    assert.equal(values[1].value, 50_000)
   })
 
-  test('sorts by aggregated quota desc and truncates to limit', () => {
+  test('ranks by aggregated token_used desc and truncates to limit', () => {
     const { spec_token_rank } = processTokenChartData(rows, 'day', t, 2)
     const values = spec_token_rank.data[0].values
     assert.equal(values.length, 2)
     assert.equal(values[0].Token, 'A')
-    assert.equal(values[0].rawQuota, 300)
+    assert.equal(values[0].value, 300_000)
     assert.equal(values[1].Token, 'B')
-    assert.equal(values[1].rawQuota, 200)
+    assert.equal(values[1].value, 200_000)
   })
 
-  test('Usage converts raw quota via default quotaPerUnit', () => {
+  test('rank subtext shows the top-N total in millions', () => {
     const { spec_token_rank } = processTokenChartData(rows, 'day', t, 2)
-    assert.equal(spec_token_rank.data[0].values[0].Usage, 0.0006)
+    assert.equal(spec_token_rank.title.subtext, 'Total: 0.50 M')
   })
 
-  test('rank subtext contains the top-N total', () => {
-    const { spec_token_rank } = processTokenChartData(rows, 'day', t, 2)
-    assert.ok(spec_token_rank.title.subtext.includes('Total:'))
+  test('rankBarCount mirrors the number of ranked bars', () => {
+    assert.equal(processTokenChartData(rows, 'day', t, 2).rankBarCount, 2)
+    assert.equal(processTokenChartData(rows, 'day', t, 10).rankBarCount, 3)
+    assert.equal(processTokenChartData([], 'day', t).rankBarCount, 0)
   })
 
   test('token_id 0 records count toward ranking with fallback label', () => {
-    const zeroRows = [item(0, '', 3600 * 5, 50), item(1, 'A', 3600 * 5, 30)]
+    const zeroRows = [
+      item(0, '', 3600 * 5, 50_000),
+      item(1, 'A', 3600 * 5, 30_000),
+    ]
     const { spec_token_rank } = processTokenChartData(zeroRows, 'day', t)
     const values = spec_token_rank.data[0].values
     assert.equal(values[0].Token, 'No token consumption')
-    assert.equal(values[0].rawQuota, 50)
+    assert.equal(values[0].value, 50_000)
   })
 
-  test('missing quota is treated as zero, never NaN', () => {
-    const sparse = [item(1, 'A', DAY), item(2, 'B', DAY, 40)]
+  test('missing token_used is treated as zero, never NaN', () => {
+    const sparse = [item(1, 'A', DAY), item(2, 'B', DAY, 40_000)]
     const { spec_token_rank } = processTokenChartData(sparse, 'day', t)
     const values = spec_token_rank.data[0].values
     assert.equal(values.length, 2)
     assert.equal(
-      values.find((v: { Token: string }) => v.Token === 'A')?.rawQuota,
+      values.find((v: { Token: string }) => v.Token === 'A')?.value,
       0
     )
-    assert.ok(Number.isFinite(values[0].Usage))
+    assert.ok(Number.isFinite(values[0].value))
   })
 })
 
 describe('processTokenChartData trend', () => {
   test('merges records within the same granularity bucket', () => {
-    const rows = [item(1, 'A', 3600 * 5, 100), item(1, 'A', 3600 * 6, 100)]
+    const rows = [
+      item(1, 'A', 3600 * 5, 100_000),
+      item(1, 'A', 3600 * 6, 100_000),
+    ]
     const { spec_token_trend } = processTokenChartData(rows, 'day', t)
     const values = spec_token_trend.data[0].values
     const dayKey = formatChartTime(3600 * 5, 'day')
@@ -141,15 +153,15 @@ describe('processTokenChartData trend', () => {
         v.Token === 'A' && v.Time === dayKey
     )
     assert.ok(aAtDay)
-    assert.equal(aAtDay.rawQuota, 200)
+    assert.equal(aAtDay.value, 200_000)
   })
 
   test('pads zero entries for top tokens missing at a time point', () => {
     const t1 = 3600 * 5
     const t2 = 3600 * 5 + DAY
     const rows = [
-      item(1, 'A', t1, 100),
-      item(1, 'A', t2, 100),
+      item(1, 'A', t1, 100_000),
+      item(1, 'A', t2, 100_000),
       item(2, 'B', t1, 0),
     ]
     const { spec_token_trend } = processTokenChartData(rows, 'day', t, 2)
@@ -162,12 +174,15 @@ describe('processTokenChartData trend', () => {
           v.Token === 'B' && v.Time === time
       )
       assert.ok(b, `missing B entry at ${time}`)
-      assert.equal(b.rawQuota, 0)
+      assert.equal(b.value, 0)
     }
   })
 
   test('only includes top N series in trend values', () => {
-    const rows = [item(1, 'A', DAY, 100), item(2, 'B', DAY, 50)]
+    const rows = [
+      item(1, 'A', DAY, 100_000),
+      item(2, 'B', DAY, 50_000),
+    ]
     const { spec_token_trend } = processTokenChartData(rows, 'day', t, 1)
     const tokens = [...new Set(
       spec_token_trend.data[0].values.map((v: { Token: string }) => v.Token)

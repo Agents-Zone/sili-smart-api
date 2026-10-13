@@ -253,6 +253,13 @@ export function formatTokens(tokens: number): string {
 }
 
 /**
+ * Format token counts in millions with 2 decimals, e.g. 1500000 -> '1.50 M'
+ */
+export function formatTokensInM(tokens: number): string {
+  return `${(tokens / 1000000).toFixed(2)} M`
+}
+
+/**
  * Format use time in seconds with appropriate unit
  */
 export function formatUseTime(seconds: number): string {

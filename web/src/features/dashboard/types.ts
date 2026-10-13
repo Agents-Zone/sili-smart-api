@@ -250,6 +250,9 @@ export interface ProcessedChartData {
 export interface ProcessedUserChartData {
   spec_user_rank: VChartSpec
   spec_user_trend: VChartSpec
+  // Number of bars in the rank chart (min of top limit and series count),
+  // drives the adaptive chart height.
+  rankBarCount: number
 }
 
 export interface TokenQuotaDataItem {
@@ -264,6 +267,9 @@ export interface TokenQuotaDataItem {
 export interface ProcessedTokenChartData {
   spec_token_rank: VChartSpec
   spec_token_trend: VChartSpec
+  // Number of bars in the rank chart (min of top limit and series count),
+  // drives the adaptive chart height.
+  rankBarCount: number
 }
 
 // ============================================================================

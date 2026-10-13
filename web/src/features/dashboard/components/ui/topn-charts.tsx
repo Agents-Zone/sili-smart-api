@@ -29,6 +29,7 @@ import {
   TIME_RANGE_PRESETS,
   TOP_N_LIMIT_OPTIONS,
 } from '@/features/dashboard/constants'
+import { computeRankChartHeight } from '@/features/dashboard/lib/chart-height'
 import type { TimeGranularity } from '@/lib/time'
 import { useChartTheme } from '@/lib/use-chart-theme'
 import { VCHART_OPTION } from '@/lib/vchart'
@@ -37,6 +38,9 @@ export interface TopNChartCard {
   value: string
   labelKey: string
   spec: Record<string, unknown> | undefined
+  // Present only on horizontal bar charts: the number of bars drives the
+  // adaptive card height. Absent keeps the fixed default height.
+  barCount?: number
 }
 
 export interface TopNChartsSectionProps {
@@ -161,7 +165,18 @@ export function TopNChartsSection(props: TopNChartsSectionProps) {
               <div className='text-sm font-semibold'>{t(chart.labelKey)}</div>
             </div>
 
-            <div className='h-[300px] p-1.5 sm:h-96 sm:p-2'>
+            <div
+              className={
+                chart.barCount != null
+                  ? 'p-1.5 sm:p-2'
+                  : 'h-[300px] p-1.5 sm:h-96 sm:p-2'
+              }
+              style={
+                chart.barCount != null
+                  ? { height: computeRankChartHeight(chart.barCount) }
+                  : undefined
+              }
+            >
               {props.isLoading ? (
                 <Skeleton className='h-full w-full' />
               ) : (
