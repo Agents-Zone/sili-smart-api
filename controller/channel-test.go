@@ -918,6 +918,29 @@ func TestChannel(c *gin.Context) {
 	})
 }
 
+// buildSingleKeyTestChannel 返回用于单密钥测试的渠道视图：克隆 channel，
+// 将指定序号密钥设为唯一密钥并关闭多密钥标记，使测试链路按单密钥渠道
+// 直连该密钥。GetNextEnabledKey 直接返回 Key，不推进轮询索引，不写回
+// ChannelInfo。原对象保持不变（缓存渠道为共享指针，禁止原地修改）。
+func buildSingleKeyTestChannel(channel *model.Channel, keyIndex int) (*model.Channel, error) {
+	if channel == nil {
+		return nil, errors.New("渠道不存在")
+	}
+	if !channel.ChannelInfo.IsMultiKey {
+		return nil, errors.New("该渠道不是多密钥模式")
+	}
+	keys := channel.GetKeys()
+	// 双上界：序号同时受 MultiKeySize 元数据与实际密钥数约束，覆盖编辑边界下两者短暂不一致的情况
+	if keyIndex < 0 || keyIndex >= channel.ChannelInfo.MultiKeySize || keyIndex >= len(keys) {
+		return nil, errors.New("密钥索引超出范围")
+	}
+	view := *channel
+	view.Key = keys[keyIndex]
+	view.Keys = nil
+	view.ChannelInfo.IsMultiKey = false
+	return &view, nil
+}
+
 // channelTestSummary records the outcome of one channel test cycle so the
 // system task can persist a per-run result for history.
 type channelTestSummary struct {
