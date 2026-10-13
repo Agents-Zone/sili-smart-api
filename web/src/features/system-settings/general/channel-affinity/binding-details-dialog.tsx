@@ -75,7 +75,7 @@ export function BindingDetailsDialog(props: Props) {
     mutationFn: (keySuffix: string) => clearBindingCache(keySuffix),
     onSuccess: async (res) => {
       if (!res.success) {
-        toast.error(t('Failed to clear'))
+        toast.error(res.message || t('Failed to clear'))
         return
       }
       toast.success(t('Cleared'))
@@ -85,7 +85,7 @@ export function BindingDetailsDialog(props: Props) {
       })
       props.onCacheCleared?.()
     },
-    onError: () => toast.error(t('Failed to clear')),
+    onError: (error) => toast.error(error.message || t('Failed to clear')),
   })
 
   const close = () => props.onOpenChange(false)

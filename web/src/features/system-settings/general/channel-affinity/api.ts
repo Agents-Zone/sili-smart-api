@@ -14,7 +14,7 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
-import { api, type ApiRequestConfig } from '@/lib/api'
+import { api } from '@/lib/api'
 
 import type { CacheStats, ChannelAffinityBinding } from './types'
 
@@ -62,7 +62,7 @@ export async function clearBindingCache(
     params: { key_suffix: keySuffix },
     skipBusinessError: true,
     skipErrorHandler: true,
-  } as ApiRequestConfig)
+  })
   return res.data
 }
 export async function getAffinityUsageCache(params: {
