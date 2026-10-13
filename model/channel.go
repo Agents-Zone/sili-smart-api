@@ -655,7 +655,8 @@ func CleanupChannelPollingLocks() {
 	})
 }
 
-func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason string) {
+// 返回 false 表示 usingKey 未匹配到任何 key，状态未变更，调用方不应视为成功
+func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason string) bool {
 	keys := channel.GetKeys()
 	if len(keys) == 0 {
 		channel.Status = status
@@ -670,14 +671,14 @@ func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason
 		if keyIndex < 0 {
 			if usingKey != "" {
 				common.SysLog(fmt.Sprintf("failed to update multi-key status: channel_id=%d, using key not found", channel.Id))
-				return
+				return false
 			}
 			channel.Status = status
 			info := channel.GetOtherInfo()
 			info["status_reason"] = reason
 			info["status_time"] = common.GetTimestamp()
 			channel.SetOtherInfo(info)
-			return
+			return true
 		}
 		if channel.ChannelInfo.MultiKeyStatusList == nil {
 			channel.ChannelInfo.MultiKeyStatusList = make(map[int]int)
@@ -705,6 +706,7 @@ func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason
 			channel.Status = common.ChannelStatusEnabled
 		}
 	}
+	return true
 }
 
 func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
@@ -735,7 +737,10 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 			pollingLock := GetChannelPollingLock(channelId)
 			pollingLock.Lock()
 			// 如果是多Key模式，更新缓存中的状态
-			handlerMultiKeyUpdate(channelCache, usingKey, status, reason)
+			if !handlerMultiKeyUpdate(channelCache, usingKey, status, reason) {
+				pollingLock.Unlock()
+				return false
+			}
 			pollingLock.Unlock()
 			if beforeStatus != channelCache.Status {
 				CacheUpdateChannelStatus(channelId, channelCache.Status)
@@ -773,7 +778,10 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 			// Protect map writes with the same per-channel lock used by readers
 			pollingLock := GetChannelPollingLock(channelId)
 			pollingLock.Lock()
-			handlerMultiKeyUpdate(channel, usingKey, status, reason)
+			if !handlerMultiKeyUpdate(channel, usingKey, status, reason) {
+				pollingLock.Unlock()
+				return false
+			}
 			pollingLock.Unlock()
 			if beforeStatus != channel.Status {
 				shouldUpdateAbilities = true

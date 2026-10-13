@@ -23,12 +23,12 @@ func seedMultiKeyChannel(t *testing.T, id int, keys string) *Channel {
 	t.Helper()
 	autoBan := 1
 	ch := &Channel{
-		Id:     id,
-		Name:   "mk-ch",
-		Key:    keys,
-		Status: common.ChannelStatusEnabled,
-		Models: "gpt-test",
-		Group:  "default",
+		Id:      id,
+		Name:    "mk-ch",
+		Key:     keys,
+		Status:  common.ChannelStatusEnabled,
+		Models:  "gpt-test",
+		Group:   "default",
 		AutoBan: &autoBan,
 		ChannelInfo: ChannelInfo{
 			IsMultiKey:   true,
@@ -68,22 +68,21 @@ func TestMKAutoDisableAllKeysDisablesChannel(t *testing.T) {
 	assert.Equal(t, common.ChannelStatusAutoDisabled, after.Status, "全部 key 禁用后渠道整体应禁用")
 }
 
-// 场景 3：usingKey 与渠道 key 列表全等不匹配时，静默跳过：状态完全不变但返回 true。
-// 该行为是已知缺陷：调用方（DisableChannel）以为禁用成功，实际被丢弃，仅有一条 SysLog。
+// 场景 3：usingKey 与渠道 key 列表全等不匹配时，禁用不生效且返回 false，调用方可感知失败。
+// 典型场景：DB 中 key 实际带 \r（CRLF 粘贴），而失败请求传入的是干净字符串。
 func TestMKAutoDisableUsingKeyMismatch(t *testing.T) {
 	resetMultiKeyStatusTables(t)
 	ch := seedMultiKeyChannel(t, 103, "sk-a\nsk-b")
 
-	// DB 中 key 实际带 \r（CRLF 粘贴），而失败请求传入的是干净字符串
 	ch.Key = "sk-a\r\nsk-b\r\n"
 	require.NoError(t, DB.Save(ch).Error)
 
 	ok := UpdateChannelStatus(ch.Id, "sk-a", common.ChannelStatusAutoDisabled, "余额不足")
 	after, err := GetChannelById(ch.Id, true)
 	require.NoError(t, err)
-	assert.Empty(t, after.ChannelInfo.MultiKeyStatusList, "usingKey 不匹配时禁用被静默丢弃")
+	assert.Empty(t, after.ChannelInfo.MultiKeyStatusList, "usingKey 不匹配时禁用不生效")
 	assert.Equal(t, common.ChannelStatusEnabled, after.Status)
-	assert.True(t, ok, "返回值仍为 true，调用方无从感知失败")
+	assert.False(t, ok, "无效禁用请求应返回 false，调用方据此跳过成功通知")
 }
 
 // 场景 4：内存缓存开启时，命中关键词后 key 禁用必须落到缓存与 DB 两处。
