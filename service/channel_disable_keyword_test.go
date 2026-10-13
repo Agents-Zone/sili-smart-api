@@ -18,10 +18,10 @@ func TestShouldDisableBalanceErrors(t *testing.T) {
 	t.Cleanup(func() { common.AutomaticDisableChannelEnabled = false })
 
 	cases := []struct {
-		name    string
-		msg     string
-		code    int
-		want    bool
+		name string
+		msg  string
+		code int
+		want bool
 	}{
 		{"default keyword hit", `{"error":{"message":"Your credit balance is too low, please add credit...","type":"insufficient_quota"}}`, 402, true},
 		{"quota exceeded", "You exceeded your current quota, please check your plan and billing details", 429, true},
