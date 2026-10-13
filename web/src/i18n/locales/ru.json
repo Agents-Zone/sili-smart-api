@@ -2434,6 +2434,7 @@
     "Keep-alive Ping": "Пинг Keep-alive",
     "Keeps compatible responses more repeatable": "Делает совместимые ответы более воспроизводимыми",
     "Key": "Ключ",
+    "Key #{{index}}": "Ключ #{{index}}",
     "Key Fingerprint": "Отпечаток ключа",
     "Key Sources": "Источники ключей",
     "Key Summary": "Сводка ключа",

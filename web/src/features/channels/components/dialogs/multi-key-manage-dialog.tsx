@@ -58,6 +58,7 @@ import {
   formatTimestamp,
   getMultiKeyStatusConfig,
   getMultiKeyConfirmMessage,
+  handleTestChannelKey,
   isDestructiveAction,
 } from '../../lib'
 import type { KeyStatus, MultiKeyConfirmAction } from '../../types'
@@ -83,6 +84,11 @@ export function MultiKeyManageDialog({
     ADMIN_PERMISSION_RESOURCES.CHANNEL,
     ADMIN_PERMISSION_ACTIONS.SENSITIVE_WRITE
   )
+  const canTest = hasPermission(
+    currentUser,
+    ADMIN_PERMISSION_RESOURCES.CHANNEL,
+    ADMIN_PERMISSION_ACTIONS.OPERATE
+  )
 
   // Data state
   const [isLoading, setIsLoading] = useState(false)
@@ -100,6 +106,7 @@ export function MultiKeyManageDialog({
   const [confirmAction, setConfirmAction] =
     useState<MultiKeyConfirmAction | null>(null)
   const [isPerformingAction, setIsPerformingAction] = useState(false)
+  const [testingKeyIndex, setTestingKeyIndex] = useState<number | null>(null)
 
   // Reset and load data when dialog opens
   useEffect(() => {
@@ -158,6 +165,16 @@ export function MultiKeyManageDialog({
   const handlePageChange = (newPage: number) => {
     setCurrentPage(newPage)
     loadKeyStatus(newPage, pageSize)
+  }
+
+  const handleTestKey = async (keyIndex: number) => {
+    if (!currentRow) return
+    setTestingKeyIndex(keyIndex)
+    try {
+      await handleTestChannelKey(currentRow.id, keyIndex)
+    } finally {
+      setTestingKeyIndex(null)
+    }
   }
 
   const performAction = async () => {
@@ -428,7 +445,10 @@ export function MultiKeyManageDialog({
                       <MultiKeyTableRowActions
                         keyIndex={key.index}
                         status={key.status}
+                        canTest={canTest}
+                        testingKeyIndex={testingKeyIndex}
                         canDelete={canEditSensitive}
+                        onTest={handleTestKey}
                         onAction={setConfirmAction}
                       />
                     ),

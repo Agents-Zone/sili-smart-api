@@ -2434,6 +2434,7 @@
     "Keep-alive Ping": "キープアライブPing",
     "Keeps compatible responses more repeatable": "対応モデルの応答を再現しやすくします",
     "Key": "キー",
+    "Key #{{index}}": "キー #{{index}}",
     "Key Fingerprint": "キーフィンガープリント",
     "Key Sources": "キーソース",
     "Key Summary": "キー概要",

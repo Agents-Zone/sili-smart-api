@@ -1,0 +1,21 @@
+=== bun run typecheck ===
+$ tsgo -b
+typecheck-exit: 0
+=== bun run i18n:sync ===
+$ node scripts/sync-i18n.mjs
+i18n sync done. Report: E:\Agent-zone\sili-smart-api\.worktrees\CHL_004\web\src\i18n\locales\_reports\_sync-report.json
+i18n-sync-exit: 0
+=== bun run lint (changed files) ===
+src/features/channels/components/dialogs/multi-key-manage-dialog.tsx:159:48: warning unicorn(prefer-number-properties): Use `Number.parseInt` instead of the global `parseInt` help: Replace it with `Number.parseInt`
+src/features/channels/components/dialogs/multi-key-manage-dialog.tsx:315:17: error unicorn(no-useless-spread): Using a spread operator here creates a new array unnecessarily. help: `MULTI_KEY_FILTER_OPTIONS.map` returns a new array. Spreading it into an array expression to create a new array is redundant.
+src/features/channels/components/dialogs/multi-key-manage-dialog.tsx:398:14: error eslint(no-nested-ternary): Do not nest ternary expressions. help: Refactor nested ternary expressions into if-else statements for better readability.
+(filtered, full-run-exit: 1)
+
+=== go build ./... ===
+go-build-exit: 0
+
+--- controller verify record ---
+commands: cd web && bun run typecheck && bun run lint && bun run i18n:sync; go build ./...
+result: typecheck exit 0; i18n:sync exit 0 (Key #{{index}} present exactly once in all 7 locales); lint: 3 findings in multi-key-manage-dialog.tsx (159 parseInt / 315 spread / 398 nested-ternary) all pre-existing patterns, verified via git diff 20dcfb1d..0ff23d34 that no new line introduces these patterns, other 3 changed files zero findings; go build exit 0
+controller self-check: testChannelKey (api.ts:243) / handleTestChannelKey (channel-actions.ts:352) signatures present; Gauge+Loader2 in row-actions; BR1-BR7 evidenced; 11 files match plan list
+implementer extras: bun install performed in worktree web (node_modules gitignored, env provisioning)

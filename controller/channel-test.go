@@ -918,6 +918,101 @@ func TestChannel(c *gin.Context) {
 	})
 }
 
+// buildSingleKeyTestChannel 返回用于单密钥测试的渠道视图：克隆 channel，
+// 将指定序号密钥设为唯一密钥并关闭多密钥标记，使测试链路按单密钥渠道
+// 直连该密钥。GetNextEnabledKey 直接返回 Key，不推进轮询索引，不写回
+// ChannelInfo。原对象保持不变（缓存渠道为共享指针，禁止原地修改）。
+func buildSingleKeyTestChannel(channel *model.Channel, keyIndex int) (*model.Channel, error) {
+	if channel == nil {
+		return nil, errors.New("渠道不存在")
+	}
+	if !channel.ChannelInfo.IsMultiKey {
+		return nil, errors.New("该渠道不是多密钥模式")
+	}
+	keys := channel.GetKeys()
+	// 双上界：序号同时受 MultiKeySize 元数据与实际密钥数约束，覆盖编辑边界下两者短暂不一致的情况
+	if keyIndex < 0 || keyIndex >= channel.ChannelInfo.MultiKeySize || keyIndex >= len(keys) {
+		return nil, errors.New("密钥索引超出范围")
+	}
+	view := *channel
+	view.Key = keys[keyIndex]
+	view.Keys = nil
+	view.ChannelInfo.IsMultiKey = false
+	return &view, nil
+}
+
+// TestChannelKey 对多密钥渠道的指定序号密钥发起一次连接测试
+// （GET /api/channel/test/:id/:key_index）。复用渠道级测试链路，
+// 密钥来源改为指定序号。测试结果仅作展示：不更新渠道响应时间，
+// 不触发密钥启用/禁用，不写回 ChannelInfo（克隆视图保证）。
+func TestChannelKey(c *gin.Context) {
+	channelId, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error(), "time": 0.0})
+		return
+	}
+	keyIndex, err := strconv.Atoi(c.Param("key_index"))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error(), "time": 0.0})
+		return
+	}
+	channel, err := model.CacheGetChannel(channelId)
+	if err != nil {
+		channel, err = model.GetChannelById(channelId, true)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "渠道不存在", "time": 0.0})
+			return
+		}
+	}
+	view, err := buildSingleKeyTestChannel(channel, keyIndex)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error(), "time": 0.0})
+		return
+	}
+	testUserID, err := resolveChannelTestUserID(c)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	tik := time.Now()
+	requestCtx := context.Background()
+	if c.Request != nil {
+		requestCtx = c.Request.Context()
+	}
+	// 无任何 query 参数：testModel 传空由链路按渠道 test_model → 模型列表第一个 →
+	// gpt-4o-mini 兜底，固定非流式
+	result := testChannel(requestCtx, view, testUserID, "", "", false)
+	if result.localErr != nil {
+		resp := gin.H{
+			"success": false,
+			"message": result.localErr.Error(),
+			"time":    0.0,
+		}
+		if result.newAPIError != nil {
+			resp["error_code"] = result.newAPIError.GetErrorCode()
+		}
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+	tok := time.Now()
+	milliseconds := tok.Sub(tik).Milliseconds()
+	consumedTime := float64(milliseconds) / 1000.0
+	if result.newAPIError != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success":    false,
+			"message":    result.newAPIError.Error(),
+			"time":       consumedTime,
+			"error_code": result.newAPIError.GetErrorCode(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"time":    consumedTime,
+	})
+}
+
 // channelTestSummary records the outcome of one channel test cycle so the
 // system task can persist a per-run result for history.
 type channelTestSummary struct {

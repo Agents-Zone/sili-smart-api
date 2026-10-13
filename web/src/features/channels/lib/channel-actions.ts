@@ -26,6 +26,7 @@ import {
   copyChannel,
   deleteChannel,
   testChannel,
+  testChannelKey,
   updateChannel,
   updateChannelStatus,
   batchUpdateChannelStatus,
@@ -342,6 +343,49 @@ export async function handleTestChannel(
       })
     }
     onTestComplete?.(false, undefined, errorMsg)
+  }
+}
+
+/**
+ * Test a specific key of a multi-key channel
+ */
+export async function handleTestChannelKey(
+  channelId: number,
+  keyIndex: number
+): Promise<void> {
+  const target = i18next.t('Key #{{index}}', { index: keyIndex + 1 })
+
+  try {
+    const response = await testChannelKey(channelId, keyIndex)
+    if (response.success) {
+      const duration = formatChannelTestDuration(
+        getChannelTestResponseTime(response)
+      )
+      toast.success(
+        i18next.t('{{target}} test succeeded', { target }),
+        duration
+          ? {
+              description: i18next.t('Response time: {{duration}}', {
+                duration,
+              }),
+            }
+          : undefined
+      )
+    } else {
+      const errorMsg = response.message || i18next.t(ERROR_MESSAGES.TEST_FAILED)
+      toast.error(i18next.t('{{target}} test failed', { target }), {
+        description: response.error_code
+          ? `${errorMsg} (${response.error_code})`
+          : errorMsg,
+      })
+    }
+  } catch (_error: unknown) {
+    const err = _error as { response?: { data?: { message?: string } } }
+    const errorMsg =
+      err?.response?.data?.message || i18next.t(ERROR_MESSAGES.TEST_FAILED)
+    toast.error(i18next.t('{{target}} test failed', { target }), {
+      description: errorMsg,
+    })
   }
 }
 
