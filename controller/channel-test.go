@@ -941,6 +941,78 @@ func buildSingleKeyTestChannel(channel *model.Channel, keyIndex int) (*model.Cha
 	return &view, nil
 }
 
+// TestChannelKey 对多密钥渠道的指定序号密钥发起一次连接测试
+// （GET /api/channel/test/:id/:key_index）。复用渠道级测试链路，
+// 密钥来源改为指定序号。测试结果仅作展示：不更新渠道响应时间，
+// 不触发密钥启用/禁用，不写回 ChannelInfo（克隆视图保证）。
+func TestChannelKey(c *gin.Context) {
+	channelId, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error(), "time": 0.0})
+		return
+	}
+	keyIndex, err := strconv.Atoi(c.Param("key_index"))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error(), "time": 0.0})
+		return
+	}
+	channel, err := model.CacheGetChannel(channelId)
+	if err != nil {
+		channel, err = model.GetChannelById(channelId, true)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "渠道不存在", "time": 0.0})
+			return
+		}
+	}
+	view, err := buildSingleKeyTestChannel(channel, keyIndex)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error(), "time": 0.0})
+		return
+	}
+	testUserID, err := resolveChannelTestUserID(c)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	tik := time.Now()
+	requestCtx := context.Background()
+	if c.Request != nil {
+		requestCtx = c.Request.Context()
+	}
+	// 无任何 query 参数：testModel 传空由链路按渠道 test_model → 模型列表第一个 →
+	// gpt-4o-mini 兜底，固定非流式
+	result := testChannel(requestCtx, view, testUserID, "", "", false)
+	if result.localErr != nil {
+		resp := gin.H{
+			"success": false,
+			"message": result.localErr.Error(),
+			"time":    0.0,
+		}
+		if result.newAPIError != nil {
+			resp["error_code"] = result.newAPIError.GetErrorCode()
+		}
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+	tok := time.Now()
+	milliseconds := tok.Sub(tik).Milliseconds()
+	consumedTime := float64(milliseconds) / 1000.0
+	if result.newAPIError != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success":    false,
+			"message":    result.newAPIError.Error(),
+			"time":       consumedTime,
+			"error_code": result.newAPIError.GetErrorCode(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"time":    consumedTime,
+	})
+}
+
 // channelTestSummary records the outcome of one channel test cycle so the
 // system task can persist a per-run result for history.
 type channelTestSummary struct {
