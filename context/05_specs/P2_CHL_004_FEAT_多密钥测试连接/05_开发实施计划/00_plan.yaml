@@ -3,8 +3,8 @@ spec_kind: "business"
 spec_kind_basis: "ID 类型段为 FEAT，进度 type: FEAT，01 为业务八章结构规格"
 name: "多密钥测试连接"
 created_at: "2026-10-13"
-finalized: false
-closeout_result: null
+finalized: true
+closeout_result: "本地合并 main，merge commit d20657a8；回执 context/04_project_manager/closeout/P2_CHL_004_FEAT_多密钥测试连接.md"
 
 design_inputs:
   api:
