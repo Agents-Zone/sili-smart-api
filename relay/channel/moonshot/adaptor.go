@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/QuantumNous/new-api/common"
 	channelconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/claude"
@@ -30,7 +29,14 @@ func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dt
 
 func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, req *dto.ClaudeRequest) (any, error) {
 	adaptor := claude.Adaptor{}
-	return adaptor.ConvertClaudeRequest(c, info, req)
+	converted, err := adaptor.ConvertClaudeRequest(c, info, req)
+	if err != nil {
+		return nil, err
+	}
+	if claudeRequest, ok := converted.(*dto.ClaudeRequest); ok {
+		normalizeFixedSampling(getUpstreamModelName(info, req.Model), claudeRequest.Temperature, claudeRequest.TopP)
+	}
+	return converted, nil
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
@@ -81,9 +87,7 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 }
 
 func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (any, error) {
-	if request.Temperature != nil && isTemperatureOneOnlyModel(getUpstreamModelName(info, request.Model)) && *request.Temperature != 1.0 {
-		request.Temperature = common.GetPointer[float64](1.0)
-	}
+	normalizeFixedSampling(getUpstreamModelName(info, request.Model), request.Temperature, request.TopP)
 	return request, nil
 }
 
@@ -94,8 +98,40 @@ func getUpstreamModelName(info *relaycommon.RelayInfo, fallback string) string {
 	return fallback
 }
 
-func isTemperatureOneOnlyModel(model string) bool {
-	return strings.EqualFold(model, "kimi-k2.6")
+const fixedSamplingTopP = 0.95
+
+// legacyKimiFreeSamplingModels 上游允许自由设置采样参数的老模型
+var legacyKimiFreeSamplingModels = []string{
+	"kimi-k2.5",
+	"kimi-k2-0905-preview",
+	"kimi-k2-turbo-preview",
+}
+
+// isFixedSamplingModel 判断 kimi 系列新模型：上游强制 temperature=1.0、top_p=0.95
+func isFixedSamplingModel(model string) bool {
+	lower := strings.ToLower(model)
+	if !strings.HasPrefix(lower, "kimi-") {
+		return false
+	}
+	for _, legacy := range legacyKimiFreeSamplingModels {
+		if strings.EqualFold(model, legacy) {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeFixedSampling 将受限模型的采样参数就地改写为上游唯一允许的值，已省略的保持省略
+func normalizeFixedSampling(model string, temperature, topP *float64) {
+	if !isFixedSamplingModel(model) {
+		return
+	}
+	if temperature != nil && *temperature != 1.0 {
+		*temperature = 1.0
+	}
+	if topP != nil && *topP != fixedSamplingTopP {
+		*topP = fixedSamplingTopP
+	}
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
