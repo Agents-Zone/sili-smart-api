@@ -1389,10 +1389,11 @@ func GetChannelAffinityBindings() ([]ChannelAffinityBinding, error) {
 // ClearChannelAffinityBindingByKeySuffix 按缓存键后缀删除单条亲和绑定，
 // 同步清理该键的最近绑定记录与渠道占用索引；键不存在时幂等返回 0。
 // keySuffix 须为明细接口返回的原始键后缀（可带命名空间前缀），以 token_id 结尾。
+// 分组名等键段可含空白字符，不得据此拒绝，否则该类绑定无法清除。
 func ClearChannelAffinityBindingByKeySuffix(keySuffix string) (int, error) {
 	suffix := strings.TrimSpace(keySuffix)
 	suffix = strings.TrimPrefix(suffix, channelAffinityCacheNamespace+":")
-	if suffix == "" || strings.ContainsAny(suffix, " \t\r\n") {
+	if suffix == "" {
 		return 0, fmt.Errorf("key_suffix 不能为空")
 	}
 	parts := strings.Split(suffix, ":")

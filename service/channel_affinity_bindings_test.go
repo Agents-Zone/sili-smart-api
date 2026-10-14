@@ -203,3 +203,25 @@ func TestGetChannelAffinityBindingsParsesModelAndGroupDimensions(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got[0].Tokens, 2)
 }
+
+// 分组名可含空格（如 "Unity FDE-2"）；列表接口返回的原始 KeySuffix 须可精确删除
+func TestClearChannelAffinityBindingByKeySuffixAllowsGroupWithSpaces(t *testing.T) {
+	setupAffinityBindingsTest(t)
+	require.NoError(t, model.DB.Create(&model.Channel{Id: 1, Name: "Unity FDE-2-2yJR-699", Key: "k"}).Error)
+	require.NoError(t, model.DB.Create(&model.Token{Id: 36, Name: "陈震", Key: "k36"}).Error)
+	require.NoError(t, getChannelAffinityCache().SetWithTTL("g:kimi-k2.7-code:Unity FDE-2:36", 1, time.Hour))
+
+	got, err := GetChannelAffinityBindings()
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Len(t, got[0].Tokens, 1)
+	require.Equal(t, "Unity FDE-2", got[0].Tokens[0].UsingGroup)
+
+	deleted, err := ClearChannelAffinityBindingByKeySuffix(got[0].Tokens[0].KeySuffix)
+	require.NoError(t, err)
+	assert.Equal(t, 1, deleted)
+
+	got, err = GetChannelAffinityBindings()
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
