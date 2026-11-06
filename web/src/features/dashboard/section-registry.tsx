@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import type { TFunction } from 'i18next'
 
 import { createSectionRegistry } from '@/features/system-settings/utils/section-registry'
+import { ROLE } from '@/lib/roles'
 
 /**
  * Dashboard page section definitions
@@ -27,6 +28,12 @@ const DASHBOARD_SECTIONS = [
   {
     id: 'overview',
     titleKey: 'Overview',
+    build: () => null,
+  },
+  {
+    id: 'tokens',
+    titleKey: 'Token Analytics',
+    adminOnly: true,
     build: () => null,
   },
   {
@@ -42,12 +49,6 @@ const DASHBOARD_SECTIONS = [
   {
     id: 'users',
     titleKey: 'User Analytics',
-    adminOnly: true,
-    build: () => null,
-  },
-  {
-    id: 'tokens',
-    titleKey: 'Token Analytics',
     adminOnly: true,
     build: () => null,
   },
@@ -76,6 +77,16 @@ const dashboardRegistry = createSectionRegistry<
 
 export const DASHBOARD_SECTION_IDS = dashboardRegistry.sectionIds
 export const DASHBOARD_DEFAULT_SECTION = dashboardRegistry.defaultSection
+
+/**
+ * Landing section for /dashboard: admins go straight to token analytics,
+ * everyone else (and unknown roles) lands on the public overview.
+ */
+export function getDashboardDefaultSection(
+  role?: number
+): DashboardSectionId {
+  return role != null && role >= ROLE.ADMIN ? 'tokens' : 'overview'
+}
 
 export function getDashboardSectionNavItems(
   t: TFunction,

@@ -108,6 +108,24 @@ describe('processTokenChartData rank', () => {
     assert.equal(spec_token_rank.title.subtext, 'Total: 0.50 M')
   })
 
+  test('subtext prefixes the queried date range when provided', () => {
+    const { spec_token_rank, spec_token_trend } = processTokenChartData(
+      rows,
+      'day',
+      t,
+      2,
+      '2026-10-07 ~ 2026-11-05'
+    )
+    assert.equal(
+      spec_token_rank.title.subtext,
+      '2026-10-07 ~ 2026-11-05 · Total: 0.50 M'
+    )
+    assert.equal(
+      spec_token_trend.title.subtext,
+      '2026-10-07 ~ 2026-11-05 · Total: 0.50 M'
+    )
+  })
+
   test('rankBarCount mirrors the number of ranked bars', () => {
     assert.equal(processTokenChartData(rows, 'day', t, 2).rankBarCount, 2)
     assert.equal(processTokenChartData(rows, 'day', t, 10).rankBarCount, 3)
@@ -204,5 +222,23 @@ describe('processTokenChartData empty state', () => {
     assert.equal(spec_token_trend.title.subtext, 'No data available')
     assert.equal(spec_token_rank.type, 'bar')
     assert.equal(spec_token_trend.type, 'area')
+  })
+
+  test('empty state keeps the date range prefix', () => {
+    const { spec_token_rank, spec_token_trend } = processTokenChartData(
+      [],
+      'day',
+      t,
+      10,
+      '2026-10-07 ~ 2026-11-05'
+    )
+    assert.equal(
+      spec_token_rank.title.subtext,
+      '2026-10-07 ~ 2026-11-05 · No data available'
+    )
+    assert.equal(
+      spec_token_trend.title.subtext,
+      '2026-10-07 ~ 2026-11-05 · No data available'
+    )
   })
 })

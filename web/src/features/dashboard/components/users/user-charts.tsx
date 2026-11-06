@@ -30,7 +30,7 @@ import {
 } from '@/features/dashboard/lib'
 import { useTopNTimeRange } from '@/features/dashboard/lib/use-topn-time-range'
 import type { TopNChartsFilters } from '@/features/dashboard/types'
-import type { TimeGranularity } from '@/lib/time'
+import { formatDate, type TimeGranularity } from '@/lib/time'
 
 const USER_CHARTS: {
   value: string
@@ -65,6 +65,9 @@ export function UserCharts(props: UserChartsProps) {
   const onFiltersChange = props.onFiltersChange
 
   const timeRange = useTopNTimeRange(selectedRange)
+  const rangeLabel = `${formatDate(timeRange.start_timestamp)} ~ ${formatDate(
+    timeRange.end_timestamp
+  )}`
 
   const handleRangeChange = useCallback(
     (days: number) => {
@@ -105,9 +108,10 @@ export function UserCharts(props: UserChartsProps) {
         isLoading ? [] : (userData ?? []),
         timeGranularity,
         t,
-        topUserLimit
+        topUserLimit,
+        rangeLabel
       ),
-    [userData, isLoading, timeGranularity, t, topUserLimit]
+    [userData, isLoading, timeGranularity, t, topUserLimit, rangeLabel]
   )
 
   return (

@@ -50,6 +50,38 @@ describe('processUserChartData', () => {
     assert.match(spec_user_rank.title.subtext, /^Total: \$[\d.]+$/)
   })
 
+  test('subtext prefixes the queried date range when provided', () => {
+    const { spec_user_rank, spec_user_trend } = processUserChartData(
+      rows,
+      'day',
+      t,
+      2,
+      '2026-10-07 ~ 2026-11-05'
+    )
+    assert.match(
+      spec_user_rank.title.subtext,
+      /^2026-10-07 ~ 2026-11-05 · Total: \$[\d.]+$/
+    )
+    assert.match(
+      spec_user_trend.title.subtext,
+      /^2026-10-07 ~ 2026-11-05 · Total: \$[\d.]+$/
+    )
+  })
+
+  test('empty state keeps the date range prefix', () => {
+    const { spec_user_rank } = processUserChartData(
+      [],
+      'day',
+      t,
+      10,
+      '2026-10-07 ~ 2026-11-05'
+    )
+    assert.equal(
+      spec_user_rank.title.subtext,
+      '2026-10-07 ~ 2026-11-05 · No data available'
+    )
+  })
+
   test('rankBarCount mirrors the number of ranked bars', () => {
     assert.equal(processUserChartData(rows, 'day', t, 2).rankBarCount, 2)
     assert.equal(processUserChartData([], 'day', t).rankBarCount, 0)

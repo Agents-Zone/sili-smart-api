@@ -52,6 +52,8 @@ interface TopNChartOptions {
   trendTitleKey: string
   limit: number
   t: TFn
+  // Queried date range shown in the chart subtext, e.g. '2026-10-07 ~ 2026-11-05'
+  rangeLabel?: string
   // Metric display formatting shared by labels, axes, tooltips and totals.
   formatValue: (raw: number) => string
 }
@@ -89,7 +91,9 @@ export function buildTopNChartSpecs(
   const seriesField = options.seriesField
   const formatVal = options.formatValue
 
-  const emptySubtext = tt('No data available')
+  const emptySubtext = options.rangeLabel
+    ? `${options.rangeLabel} · ${tt('No data available')}`
+    : tt('No data available')
 
   if (!records || records.length === 0) {
     return {
@@ -192,7 +196,9 @@ export function buildTopNChartSpecs(
     })
   )
 
-  const totalSubtext = `${tt('Total:')} ${formatVal(totalValue)}`
+  const totalSubtext = options.rangeLabel
+    ? `${options.rangeLabel} · ${tt('Total:')} ${formatVal(totalValue)}`
+    : `${tt('Total:')} ${formatVal(totalValue)}`
 
   return {
     rankBarCount: rankValues.length,
@@ -342,7 +348,8 @@ export function buildUserChartSpecs(
   records: TopNRecord[],
   timeGranularity: TimeGranularity,
   t: TFn,
-  limit: number
+  limit: number,
+  rangeLabel?: string
 ): ProcessedUserChartData {
   const { rank, trend, rankBarCount } = buildTopNChartSpecs(
     records,
@@ -354,6 +361,7 @@ export function buildUserChartSpecs(
       trendTitleKey: 'User Consumption Trend',
       limit,
       t,
+      rangeLabel,
       formatValue: (raw) => renderQuotaCompat(raw, 2),
     }
   )
@@ -368,7 +376,8 @@ export function buildTokenChartSpecs(
   records: TopNRecord[],
   timeGranularity: TimeGranularity,
   t: TFn,
-  limit: number
+  limit: number,
+  rangeLabel?: string
 ): ProcessedTokenChartData {
   const { rank, trend, rankBarCount } = buildTopNChartSpecs(
     records,
@@ -380,6 +389,7 @@ export function buildTokenChartSpecs(
       trendTitleKey: 'Token Usage Trend',
       limit,
       t,
+      rangeLabel,
       formatValue: formatTokensInM,
     }
   )

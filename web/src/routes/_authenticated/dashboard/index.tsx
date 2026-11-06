@@ -18,13 +18,16 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { createFileRoute, redirect } from '@tanstack/react-router'
 
-import { DASHBOARD_DEFAULT_SECTION } from '@/features/dashboard/section-registry'
+import { getDashboardDefaultSection } from '@/features/dashboard/section-registry'
+import { useAuthStore } from '@/stores/auth-store'
 
 export const Route = createFileRoute('/_authenticated/dashboard/')({
   beforeLoad: () => {
+    // The parent _authenticated layout guarantees auth.user is loaded here.
+    const role = useAuthStore.getState().auth.user?.role
     throw redirect({
       to: '/dashboard/$section',
-      params: { section: DASHBOARD_DEFAULT_SECTION },
+      params: { section: getDashboardDefaultSection(role) },
     })
   },
 })

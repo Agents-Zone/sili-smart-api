@@ -686,7 +686,8 @@ export function processUserChartData(
   data: QuotaDataItem[],
   timeGranularity: TimeGranularity = 'day',
   t?: TFunction,
-  limit = 10
+  limit = 10,
+  rangeLabel?: string
 ): ProcessedUserChartData {
   const tt: TFunction = t ?? ((x) => x)
   const records: TopNRecord[] = (data ?? []).map((item) => ({
@@ -695,7 +696,7 @@ export function processUserChartData(
     createdAt: Number(item.created_at),
     value: Number(item.quota) || 0,
   }))
-  return buildUserChartSpecs(records, timeGranularity, tt, limit)
+  return buildUserChartSpecs(records, timeGranularity, tt, limit, rangeLabel)
 }
 
 export function resolveTokenLabel(
@@ -717,7 +718,8 @@ export function processTokenChartData(
   data: TokenQuotaDataItem[],
   timeGranularity: TimeGranularity = 'day',
   t?: TFunction,
-  limit = 10
+  limit = 10,
+  rangeLabel?: string
 ): ProcessedTokenChartData {
   const tt: TFunction = t ?? ((x) => x)
 
@@ -744,5 +746,5 @@ export function processTokenChartData(
       value: Number(item.token_used) || 0,
     }
   })
-  return buildTokenChartSpecs(records, timeGranularity, tt, limit)
+  return buildTokenChartSpecs(records, timeGranularity, tt, limit, rangeLabel)
 }

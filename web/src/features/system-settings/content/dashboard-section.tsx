@@ -65,9 +65,9 @@ type DashboardSectionProps = {
 }
 
 const granularityOptions = [
-  { label: 'Hour', value: 'hour' },
-  { label: 'Day', value: 'day' },
-  { label: 'Week', value: 'week' },
+  { label: 'By Hour', value: 'hour' },
+  { label: 'By Day', value: 'day' },
+  { label: 'By Week', value: 'week' },
 ]
 
 export function DashboardSection({ defaultValues }: DashboardSectionProps) {
