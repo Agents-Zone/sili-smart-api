@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Calendar as CalendarIcon } from 'lucide-react'
+import { Calendar as CalendarIcon, X } from 'lucide-react'
 import { enUS, fr, ja, ru, vi, zhCN } from 'react-day-picker/locale'
 import { useTranslation } from 'react-i18next'
 
@@ -28,6 +28,7 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover'
 import dayjs from '@/lib/dayjs'
+import { cn } from '@/lib/utils'
 
 const calendarLocales = {
   en: enUS,
@@ -42,12 +43,16 @@ type DatePickerProps = {
   selected: Date | undefined
   onSelect: (date: Date | undefined) => void
   placeholder?: string
+  onClear?: () => void
+  className?: string
 }
 
 export function DatePicker({
   selected,
   onSelect,
   placeholder,
+  onClear,
+  className,
 }: DatePickerProps) {
   const { t, i18n } = useTranslation()
   const placeholderText = placeholder ?? t('Pick a date')
@@ -60,7 +65,10 @@ export function DatePicker({
           <Button
             variant='outline'
             data-empty={!selected}
-            className='data-[empty=true]:text-muted-foreground w-[240px] justify-start text-start font-normal'
+            className={cn(
+              'data-[empty=true]:text-muted-foreground w-[240px] justify-start text-start font-normal',
+              className
+            )}
           />
         }
       >
@@ -69,7 +77,30 @@ export function DatePicker({
         ) : (
           <span>{placeholderText}</span>
         )}
-        <CalendarIcon className='ms-auto h-4 w-4 opacity-50' />
+        {selected && onClear ? (
+          <span
+            role='button'
+            tabIndex={0}
+            aria-label={t('Clear')}
+            className='ms-auto inline-flex h-4 w-4 shrink-0 cursor-pointer items-center justify-center rounded-sm opacity-60 hover:opacity-100'
+            onClick={(event) => {
+              // Keep the clear action from opening the calendar popover.
+              event.stopPropagation()
+              event.preventDefault()
+              onClear()
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return
+              event.stopPropagation()
+              event.preventDefault()
+              onClear()
+            }}
+          >
+            <X className='h-4 w-4' />
+          </span>
+        ) : (
+          <CalendarIcon className='ms-auto h-4 w-4 opacity-50' />
+        )}
       </PopoverTrigger>
       <PopoverContent className='w-auto p-0'>
         <Calendar
