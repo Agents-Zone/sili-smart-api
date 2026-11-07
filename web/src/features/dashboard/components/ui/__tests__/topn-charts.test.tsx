@@ -39,6 +39,8 @@ const { createRoot } = await import('react-dom/client')
 const { createInstance } = await import('i18next')
 const { I18nextProvider, initReactI18next } = await import('react-i18next')
 const { Coins } = await import('lucide-react')
+const { labelDayButton } = await import('react-day-picker')
+const { enUS } = await import('react-day-picker/locale')
 const { DatePicker } = await import('@/components/date-picker')
 const dayjs = (await import('@/lib/dayjs')).default
 const { TopNChartsSection } = await import('../topn-charts')
@@ -269,14 +271,17 @@ describe('TopNChartsSection date filter', () => {
 
     await act(async () => datePickerTrigger(host)?.click())
 
-    const dayButtons = [
-      ...document.querySelectorAll<HTMLButtonElement>('[role="grid"] button'),
-    ].filter((el) => /^\w+, /.test(el.getAttribute('aria-label') ?? ''))
-    const todayIndex = dayButtons.findIndex((el) =>
-      (el.getAttribute('aria-label') ?? '').startsWith('Today,')
+    // Tomorrow is always in the future. showOutsideDays keeps its button in
+    // the grid even when it falls in the next month. The label uses the same
+    // source as the rendered calendar (date-fns PPPP, en-US).
+    const tomorrowLabel = labelDayButton(
+      dayjs().add(1, 'day').toDate(),
+      {},
+      { locale: enUS }
     )
-    assert.ok(todayIndex >= 0, 'today day button not rendered')
-    const futureButton = dayButtons[todayIndex + 1]
+    const futureButton = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="grid"] button'),
+    ].find((el) => el.getAttribute('aria-label') === tomorrowLabel)
     assert.ok(futureButton, 'future day button not rendered')
     assert.equal(futureButton.disabled, true)
 

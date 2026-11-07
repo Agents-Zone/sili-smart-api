@@ -43,6 +43,9 @@ const { QueryClient: QueryClientCtor, QueryClientProvider } =
 const { createInstance } = await import('i18next')
 const { I18nextProvider, initReactI18next } = await import('react-i18next')
 const { mock } = await import('bun:test')
+const { labelDayButton } = await import('react-day-picker')
+const { enUS } = await import('react-day-picker/locale')
+const dayjs = (await import('@/lib/dayjs')).default
 const { getRollingDateRange } = await import('@/lib/time')
 const { resolveDayWindow } = await import(
   '@/features/dashboard/lib/use-topn-time-range'
@@ -286,6 +289,10 @@ describe('TokenCharts selected-date mode wiring', () => {
 
   test('picking a historical date from the calendar enters day mode and requests that window', async () => {
     const changes: TokenChartsFilters[] = []
+    // Two days back is always a past date. showOutsideDays keeps its button
+    // in the grid even when it falls in the previous month.
+    const pickedDate = dayjs().subtract(2, 'day')
+    const pickedDay = pickedDate.format('YYYY-MM-DD')
     const before = new Date()
     const { host } = await renderTokenCharts(baseFilters(), (next) =>
       changes.push({ ...next })
@@ -306,16 +313,19 @@ describe('TokenCharts selected-date mode wiring', () => {
     const dayButton = [
       ...document.querySelectorAll<HTMLButtonElement>('[role="grid"] button'),
     ].find(
-      (el) => el.getAttribute('aria-label') === 'Tuesday, November 3rd, 2026'
+      (el) =>
+        el.getAttribute('aria-label') ===
+        // Same label source as the rendered calendar (date-fns PPPP, en-US).
+        labelDayButton(pickedDate.toDate(), {}, { locale: enUS })
     )
-    assert.ok(dayButton, '2026-11-03 day button not rendered')
+    assert.ok(dayButton, `${pickedDay} day button not rendered`)
     await act(async () => dayButton.click())
     await flushQueries()
 
     assert.equal(changes.length, 1)
-    assert.equal(changes[0].selectedDate, '2026-11-03')
+    assert.equal(changes[0].selectedDate, pickedDay)
 
-    const expected = resolveDayWindow('2026-11-03')
+    const expected = resolveDayWindow(pickedDay)
     assert.ok(expected, 'probe window must resolve for a past date')
     const lastCall = apiCalls.at(-1)
     assert.ok(
