@@ -160,12 +160,13 @@ export function TopNChartsSection(props: TopNChartsSectionProps) {
             }
             onSelect={handleSelectedDateSelect}
             onClear={handleSelectedDateClear}
+            className='w-[160px]'
           />
         )}
 
         {props.granularityDisabledTitleKey ? (
           <Tooltip>
-            <TooltipTrigger render={<div className='shrink-0' />}>
+            <TooltipTrigger render={<div className='shrink-0' tabIndex={0} />}>
               {granularityTabs}
             </TooltipTrigger>
             <TooltipContent>

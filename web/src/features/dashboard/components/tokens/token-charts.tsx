@@ -173,7 +173,9 @@ export function TokenCharts(props: TokenChartsProps) {
       onRangeChange={handleRangeChange}
       onGranularityChange={handleGranularityChange}
       onTopLimitChange={handleTopTokenLimitChange}
-      selectedDate={props.filters.selectedDate}
+      // Only a resolvable date drives day mode; anything else must not tilt
+      // the shared filter bar (preset highlight, date label) off the data.
+      selectedDate={dayModeActive ? selectedDate : undefined}
       onSelectedDateChange={handleSelectedDateChange}
       granularityDisabled={dayModeActive}
       granularityDisabledTitleKey='Displayed by hour when a specific date is selected'

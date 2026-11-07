@@ -58,6 +58,9 @@ reactTestGlobals.IS_REACT_ACT_ENVIRONMENT = true
 
 type SectionProps = Parameters<typeof TopNChartsSection>[0]
 
+// Always a resolvable past date, independent of the run date.
+const pastDay = dayjs().subtract(1, 'day').format('YYYY-MM-DD')
+
 function baseProps(): SectionProps {
   return {
     icon: Coins,
@@ -177,7 +180,7 @@ describe('TopNChartsSection date filter', () => {
 
   test('selected date shows its label, disables granularity tabs and clears preset highlight', async () => {
     const { host } = await renderSection({
-      selectedDate: '2026-11-03',
+      selectedDate: pastDay,
       onSelectedDateChange: () => {},
       granularityDisabled: true,
       granularityDisabledTitleKey: 'View by hour on a specified date',
@@ -185,7 +188,7 @@ describe('TopNChartsSection date filter', () => {
 
     const trigger = datePickerTrigger(host)
     assert.ok(trigger, 'date picker trigger not rendered')
-    assert.ok(trigger.textContent?.includes('2026-11-03'))
+    assert.ok(trigger.textContent?.includes(pastDay))
 
     // The date picker sits between the range presets and the granularity tabs.
     const FOLLOWING = Node.DOCUMENT_POSITION_FOLLOWING
@@ -218,7 +221,7 @@ describe('TopNChartsSection date filter', () => {
   test('clear button reports undefined and keeps the calendar closed', async () => {
     const calls: (string | undefined)[] = []
     const { host } = await renderSection({
-      selectedDate: '2026-11-03',
+      selectedDate: pastDay,
       onSelectedDateChange: (date) => calls.push(date),
     })
 

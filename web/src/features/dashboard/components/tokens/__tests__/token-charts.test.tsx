@@ -107,6 +107,9 @@ function baseFilters(
   return { timeGranularity: 'hour', selectedRange: 7, topLimit: 10, ...overrides }
 }
 
+// Always a resolvable past date, independent of the run date.
+const pastDay = dayjs().subtract(1, 'day').format('YYYY-MM-DD')
+
 // The rolling window is derived from "now", so a render between two probes can
 // only produce one of the two candidate windows.
 function rollingWindowCandidates(
@@ -231,9 +234,9 @@ describe('TokenCharts selected-date mode wiring', () => {
   })
 
   test('selected historical date requests its natural-day window under the date cache key', async () => {
-    await renderTokenCharts(baseFilters({ selectedDate: '2026-11-03' }))
+    await renderTokenCharts(baseFilters({ selectedDate: pastDay }))
 
-    const expected = resolveDayWindow('2026-11-03')
+    const expected = resolveDayWindow(pastDay)
     assert.ok(expected, 'probe window must resolve for a past date')
     assert.ok(sameWindow(apiCalls[0], expected))
 
@@ -244,7 +247,7 @@ describe('TokenCharts selected-date mode wiring', () => {
       keys.some(
         (key) =>
           JSON.stringify(key) ===
-          JSON.stringify(['dashboard', 'token-quota', 'day', '2026-11-03'])
+          JSON.stringify(['dashboard', 'token-quota', 'day', pastDay])
       ),
       `date cache key missing, got ${JSON.stringify(keys)}`
     )
@@ -253,7 +256,7 @@ describe('TokenCharts selected-date mode wiring', () => {
   test('clicking a range preset clears the selected date', async () => {
     const changes: TokenChartsFilters[] = []
     const { host } = await renderTokenCharts(
-      baseFilters({ selectedRange: 1, selectedDate: '2026-11-03' }),
+      baseFilters({ selectedRange: 1, selectedDate: pastDay }),
       (next) => changes.push({ ...next })
     )
 
@@ -268,7 +271,7 @@ describe('TokenCharts selected-date mode wiring', () => {
   test('clearing the date returns to the previous preset', async () => {
     const changes: TokenChartsFilters[] = []
     const { host } = await renderTokenCharts(
-      baseFilters({ selectedRange: 14, selectedDate: '2026-11-03' }),
+      baseFilters({ selectedRange: 14, selectedDate: pastDay }),
       (next) => changes.push({ ...next })
     )
 
@@ -359,7 +362,7 @@ describe('TokenCharts selected-date mode wiring', () => {
   test('top limit and granularity stay inert in data terms while a date is selected', async () => {
     const changes: TokenChartsFilters[] = []
     const { host } = await renderTokenCharts(
-      baseFilters({ selectedDate: '2026-11-03' }),
+      baseFilters({ selectedDate: pastDay }),
       (next) => changes.push({ ...next })
     )
 
