@@ -244,44 +244,65 @@ describe('TopNChartsSection date filter', () => {
     assert.equal(isTabActive(tabTrigger(host, '1 Day')), true)
   })
 
-  test('selecting today from the calendar reports a yyyy-MM-dd string', async () => {
+  test('selecting a day from the calendar reports a yyyy-MM-dd string', async () => {
     const calls: (string | undefined)[] = []
+    // Navigate one month back, then pick the 15th: always a past date and
+    // always inside the displayed month grid, so the run date can never
+    // race the assertion across midnight. Set day 15 before subtracting
+    // the month so dayjs month-end overflow cannot shift the target.
+    const pickedDate = dayjs().date(15).subtract(1, 'month')
+    const pickedDay = pickedDate.format('YYYY-MM-DD')
     const { host } = await renderSection({
       onSelectedDateChange: (date) => calls.push(date),
     })
 
     await act(async () => datePickerTrigger(host)?.click())
 
-    const todayButton = [
-      ...document.querySelectorAll<HTMLButtonElement>('[role="grid"] button'),
-    ].find((el) => (el.getAttribute('aria-label') ?? '').startsWith('Today,'))
-    assert.ok(todayButton, 'today day button not rendered')
+    const previousButton = document.querySelector<HTMLButtonElement>(
+      'button.rdp-button_previous'
+    )
+    assert.ok(previousButton, 'previous-month navigation button not rendered')
+    await act(async () => previousButton.click())
 
-    await act(async () => todayButton.click())
+    // Same label source as the rendered calendar (date-fns PPPP, en-US).
+    const dayButton = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="grid"] button'),
+    ].find(
+      (el) =>
+        el.getAttribute('aria-label') === labelDayButton(pickedDate.toDate(), {}, { locale: enUS })
+    )
+    assert.ok(dayButton, `${pickedDay} day button not rendered`)
+
+    await act(async () => dayButton.click())
 
     assert.equal(calls.length, 1)
-    assert.equal(calls[0], dayjs().format('YYYY-MM-DD'))
+    assert.equal(calls[0], pickedDay)
   })
 
   test('future days in the calendar are disabled and report nothing', async () => {
     const calls: (string | undefined)[] = []
+    // Navigate one month forward, then pick the 1st: always a future date
+    // and always inside the displayed month grid. Set day 1 before adding
+    // the month so dayjs month-end overflow cannot shift the target.
+    const futureDate = dayjs().date(1).add(1, 'month')
     const { host } = await renderSection({
       onSelectedDateChange: (date) => calls.push(date),
     })
 
     await act(async () => datePickerTrigger(host)?.click())
 
-    // Tomorrow is always in the future. showOutsideDays keeps its button in
-    // the grid even when it falls in the next month. The label uses the same
-    // source as the rendered calendar (date-fns PPPP, en-US).
-    const tomorrowLabel = labelDayButton(
-      dayjs().add(1, 'day').toDate(),
-      {},
-      { locale: enUS }
+    const nextButton = document.querySelector<HTMLButtonElement>(
+      'button.rdp-button_next'
     )
+    assert.ok(nextButton, 'next-month navigation button not rendered')
+    await act(async () => nextButton.click())
+
+    // The label uses the same source as the rendered calendar
+    // (date-fns PPPP, en-US).
+    const futureLabel = labelDayButton(futureDate.toDate(), {}, { locale: enUS })
     const futureButton = [
       ...document.querySelectorAll<HTMLButtonElement>('[role="grid"] button'),
-    ].find((el) => el.getAttribute('aria-label') === tomorrowLabel)
+    ].find((el) => el.getAttribute('aria-label') === futureLabel)
     assert.ok(futureButton, 'future day button not rendered')
     assert.equal(futureButton.disabled, true)
 

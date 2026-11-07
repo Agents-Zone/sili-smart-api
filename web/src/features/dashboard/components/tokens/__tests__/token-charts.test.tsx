@@ -289,9 +289,10 @@ describe('TokenCharts selected-date mode wiring', () => {
 
   test('picking a historical date from the calendar enters day mode and requests that window', async () => {
     const changes: TokenChartsFilters[] = []
-    // Two days back is always a past date. showOutsideDays keeps its button
-    // in the grid even when it falls in the previous month.
-    const pickedDate = dayjs().subtract(2, 'day')
+    // Navigate one month back, then pick the 15th: always a past date and
+    // always inside the displayed month grid. Set day 15 before subtracting
+    // the month so dayjs month-end overflow cannot shift the target.
+    const pickedDate = dayjs().date(15).subtract(1, 'month')
     const pickedDay = pickedDate.format('YYYY-MM-DD')
     const before = new Date()
     const { host } = await renderTokenCharts(baseFilters(), (next) =>
@@ -309,6 +310,12 @@ describe('TokenCharts selected-date mode wiring', () => {
     const trigger = datePickerTrigger(host)
     assert.ok(trigger, 'date picker trigger not rendered')
     await act(async () => trigger.click())
+
+    const previousButton = document.querySelector<HTMLButtonElement>(
+      'button.rdp-button_previous'
+    )
+    assert.ok(previousButton, 'previous-month navigation button not rendered')
+    await act(async () => previousButton.click())
 
     const dayButton = [
       ...document.querySelectorAll<HTMLButtonElement>('[role="grid"] button'),
