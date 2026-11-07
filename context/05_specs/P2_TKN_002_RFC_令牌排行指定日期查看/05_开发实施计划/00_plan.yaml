@@ -1,0 +1,30 @@
+feature_id: "P2_TKN_002_RFC_令牌排行指定日期查看"
+spec_kind: "business"
+spec_kind_basis: "ID 类型段为 RFC，公共 kind 命令沿 base_on 解析到基线 P2_TKN_001_FEAT_令牌统计分析（业务 FEAT 规格），source=baseline"
+name: "令牌排行指定日期查看"
+created_at: "2026-11-06"
+finalized: false
+closeout_result: null
+
+design_inputs:
+  api:
+    status: "not_applicable"
+    path: "../03_api_interface.md"
+    basis: "规格 §1.2 业务目标4、§5 [无变化]：查询接口零改动，纯前端筛选扩展；03 已登记自然日窗口到 GET /api/data/tokens 既有 start_timestamp/end_timestamp 参数的复用映射，供计划与验收核对"
+  model:
+    status: "not_applicable"
+    path: "../04_model_interface.md"
+    basis: "规格 §6 [无变化] 只读统计无自有数据状态、§5 [无变化] 数据链路零改动：无 DDL/DML/索引/迁移需求"
+
+sub_plans:
+  - id: "01"
+    name: "指定日期筛选"
+    file: "01_指定日期筛选.md"
+    status: "completed"
+    input_files:
+      - "../01_功能需求规格说明书.md"
+      - "../03_api_interface.md"
+      - "../04_model_interface.md"
+
+execution_order:
+  - "01"

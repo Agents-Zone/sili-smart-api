@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "feature_id": "P2_TKN_002_RFC_令牌排行指定日期查看",
+  "subplans": {
+    "01": {
+      "base_sha": "b0c7a2e6aefa7fec67d4727be9d6a0dbfa10d979",
+      "plan_digest": "d2a17980d0ee5ed8dea0b97f30672259e3d6b9e00883d122c5bf5938e4abf394",
+      "input_digests": {
+        "../01_功能需求规格说明书.md": "ffb11de4ca71e82ca3d9c0356d3106fbd331067df2b481ea8cea08c2729e8efc",
+        "../03_api_interface.md": "a4cbc3707f5381dd0a6705f1d29ca658f0dda162b588ff91fe68c1ec73c3dfbf",
+        "../04_model_interface.md": "47c034a6527f587cc6702cfaef9e16474fe5b397733b7b7de054229352ee9cb6"
+      },
+      "tasks": {
+        "T1": {
+          "key": "P2_TKN_002_RFC_令牌排行指定日期查看/01/T1",
+          "status": "verified",
+          "base_sha": "b0c7a2e6aefa7fec67d4727be9d6a0dbfa10d979",
+          "head_sha": "0988b04161cf77947eaaf63226178f0d95cf90b3",
+          "verification": {
+            "path": "execution-evidence/01_T1_0988b04161cf77947eaaf63226178f0d95cf90b3.md",
+            "digest": "12d7dfdecdc343e0c2cfffc8b9e9b3914b6f2ef66a4212eeeec7431f3de38bd4",
+            "head_sha": "0988b04161cf77947eaaf63226178f0d95cf90b3",
+            "recorded_at": "2026-11-07T05:44:50Z",
+            "deferred_reason": null
+          }
+        },
+        "T2": {
+          "key": "P2_TKN_002_RFC_令牌排行指定日期查看/01/T2",
+          "status": "verified",
+          "base_sha": "0988b04161cf77947eaaf63226178f0d95cf90b3",
+          "head_sha": "b8aee0f4da54e135e51ed4f0e08eda819b3d2f9f",
+          "verification": {
+            "path": "execution-evidence/01_T2_b8aee0f4da54e135e51ed4f0e08eda819b3d2f9f.md",
+            "digest": "4d7d4c9b9fdccd072ad3cf55b6a9b87271055778103435a2420eff09a345113a",
+            "head_sha": "b8aee0f4da54e135e51ed4f0e08eda819b3d2f9f",
+            "recorded_at": "2026-11-07T05:49:58Z",
+            "deferred_reason": null
+          }
+        },
+        "T3": {
+          "key": "P2_TKN_002_RFC_令牌排行指定日期查看/01/T3",
+          "status": "verified",
+          "base_sha": "b8aee0f4da54e135e51ed4f0e08eda819b3d2f9f",
+          "head_sha": "1e40d9517a9c8a2356c380f06a753d877b7bea48",
+          "verification": {
+            "path": "execution-evidence/01_T3T4_fix2_1e40d9517a9c8a2356c380f06a753d877b7bea48.md",
+            "digest": "8673a70ba805b8baff9cbd71a1a2d6a8088a03173c34b11134f1311aec762448",
+            "head_sha": "1e40d9517a9c8a2356c380f06a753d877b7bea48",
+            "recorded_at": "2026-11-07T06:50:39Z",
+            "deferred_reason": null
+          }
+        },
+        "T4": {
+          "key": "P2_TKN_002_RFC_令牌排行指定日期查看/01/T4",
+          "status": "verified",
+          "base_sha": "93bbc7962167020144915cb326cd5933aa8fb433",
+          "head_sha": "1e40d9517a9c8a2356c380f06a753d877b7bea48",
+          "verification": {
+            "path": "execution-evidence/01_T3T4_fix2_1e40d9517a9c8a2356c380f06a753d877b7bea48.md",
+            "digest": "8673a70ba805b8baff9cbd71a1a2d6a8088a03173c34b11134f1311aec762448",
+            "head_sha": "1e40d9517a9c8a2356c380f06a753d877b7bea48",
+            "recorded_at": "2026-11-07T06:50:39Z",
+            "deferred_reason": null
+          }
+        }
+      },
+      "review": {
+        "path": "execution-evidence/01_review3_pass_1e40d9517a9c8a2356c380f06a753d877b7bea48.md",
+        "digest": "12ceca983dfc92508c92efc2aec788ed1286089d59332c632077bc7a0429ba2b",
+        "head_sha": "1e40d9517a9c8a2356c380f06a753d877b7bea48",
+        "base_sha": "b0c7a2e6aefa7fec67d4727be9d6a0dbfa10d979",
+        "passed": true,
+        "recorded_at": "2026-11-07T06:55:03Z"
+      },
+      "review_failures": 2
+    }
+  },
+  "updated_at": "2026-11-07T06:55:03Z"
+}
