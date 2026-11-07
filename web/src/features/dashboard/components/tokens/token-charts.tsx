@@ -28,7 +28,11 @@ import {
   saveGranularity,
   processTokenChartData,
 } from '@/features/dashboard/lib'
-import { useTopNTimeRange } from '@/features/dashboard/lib/use-topn-time-range'
+import {
+  buildDayHourPoints,
+  resolveDayWindow,
+  useTopNTimeRange,
+} from '@/features/dashboard/lib/use-topn-time-range'
 import type { TopNChartsFilters } from '@/features/dashboard/types'
 import { formatDate, type TimeGranularity } from '@/lib/time'
 
@@ -64,14 +68,42 @@ export function TokenCharts(props: TokenChartsProps) {
   const topTokenLimit = props.filters.topLimit
   const onFiltersChange = props.onFiltersChange
 
-  const timeRange = useTopNTimeRange(selectedRange)
-  const rangeLabel = `${formatDate(timeRange.start_timestamp)} ~ ${formatDate(
-    timeRange.end_timestamp
-  )}`
+  // Specific-date mode wins when a valid yyyy-MM-dd is set; a malformed
+  // string resolves to null and falls back to the rolling preset.
+  const selectedDate = props.filters.selectedDate
+  const dayWindow = selectedDate ? resolveDayWindow(selectedDate) : null
+  const dayModeActive = dayWindow !== null
+
+  const rollingRange = useTopNTimeRange(selectedRange)
+  const timeRange = dayWindow ?? rollingRange
+  const rangeLabel =
+    selectedDate && dayModeActive
+      ? selectedDate
+      : `${formatDate(rollingRange.start_timestamp)} ~ ${formatDate(
+          rollingRange.end_timestamp
+        )}`
+
+  // Day mode pins the trend to hourly buckets; the saved granularity
+  // preference is untouched and restored once the date is cleared.
+  const trendGranularity: TimeGranularity = dayModeActive
+    ? 'hour'
+    : timeGranularity
+  const timePoints = useMemo(
+    () =>
+      selectedDate && dayModeActive ? buildDayHourPoints(selectedDate) : undefined,
+    [selectedDate, dayModeActive]
+  )
 
   const handleRangeChange = useCallback(
     (days: number) => {
-      onFiltersChange({ ...props.filters, selectedRange: days })
+      onFiltersChange({ ...props.filters, selectedRange: days, selectedDate: undefined })
+    },
+    [onFiltersChange, props.filters]
+  )
+
+  const handleSelectedDateChange = useCallback(
+    (date: string | undefined) => {
+      onFiltersChange({ ...props.filters, selectedDate: date })
     },
     [onFiltersChange, props.filters]
   )
@@ -96,7 +128,12 @@ export function TokenCharts(props: TokenChartsProps) {
   )
 
   const { data: tokenData, isLoading } = useQuery({
-    queryKey: ['dashboard', 'token-quota', timeRange],
+    // Day mode keys on the picked date; today's shifting end stays out of the
+    // key so the 60s staleTime refetch picks up the newer window.
+    queryKey:
+      selectedDate && dayModeActive
+        ? ['dashboard', 'token-quota', 'day', selectedDate]
+        : ['dashboard', 'token-quota', timeRange],
     queryFn: () => getTokenQuotaDataByTokens(timeRange),
     select: (res) => (res.success ? (res.data ?? []) : []),
     staleTime: 60_000,
@@ -106,12 +143,13 @@ export function TokenCharts(props: TokenChartsProps) {
     () =>
       processTokenChartData(
         isLoading ? [] : (tokenData ?? []),
-        timeGranularity,
+        trendGranularity,
         t,
         topTokenLimit,
-        rangeLabel
+        rangeLabel,
+        timePoints
       ),
-    [tokenData, isLoading, timeGranularity, t, topTokenLimit, rangeLabel]
+    [tokenData, isLoading, trendGranularity, t, topTokenLimit, rangeLabel, timePoints]
   )
 
   return (
@@ -135,6 +173,10 @@ export function TokenCharts(props: TokenChartsProps) {
       onRangeChange={handleRangeChange}
       onGranularityChange={handleGranularityChange}
       onTopLimitChange={handleTopTokenLimitChange}
+      selectedDate={props.filters.selectedDate}
+      onSelectedDateChange={handleSelectedDateChange}
+      granularityDisabled={dayModeActive}
+      granularityDisabledTitleKey='Displayed by hour when a specific date is selected'
     />
   )
 }

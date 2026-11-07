@@ -1432,6 +1432,7 @@
     "Display name shown to users.": "Отображаемое название для пользователей.",
     "Display Options": "Параметры отображения",
     "Display Token Statistics": "Показать статистику токенов",
+    "Displayed by hour when a specific date is selected": "При выборе конкретной даты — отображение по часам",
     "Displayed in": "Отображается в",
     "Displays the mobile sidebar.": "Отображает мобильную боковую панель.",
     "Do not over-trust this feature. IP may be spoofed. Please use with nginx, CDN and other gateways.": "Не доверяйте этой функции слишком сильно. IP может быть подделан. Используйте с nginx, CDN и другими шлюзами.",

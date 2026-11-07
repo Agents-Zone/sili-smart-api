@@ -1432,6 +1432,7 @@
     "Display name shown to users.": "Tên hiển thị cho người dùng.",
     "Display Options": "Tùy chọn hiển thị",
     "Display Token Statistics": "Hiển thị Thống kê Token",
+    "Displayed by hour when a specific date is selected": "Hiển thị theo giờ khi chọn một ngày cụ thể",
     "Displayed in": "Hiển thị theo",
     "Displays the mobile sidebar.": "Hiển thị thanh bên di động.",
     "Do not over-trust this feature. IP may be spoofed. Please use with nginx, CDN and other gateways.": "Đừng tin tưởng quá mức vào tính năng này. IP có thể bị giả mạo. Hãy sử dụng cùng với nginx, CDN và các gateway khác.",

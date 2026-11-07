@@ -1432,6 +1432,7 @@
     "Display name shown to users.": "顯示給用戶的名稱。",
     "Display Options": "顯示選項",
     "Display Token Statistics": "顯示 Token 統計資訊",
+    "Displayed by hour when a specific date is selected": "指定日期時按小時展示",
     "Displayed in": "顯示單位",
     "Displays the mobile sidebar.": "顯示流動側邊欄。",
     "Do not over-trust this feature. IP may be spoofed. Please use with nginx, CDN and other gateways.": "請勿過度信任此功能，IP 可能被偽造，請配合 nginx 和 cdn 等閘道使用",

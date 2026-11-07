@@ -209,6 +209,9 @@ export interface TopNChartsFilters {
   timeGranularity: TimeGranularity
   selectedRange: number
   topLimit: number
+  // Token-chart specific-date mode: a yyyy-MM-dd natural day. Undefined keeps
+  // the rolling preset active; the users tab ignores this field.
+  selectedDate?: string
 }
 
 // ============================================================================

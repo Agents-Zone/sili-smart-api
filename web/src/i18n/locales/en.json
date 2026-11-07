@@ -1432,6 +1432,7 @@
     "Display name shown to users.": "Display name shown to users.",
     "Display Options": "Display Options",
     "Display Token Statistics": "Display Token Statistics",
+    "Displayed by hour when a specific date is selected": "Displayed by hour when a specific date is selected",
     "Displayed in": "Displayed in",
     "Displays the mobile sidebar.": "Displays the mobile sidebar.",
     "Do not over-trust this feature. IP may be spoofed. Please use with nginx, CDN and other gateways.": "Do not over-trust this feature. IP may be spoofed. Please use with nginx, CDN and other gateways.",

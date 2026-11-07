@@ -1432,6 +1432,7 @@
     "Display name shown to users.": "Nom d'affichage affiché aux utilisateurs.",
     "Display Options": "Options d'affichage",
     "Display Token Statistics": "Afficher les statistiques des jetons",
+    "Displayed by hour when a specific date is selected": "Affichage par heure lorsqu'une date précise est sélectionnée",
     "Displayed in": "Affiché en",
     "Displays the mobile sidebar.": "Affiche la barre latérale mobile.",
     "Do not over-trust this feature. IP may be spoofed. Please use with nginx, CDN and other gateways.": "Ne faites pas trop confiance à cette fonctionnalité. L'IP peut être usurpée. Veuillez l'utiliser avec nginx, CDN et autres passerelles.",
