@@ -719,7 +719,8 @@ export function processTokenChartData(
   timeGranularity: TimeGranularity = 'day',
   t?: TFunction,
   limit = 10,
-  rangeLabel?: string
+  rangeLabel?: string,
+  timePoints?: readonly string[]
 ): ProcessedTokenChartData {
   const tt: TFunction = t ?? ((x) => x)
 
@@ -746,5 +747,12 @@ export function processTokenChartData(
       value: Number(item.token_used) || 0,
     }
   })
-  return buildTokenChartSpecs(records, timeGranularity, tt, limit, rangeLabel)
+  return buildTokenChartSpecs(
+    records,
+    timeGranularity,
+    tt,
+    limit,
+    rangeLabel,
+    timePoints
+  )
 }

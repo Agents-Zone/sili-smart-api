@@ -54,6 +54,9 @@ interface TopNChartOptions {
   t: TFn
   // Queried date range shown in the chart subtext, e.g. '2026-10-07 ~ 2026-11-05'
   rangeLabel?: string
+  // Explicit sorted trend x-axis time point labels; replaces the points
+  // collected from data, used for the fixed 24-hour axis of a selected day.
+  timePoints?: readonly string[]
   // Metric display formatting shared by labels, axes, tooltips and totals.
   formatValue: (raw: number) => string
 }
@@ -184,7 +187,12 @@ export function buildTopNChartSpecs(
     )
   })
 
-  const sortedTimePoints = [...allTimePoints].sort()
+  // Explicit points replace the data-derived axis; records outside the
+  // explicit list are defensive leftovers (the API filters by window).
+  const sortedTimePoints =
+    options.timePoints && options.timePoints.length > 0
+      ? [...options.timePoints].sort()
+      : [...allTimePoints].sort()
   const trendValues = sortedTimePoints.flatMap((time) =>
     topIds.map((id) => {
       const v = timeSeriesMap.get(time)?.get(id) || 0
@@ -377,7 +385,8 @@ export function buildTokenChartSpecs(
   timeGranularity: TimeGranularity,
   t: TFn,
   limit: number,
-  rangeLabel?: string
+  rangeLabel?: string,
+  timePoints?: readonly string[]
 ): ProcessedTokenChartData {
   const { rank, trend, rankBarCount } = buildTopNChartSpecs(
     records,
@@ -390,6 +399,7 @@ export function buildTokenChartSpecs(
       limit,
       t,
       rangeLabel,
+      timePoints,
       formatValue: formatTokensInM,
     }
   )

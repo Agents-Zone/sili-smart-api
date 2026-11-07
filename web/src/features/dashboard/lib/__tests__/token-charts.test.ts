@@ -19,10 +19,12 @@ For commercial licensing, please contact support@quantumnous.com
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
+import dayjs from '@/lib/dayjs'
 import { formatChartTime } from '@/lib/time'
 
 import type { TokenQuotaDataItem } from '../../types'
 import { processTokenChartData, resolveTokenLabel } from '../charts'
+import { buildDayHourPoints } from '../use-topn-time-range'
 
 const t = (k: string) => k
 const DAY = 86400
@@ -240,5 +242,116 @@ describe('processTokenChartData empty state', () => {
       spec_token_trend.title.subtext,
       '2026-10-07 ~ 2026-11-05 · No data available'
     )
+  })
+})
+
+describe('processTokenChartData explicit time points', () => {
+  const at = (datetime: string) => dayjs(datetime).unix()
+  const hourPoints = buildDayHourPoints('2026-11-03')
+
+  test('explicit hour axis pads the day to 24 points with zeros', () => {
+    const rows = [item(11, 'A', at('2026-11-03 10:00:00'), 100)]
+    const { spec_token_trend } = processTokenChartData(
+      rows,
+      'hour',
+      t,
+      2,
+      undefined,
+      hourPoints
+    )
+    const values = spec_token_trend.data[0].values
+    assert.equal(values.length, 24)
+    assert.equal(
+      values.find(
+        (v: { Token: string; Time: string }) =>
+          v.Token === 'A' && v.Time === '11-03 10:00'
+      )?.value,
+      100
+    )
+    assert.equal(
+      values.find(
+        (v: { Token: string; Time: string }) =>
+          v.Token === 'A' && v.Time === '11-03 00:00'
+      )?.value,
+      0
+    )
+  })
+
+  test('each top series covers all 24 explicit points', () => {
+    const rows = [
+      item(11, 'A', at('2026-11-03 10:00:00'), 100),
+      item(22, 'B', at('2026-11-03 10:00:00'), 50),
+    ]
+    const { spec_token_trend } = processTokenChartData(
+      rows,
+      'hour',
+      t,
+      2,
+      undefined,
+      hourPoints
+    )
+    const values = spec_token_trend.data[0].values
+    assert.equal(values.length, 48)
+    assert.equal(
+      values.find(
+        (v: { Token: string; Time: string }) =>
+          v.Token === 'B' && v.Time === '11-03 10:00'
+      )?.value,
+      50
+    )
+  })
+
+  test('data time points outside the explicit list are dropped', () => {
+    const rows = [
+      item(11, 'A', at('2026-11-03 10:00:00'), 100),
+      item(11, 'A', at('2026-11-04 10:00:00'), 70),
+    ]
+    const { spec_token_trend } = processTokenChartData(
+      rows,
+      'hour',
+      t,
+      2,
+      undefined,
+      hourPoints
+    )
+    const values = spec_token_trend.data[0].values
+    assert.equal(values.length, 24)
+    assert.ok(
+      !values.some((v: { Time: string }) => v.Time === '11-04 10:00')
+    )
+  })
+
+  test('empty timePoints array falls back to data-derived points', () => {
+    const rows = [item(11, 'A', at('2026-11-03 10:00:00'), 100)]
+    const { spec_token_trend } = processTokenChartData(
+      rows,
+      'hour',
+      t,
+      2,
+      undefined,
+      []
+    )
+    assert.equal(spec_token_trend.data[0].values.length, 1)
+  })
+
+  test('empty records still render the empty state with timePoints', () => {
+    const { spec_token_trend } = processTokenChartData(
+      [],
+      'hour',
+      t,
+      2,
+      undefined,
+      hourPoints
+    )
+    assert.equal(spec_token_trend.data[0].values.length, 0)
+    assert.equal(spec_token_trend.title.subtext, 'No data available')
+  })
+
+  test('without timePoints trend points come only from records', () => {
+    const rows = [item(11, 'A', at('2026-11-03 10:00:00'), 100)]
+    const { spec_token_trend } = processTokenChartData(rows, 'hour', t)
+    const values = spec_token_trend.data[0].values
+    assert.equal(values.length, 1)
+    assert.equal(values[0].Time, '11-03 10:00')
   })
 })
