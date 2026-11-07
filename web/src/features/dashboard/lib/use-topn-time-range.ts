@@ -18,7 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useMemo } from 'react'
 
-import { getRollingDateRange } from '@/lib/time'
+import dayjs from '@/lib/dayjs'
+import { formatChartTime, getRollingDateRange } from '@/lib/time'
 
 /**
  * Rolling unix-seconds window derived from the selected range preset.
@@ -31,4 +32,66 @@ export function useTopNTimeRange(selectedRange: number) {
       end_timestamp: Math.floor(end.getTime() / 1000),
     }
   }, [selectedRange])
+}
+
+const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
+
+/**
+ * Parse a yyyy-MM-dd selection as a local-midnight dayjs instance.
+ * Null when malformed, calendar-overflowing, or later than today.
+ */
+function parseSelectedDate(
+  selectedDate: string,
+  now: Date
+): ReturnType<typeof dayjs> | null {
+  if (!DATE_ONLY_PATTERN.test(selectedDate)) {
+    return null
+  }
+  const parsed = dayjs(selectedDate)
+  if (parsed.format('YYYY-MM-DD') !== selectedDate) {
+    return null
+  }
+  if (parsed.startOf('day').isAfter(dayjs(now).startOf('day'))) {
+    return null
+  }
+  return parsed
+}
+
+/**
+ * Natural-day window for the selected date: a historical day spans
+ * 00:00:00~23:59:59 local time, today spans 00:00:00 through `now`.
+ */
+export function resolveDayWindow(
+  selectedDate: string,
+  now: Date = new Date()
+): { start_timestamp: number; end_timestamp: number } | null {
+  const parsed = parseSelectedDate(selectedDate, now)
+  if (!parsed) {
+    return null
+  }
+  const start = parsed.startOf('day')
+  if (start.isSame(dayjs(now).startOf('day'))) {
+    return {
+      start_timestamp: start.unix(),
+      end_timestamp: Math.floor(now.getTime() / 1000),
+    }
+  }
+  return {
+    start_timestamp: start.unix(),
+    end_timestamp: parsed.endOf('day').unix(),
+  }
+}
+
+/**
+ * 24 hourly axis labels (MM-DD HH:00) for the selected natural day.
+ */
+export function buildDayHourPoints(selectedDate: string): string[] {
+  const parsed = parseSelectedDate(selectedDate, new Date())
+  if (!parsed) {
+    return []
+  }
+  const startSec = parsed.startOf('day').unix()
+  return Array.from({ length: 24 }, (_, hour) =>
+    formatChartTime(startSec + hour * 3600, 'hour')
+  )
 }
